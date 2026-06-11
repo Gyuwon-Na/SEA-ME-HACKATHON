@@ -8,10 +8,12 @@
 
 ## 1 ) 부품 리스트
 D-Racer 키트를 구성하는 부품 리스트와 실물 이미지는 table 1, Figure 1과 같습니다.  
-[table 1 첨부]
-<p align="center">  
-  ![Figure 1. Kit Components](https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/1/figure1-kit-components.png)
-</p>  
+
+<figure align="center">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/1/figure1-kit-components.png" alt="Figure 1. Kit Components">
+  <figcaption>Figure 1. Kit Components</figcaption>
+</figure>
+
 
 D-Racer의 메인 보드인 D3-G의 사양(Specification)은 아래 table 2와 같습니다.  
 <table2 첨부>

@@ -11,7 +11,7 @@ D-Racer 키트를 구성하는 부품 리스트와 실물 이미지는 table 1, 
 
 <figure align="center">
   <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/1/figure1-kit-components.png" alt="Figure 1. Kit Components">
-  <figcaption>Figure 1. Kit Components</figcaption>
+  <figcaption align="center">Figure 1. Kit Components</figcaption>
 </figure>
 
 

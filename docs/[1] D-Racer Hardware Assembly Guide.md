@@ -7,7 +7,37 @@
 <br>
 
 ## 1 ) 부품 리스트
-D-Racer 키트를 구성하는 부품 리스트와 실물 이미지는 table 1, Figure 1과 같습니다.  
+D-Racer 키트를 구성하는 부품 리스트와 실물 이미지는 Table 1, Figure 1과 같습니다.  
+
+<p align="center">
+  <b>Table 1. Components List</b>
+</p>
+
+<table align="center">
+  <thead>
+    <tr>
+      <th>No.</th>
+      <th>Component</th>
+      <th>No.</th>
+      <th>Component</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td align="center">1</td><td>D3-G (8GB/32GB)</td><td align="center">12</td><td>WiFi Dongle</td></tr>
+    <tr><td align="center">2</td><td>Battery Module Board (*Waveshare)</td><td align="center">13</td><td>USB Camera</td></tr>
+    <tr><td align="center">3</td><td>D3-G Board Plate</td><td align="center">14</td><td>Camera Support Bolt</td></tr>
+    <tr><td align="center">4</td><td>I2C Interface Board</td><td align="center">15</td><td>Jumper Wire (Female-Female)</td></tr>
+    <tr><td align="center">5</td><td>Front Support</td><td align="center">16</td><td>M3.0 Bolt (Length: 60mm)</td></tr>
+    <tr><td align="center">6</td><td>USB-Hub Box</td><td align="center">17</td><td>M2.5 Bolt (Length: 55mm)</td></tr>
+    <tr><td align="center">7</td><td>Rear Support</td><td align="center">18</td><td>M2.5 Bolt (Length: 25mm)</td></tr>
+    <tr><td align="center">8</td><td>Nylon Support (*Waveshare)</td><td align="center">19</td><td>M2.5 Bolt (Length: 3mm)</td></tr>
+    <tr><td align="center">9</td><td>Power Adaptor (*Waveshare)</td><td align="center">20</td><td>18650 Battery</td></tr>
+    <tr><td align="center">10</td><td>Power Plug</td><td align="center">21</td><td>Vehicle Chassis (*Waveshare)</td></tr>
+    <tr><td align="center">11</td><td>USB-Hub</td><td align="center">22</td><td>Joystick (*Waveshare)</td></tr>
+  </tbody>
+</table>
+
+<br>
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/1/figure1-kit-components.png" alt="Kit Components">
@@ -17,7 +47,107 @@ D-Racer 키트를 구성하는 부품 리스트와 실물 이미지는 table 1, 
 
 
 D-Racer의 메인 보드인 D3-G의 사양(Specification)은 아래 table 2와 같습니다.  
-<table2 첨부>
+
+<p align="center">
+  <b>Table 2. D3-G Specifications</b>
+</p>
+
+<table align="center">
+  <thead>
+    <tr>
+      <th colspan="2">Function</th>
+      <th>Specification</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td rowspan="5" align="center">SoC<br>(TCC8051)</td>
+      <td align="center">Main Core</td>
+      <td align="center">Cortex-A72 Quad @1.69GHz, 31,840 DMIPS</td>
+    </tr>
+    <tr>
+      <td align="center">Sub-Core</td>
+      <td align="center">Cortex-A53 Quad @1.45GHz, 13,340 DMIPS</td>
+    </tr>
+    <tr>
+      <td align="center">Total DMIPS</td>
+      <td align="center">45,180 DMIPS</td>
+    </tr>
+    <tr>
+      <td align="center">MCU Core</td>
+      <td align="center">Cortex-R5f @ 600MHz</td>
+    </tr>
+    <tr>
+      <td align="center">GPU</td>
+      <td align="center">PowerVR 9XTP GT9524, 168GFLOPS, OpenGL ES 3.0</td>
+    </tr>
+    <tr>
+      <td align="center">RAM</td>
+      <td align="center">LPDDR4X</td>
+      <td align="center"><b>Option(1)</b> LPDDR4x 4GB, <b>Option(2)</b> LPDDR4x 8GB</td>
+    </tr>
+    <tr>
+      <td rowspan="3" align="center">Storage</td>
+      <td align="center">SNOR(NC)</td>
+      <td align="center">Quad SPI,100MHz / 4MB (Automotive Boot Mode)</td>
+    </tr>
+    <tr>
+      <td align="center">eMMC</td>
+      <td align="center">MLC 32GB</td>
+    </tr>
+    <tr>
+      <td align="center">Micro SD Card</td>
+      <td align="center">Micro SD Card Socket</td>
+    </tr>
+    <tr>
+      <td align="center">Display</td>
+      <td align="center">DP</td>
+      <td align="center">DP 1.4, 4-Lane (8.1 Gbps/lane)<br>Up to 4-Display - DP MST(Multi Stream Transport)</td>
+    </tr>
+    <tr>
+      <td align="center">Camera</td>
+      <td align="center">MIPI-CSI</td>
+      <td align="center">MIPI CSI 2-Lane x2 (15pin)<br>Option: MIPI CSI 4-Lane by connector swap</td>
+    </tr>
+    <tr>
+      <td colspan="2" align="center">USB</td>
+      <td align="center">USB 3.0 Host (Type A), USB 2.0 Host(Type A), USB 2.0 Device(Type C)</td>
+    </tr>
+    <tr>
+      <td colspan="2" align="center">PCIe</td>
+      <td align="center">1 x PCIe 3.0 (1-Lane)</td>
+    </tr>
+    <tr>
+      <td colspan="2" align="center">Ethernet</td>
+      <td align="center">1 Gbps Legacy Ethernet</td>
+    </tr>
+    <tr>
+      <td colspan="2" align="center">General Function Interface</td>
+      <td align="center">2.54 mm pitch 40 pin (2x20) Header<br>(I2C, SPI, UART, I2S, MI2S, PWM, GPIOs)</td>
+    </tr>
+    <tr>
+      <td colspan="2" align="center">CAN</td>
+      <td align="center">2.54 mm pitch 10pin (2x5) Header,<br>3ch CAN w/ Transceiver Sub Board</td>
+    </tr>
+    <tr>
+      <td colspan="2" align="center">Debug</td>
+      <td align="center">2.54 mm pitch 8Pin (1x8) Header<br>Cortex UART Debug x 3ch</td>
+    </tr>
+    <tr>
+      <td colspan="2" align="center">Switches</td>
+      <td align="center">Tact switch for Reset,<br>Tact switch for Boot mode</td>
+    </tr>
+    <tr>
+      <td colspan="2" align="center">Power</td>
+      <td align="center">(Recommendation) 5V@5A</td>
+    </tr>
+    <tr>
+      <td colspan="2" align="center">PCB</td>
+      <td align="center">90mm * 120mm</td>
+    </tr>
+  </tbody>
+</table>
+
 <br>
 
 ## 2 ) 조립 가이드

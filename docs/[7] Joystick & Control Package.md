@@ -42,8 +42,11 @@
 ### 2-2. Control Node 역할
 
 - `Joystick` 또는 `Control` 토픽 중 하나를 선택해 사용
-- 최종 steering/throttle 명령을 `D3Racer`(PCA9685 기반)로 출력
+- 최종 steering/throttle 명령을 `DRacer`(PCA9685 기반)로 출력
 - E-STOP 수신 시 throttle 강제 0
+- Steering Calibration 모드 
+  - Y button : Left 방향으로 정렬
+  - B button : Right 방향으로 정렬
 
 <br>
 

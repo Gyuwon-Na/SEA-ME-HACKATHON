@@ -31,6 +31,39 @@ class FakeGraphNode:
         return subscribers.get(topic_name, [])
 
 
+class FakeUnsortedGraphNode:
+    def get_node_names(self):
+        return ['camera_node', 'zed_node', 'battery_node']
+
+    def get_topic_names_and_types(self):
+        return [
+            ('/camera/older', ['sensor_msgs/msg/CompressedImage']),
+            ('/zed/status', ['std_msgs/msg/String']),
+            ('/camera/newer', ['sensor_msgs/msg/CompressedImage']),
+            ('/battery/state', ['std_msgs/msg/String']),
+        ]
+
+    def get_publishers_info_by_topic(self, topic_name):
+        publishers = {
+            '/camera/older': [
+                SimpleNamespace(node_name='camera_node', node_namespace='/'),
+            ],
+            '/camera/newer': [
+                SimpleNamespace(node_name='camera_node', node_namespace='/'),
+            ],
+            '/zed/status': [
+                SimpleNamespace(node_name='zed_node', node_namespace='/'),
+            ],
+            '/battery/state': [
+                SimpleNamespace(node_name='battery_node', node_namespace='/'),
+            ],
+        }
+        return publishers.get(topic_name, [])
+
+    def get_subscriptions_info_by_topic(self, _topic_name):
+        return []
+
+
 class FakeState:
     def snapshot(self):
         return {
@@ -114,6 +147,18 @@ def test_build_graph_snapshot_returns_nodes_topics_and_edges():
         'topic': '/camera/image/compressed',
         'direction': 'subscribes',
     } in graph['edges']
+
+
+
+def test_build_graph_snapshot_orders_edges_by_left_name_then_original_order():
+    graph = build_graph_snapshot(FakeUnsortedGraphNode())
+
+    assert [edge['topic'] for edge in graph['edges']] == [
+        '/battery/state',
+        '/camera/older',
+        '/camera/newer',
+        '/zed/status',
+    ]
 
 
 def test_flask_graph_endpoint_returns_current_graph():

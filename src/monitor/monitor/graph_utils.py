@@ -16,7 +16,7 @@ def build_graph_snapshot(node):
         normalize_node_name(name)
         for name in node.get_node_names()
     })
-    topic_info = sorted(node.get_topic_names_and_types(), key=lambda item: item[0])
+    topic_info = list(node.get_topic_names_and_types())
 
     graph_nodes = [
         {
@@ -78,6 +78,11 @@ def build_graph_snapshot(node):
                 'topic': topic_name,
                 'direction': 'subscribes',
             })
+
+    label_by_id = {item['id']: item['label'] for item in graph_nodes}
+    graph_edges.sort(
+        key=lambda edge: label_by_id.get(edge['source'], '').lstrip('/').lower()
+    )
 
     return {
         'updated_at': datetime.now(timezone.utc).isoformat(),

@@ -181,12 +181,36 @@
             </div>
           </dl>
         </article>
+
+        <article class="status-card graph-card is-waiting" id="graph-card">
+          <div class="status-card__header">
+            <div>
+              <p class="status-card__label">ROS Graph</p>
+              <p class="status-card__subtitle">실시간 노드/토픽 연결</p>
+            </div>
+            <span class="status-chip" id="graph-chip">WAITING</span>
+          </div>
+
+          <div class="ros-graph" id="ros-graph-canvas" aria-live="polite"></div>
+
+          <dl class="status-meta">
+            <div class="status-meta__row">
+              <dt>Updated</dt>
+              <dd id="graph-updated">Waiting for graph</dd>
+            </div>
+            <div class="status-meta__row">
+              <dt>Entities</dt>
+              <dd id="graph-summary">0 nodes / 0 edges</dd>
+            </div>
+          </dl>
+        </article>
       </section>
     </main>
 
     <script>
       window.MONITOR_CONFIG = {
         statusEndpoint: {{ url_for('api_status')|tojson }},
+        graphEndpoint: {{ url_for('api_graph')|tojson }},
         frameEndpoint: {{ url_for('api_frame')|tojson }},
         debugFrameGrayscaleEndpoint: {{ url_for('api_frame_grayscale')|tojson }},
         debugFrameBlurEndpoint: {{ url_for('api_frame_blur')|tojson }},

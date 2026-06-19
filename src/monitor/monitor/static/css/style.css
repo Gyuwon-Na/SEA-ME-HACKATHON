@@ -154,7 +154,8 @@ code {
   grid-template-columns: minmax(0, 1.55fr) minmax(320px, 0.85fr);
   grid-template-areas:
     "image battery"
-    "control storage";
+    "control storage"
+    "graph graph";
   gap: 14px;
   align-items: start;
 }
@@ -183,6 +184,10 @@ code {
 
 .storage-card {
   grid-area: storage;
+}
+
+.graph-card {
+  grid-area: graph;
 }
 
 .status-card__header {
@@ -437,6 +442,107 @@ code {
   font-weight: 600;
 }
 
+
+.ros-graph {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+  overflow-x: auto;
+}
+
+.ros-graph__row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(180px, 1.2fr) minmax(160px, 1fr);
+  gap: 14px;
+  align-items: center;
+  min-width: 680px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 18px;
+  background: rgba(30, 30, 30, 0.62);
+}
+
+.ros-graph__column {
+  min-width: 0;
+}
+
+.ros-graph__edge {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+}
+
+.ros-graph__edge::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: rgba(86, 156, 214, 0.55);
+}
+
+.ros-graph__edge::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  width: 10px;
+  height: 10px;
+  border-top: 2px solid rgba(86, 156, 214, 0.8);
+  border-right: 2px solid rgba(86, 156, 214, 0.8);
+  transform: rotate(45deg);
+}
+
+.ros-graph__edge-label {
+  position: relative;
+  z-index: 1;
+  max-width: 100%;
+  padding: 5px 9px;
+  overflow: hidden;
+  border-radius: 999px;
+  color: var(--text-strong);
+  background: var(--surface-strong);
+  font-family: "IBM Plex Mono", "D2Coding", monospace;
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ros-graph__node-card {
+  display: block;
+  padding: 9px 11px;
+  overflow: hidden;
+  border: 1px solid rgba(78, 201, 176, 0.28);
+  border-radius: 14px;
+  color: #d9fff3;
+  background: rgba(78, 201, 176, 0.12);
+  font-family: "IBM Plex Mono", "D2Coding", monospace;
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ros-graph__node-card--target {
+  border-color: rgba(86, 156, 214, 0.3);
+  color: #d7ecff;
+  background: rgba(86, 156, 214, 0.12);
+}
+
+.ros-graph__node-card--placeholder,
+.ros-graph__placeholder {
+  color: var(--text-muted);
+}
+
+.ros-graph__placeholder {
+  margin: 0;
+  padding: 14px;
+  border: 1px dashed rgba(157, 161, 166, 0.3);
+  border-radius: 16px;
+  text-align: center;
+}
+
 .status-card.is-good .status-chip {
   color: var(--state-good);
   background: rgba(78, 201, 176, 0.2);
@@ -483,7 +589,8 @@ code {
       "image"
       "battery"
       "control"
-      "storage";
+      "storage"
+      "graph";
   }
 
   .image-stage {

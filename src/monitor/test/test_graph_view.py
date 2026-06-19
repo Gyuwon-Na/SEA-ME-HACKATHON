@@ -1,4 +1,7 @@
+import json
 from pathlib import Path
+import shutil
+import subprocess
 from types import SimpleNamespace
 
 from monitor.flask_app_factory import create_app
@@ -96,6 +99,60 @@ def read_monitor_static_asset(*path_parts):
 
     raise FileNotFoundError(Path('static') / Path(*path_parts))
 
+
+
+def render_graph_html(payload):
+    node_binary = shutil.which('node')
+    if node_binary is None:
+        raise RuntimeError('node is required to exercise the graph renderer')
+
+    script = read_monitor_static_asset('js', 'app.js')
+    runner = f"""
+const vm = require('vm');
+const script = {json.dumps(script)};
+const payload = {json.dumps(payload)};
+const elements = new Map();
+function makeElement(id) {{
+  return {{
+    id,
+    innerHTML: '',
+    textContent: '',
+    src: '',
+    style: {{}},
+    classList: {{
+      remove() {{}},
+      add() {{}},
+      toggle() {{}},
+    }},
+  }};
+}}
+const context = {{
+  console: {{ error() {{}}, log() {{}} }},
+  window: {{ MONITOR_CONFIG: {{ graphEndpoint: '/api/graph' }}, setInterval() {{}} }},
+  document: {{
+    getElementById(id) {{
+      if (!elements.has(id)) {{
+        elements.set(id, makeElement(id));
+      }}
+      return elements.get(id);
+    }},
+    addEventListener() {{}},
+  }},
+  Image: function Image() {{}},
+}};
+vm.createContext(context);
+vm.runInContext(`${{script}}\nwindow.__renderGraph = renderGraph;`, context);
+context.window.__renderGraph(payload);
+process.stdout.write(elements.get('ros-graph-canvas').innerHTML);
+"""
+    result = subprocess.run(
+        [node_binary, '-e', runner],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
 def make_test_app(graph_snapshot_provider=None):
     resource_path = Path(__file__).resolve()
     return create_app(
@@ -173,6 +230,44 @@ def test_flask_graph_endpoint_returns_current_graph():
         response = app.view_functions['api_graph']()
 
     assert response.get_json() == payload
+
+
+
+def test_graph_renderer_groups_publish_edges_by_source_node():
+    html = render_graph_html({
+        'updated_at': '2026-06-19T00:00:00+00:00',
+        'nodes': [
+            {'id': 'node:/camera_node', 'label': '/camera_node', 'kind': 'node'},
+            {'id': 'topic:/camera/older', 'label': '/camera/older', 'kind': 'topic'},
+            {'id': 'topic:/camera/newer', 'label': '/camera/newer', 'kind': 'topic'},
+            {'id': 'node:/monitor_node', 'label': '/monitor_node', 'kind': 'node'},
+        ],
+        'edges': [
+            {
+                'source': 'node:/camera_node',
+                'target': 'topic:/camera/older',
+                'topic': '/camera/older',
+                'direction': 'publishes',
+            },
+            {
+                'source': 'node:/camera_node',
+                'target': 'topic:/camera/newer',
+                'topic': '/camera/newer',
+                'direction': 'publishes',
+            },
+            {
+                'source': 'topic:/camera/older',
+                'target': 'node:/monitor_node',
+                'topic': '/camera/older',
+                'direction': 'subscribes',
+            },
+        ],
+    })
+
+    assert html.count('ros-graph__publisher-group') == 1
+    assert html.count('ros-graph__publisher-topic-row') == 2
+    assert html.find('/camera/older') < html.find('/camera/newer')
+    assert '/monitor_node' in html
 
 
 def test_dashboard_includes_graph_view_assets():

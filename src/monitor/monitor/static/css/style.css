@@ -466,6 +466,32 @@ code {
   min-width: 0;
 }
 
+.ros-graph__publisher-group {
+  align-items: stretch;
+}
+
+.ros-graph__publisher-group .ros-graph__column--source {
+  display: flex;
+  align-items: center;
+}
+
+.ros-graph__publisher-group .ros-graph__node-card--source {
+  width: 100%;
+}
+
+.ros-graph__publisher-topic-list {
+  grid-column: 2 / 4;
+  display: grid;
+  gap: 10px;
+}
+
+.ros-graph__publisher-topic-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.2fr) minmax(160px, 1fr);
+  gap: 14px;
+  align-items: center;
+}
+
 .ros-graph__edge {
   position: relative;
   display: flex;

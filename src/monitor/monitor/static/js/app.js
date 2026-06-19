@@ -146,6 +146,62 @@ function renderGraphEdge(edge, topicNode) {
   `;
 }
 
+function renderGraphPublisherTopicRow(edge) {
+  const topicLabel = edge.topic_node?.label || edge.topic || 'topic';
+  return `
+    <div class="ros-graph__publisher-topic-row">
+      <div class="ros-graph__edge" aria-label="${escapeHtml(topicLabel)}">
+        <span class="ros-graph__edge-label" title="${escapeHtml(topicLabel)}">
+          ${escapeHtml(topicLabel)}
+        </span>
+      </div>
+      <div class="ros-graph__column ros-graph__column--target">
+        ${renderGraphNodeCard(edge.target_node, 'target')}
+      </div>
+    </div>
+  `;
+}
+
+function renderGraphPublisherGroup(group) {
+  return `
+    <div class="ros-graph__row ros-graph__publisher-group">
+      <div class="ros-graph__column ros-graph__column--source">
+        ${renderGraphNodeCard(group.source_node, 'source')}
+      </div>
+      <div class="ros-graph__publisher-topic-list">
+        ${group.edges.map(renderGraphPublisherTopicRow).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function buildGraphRenderItems(rows) {
+  const items = [];
+  let currentPublisherGroup = null;
+
+  rows.forEach((edge) => {
+    if (edge.direction === 'publishes') {
+      if (!currentPublisherGroup || currentPublisherGroup.source !== edge.source) {
+        currentPublisherGroup = {
+          kind: 'publisherGroup',
+          source: edge.source,
+          source_node: edge.source_node,
+          edges: [],
+        };
+        items.push(currentPublisherGroup);
+      }
+
+      currentPublisherGroup.edges.push(edge);
+      return;
+    }
+
+    currentPublisherGroup = null;
+    items.push({ kind: 'edge', edge });
+  });
+
+  return items;
+}
+
 function renderGraph(payload) {
   if (!elements.graphCard || !elements.graphCanvas) {
     return;
@@ -161,7 +217,12 @@ function renderGraph(payload) {
     topic_node: nodeById.get(`topic:${edge.topic}`),
   }));
   const graphState = rows.length > 0 ? 'live' : 'waiting';
-  const rowMarkup = rows.map((edge) => renderGraphEdge(edge, edge.topic_node)).join('');
+  const renderItems = buildGraphRenderItems(rows);
+  const rowMarkup = renderItems.map((item) => (
+    item.kind === 'publisherGroup'
+      ? renderGraphPublisherGroup(item)
+      : renderGraphEdge(item.edge, item.edge.topic_node)
+  )).join('');
 
   setCardState(elements.graphCard, graphState);
   elements.graphChip.textContent = getGraphLabel(graphState);

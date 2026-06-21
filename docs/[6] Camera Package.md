@@ -104,8 +104,11 @@ ROI_LEFT: 0
 ros2 run monitor monitor_node
 ```
 대쉬보드에 카메라 프레임을 출력한다. (Figure1) 
-<p align="center">  
-  ![Figure 1. Camera Status](topst-development url 첨부예정)
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/6/figure1-camera-status.png" alt="Camera Streaming">
+  <br>
+  <b>Figure 1. Dashboard-Camera Streaming</b>
 </p>
 
 <br>
@@ -171,7 +174,9 @@ ros2 topic echo /camera/image/compressed --once
 ### 8-1. 카메라 오픈 실패
 
 1. 디바이스 경로 확인 (`/dev/video0`, `/dev/video1` 등)
-2. `USB_CAM`/`MIPI_CAM` 설정 확인
+    - `MIPI_CAM` : /dev/video0
+    - `USB_CAM` : /dev/video1
+2. 카메라 USB 연결 상태 확인 후 재부팅 
 3. 해상도(`IMAGE_WIDTH`, `IMAGE_HEIGHT`)를 낮춰 재시도
 4. `flip_method` 값 변경 시도 - 때에 따라 화면을 전환해야하는 경우 
 ### 8-2. 토픽은 있는데 화면이 안 뜰 때

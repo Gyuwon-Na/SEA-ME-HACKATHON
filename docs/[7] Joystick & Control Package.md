@@ -21,13 +21,8 @@
   - 수동 주행 모드에서 동작가능한 조이스틱 기능은 아래와 같습니다.
     - 가감속 비율(accel_ratio) 조정 - (1) (2)
     - Steering Calibration : steering trim 조절 & 저장 - (4) (5)
-    - 전진 기어 모드 - (9)
-    - 후진 기어 모드 - (10)
-    - 종방향 제어 스틱
-      - 전진 기어 모드 일때 - (6)방향으로 전진을 할 수 있습니다.
-      - 후진 기어 모드 일때 - (7)방향으로 후진을 할 수 있습니다. (**후진시, 스틱을 살살 동작하세요**)
-    - 횡방향 제어 스틱 - (8)
-  
+    - 종방향 제어 스틱 - (6)
+    - 횡방향 제어 스틱 - (7)
   
   - 자율주행 모드에서 동작가능한 조이스틱 기능은 아래와 같습니다.
     - E-STOP 래치 - (3)
@@ -35,9 +30,13 @@
   - bagfile record start/stop 토글 - (11)
     - ROS2 bagfile을 취득한 일자-시간 순으로 기록합니다. 
 
-<p align="center">  
-  ![Figure 1. Joystick Mapping](topst-development url 첨부예정)
+<p align="center">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/7/figure1-joystick-mapping.png" alt="Joystick Mapping">
+  <br>
+  <b>Figure 1. Joystick Mapping</b>
 </p>
+
+<br>
 
 ### 2-2. Control Node 역할
 
@@ -47,7 +46,7 @@
 - Steering Calibration 모드 
   - Y button : Left 방향으로 정렬
   - B button : Right 방향으로 정렬
-
+  - Y/B 버튼으로 STEER_TRIM 값이 자동으로 vehicle_config.yaml 파일에 저장이 됩니다. 
 <br>
 
 ## 3) 기본 실행 방법
@@ -99,10 +98,14 @@ ros2 run control control_node --ros-args -p use_joystick_control:=true
 ```bash
 ros2 run monitor monitor_node
 ```
-1. 자율주행 모드에서 최종적으로 /control 토픽이 publish 되며, 해당 토픽 데이터는 대쉬보드 내 "실시간 제어값" 패널에서ㅇ 출력됩니다. (Figure1)  
+1. 자율주행 모드에서 최종적으로 /control 토픽이 publish 되며, 해당 토픽 데이터는 대쉬보드 내 "실시간 제어값" 패널에서ㅇ 출력됩니다. (Figure2)  
 * 수동주행 모드에서 대쉬보드에 제어값이 표출되지 않습니다. joystick 패키지가 실행되는 터미널을 통해 throttle, steering 값을 확인할 수 있습니다.
-<p align="center">  
-  ![Figure 1. Control Statua](topst-development url 첨부예정)
+
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/7/xxx.png" alt="Dashboard Control Status">
+  <br>
+  <b>Figure 2. Dashboard Control Status</b>
 </p>
 
 <br>

@@ -57,10 +57,14 @@ ros2 run monitor monitor_node --ros-args \
 혹은, config/vehicle_config.yaml 파일에서 수정 후 적용해도 동일합니다.  
 브라우저 접속 주소는 로그의 `web=http://...` 값을 확인하면 됩니다.(사용자의 IP)  
 해당 주소에 접속하면  figure 1 과 같이 대쉬보드가 웹화면에 동작합니다.
-<p align="center">  
-  ![Figure 1. Dashboard Default UI](topst-development url 첨부예정)
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/4/figure1-dashboard-default.png" alt="Dashboard Default">
+  <br>
+  <b>Figure 1. Dashboard Default</b>
 </p>
-<br>  
+
+<br>
 
 ## 4) 주요 ROS 파라미터 설명
 아래 파라미터는 `monitor_node`에서 직접 사용됩니다.

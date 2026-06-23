@@ -13,6 +13,7 @@ from sensor_msgs.msg import CompressedImage
 import yaml
 
 from .flask_app_factory import FLASK_IMPORT_ERROR, FlaskServerThread, create_app
+from .graph_utils import build_graph_snapshot
 from .image_utils import extract_jpeg_dimensions
 from .monitor_state import MonitorState
 
@@ -155,6 +156,7 @@ class MonitorNode(Node):
             self.opencv_grayscale_topic,
             self.opencv_blur_topic,
             self.opencv_edge_topic,
+            graph_snapshot_provider=self.get_graph_snapshot,
         )
         self.server_thread = FlaskServerThread(self.app, self.web_host, self.web_port)
 
@@ -221,6 +223,9 @@ class MonitorNode(Node):
             f'web=http://{display_host}:{self.web_port} \n' 
             f'vehicle_config_file={self.vehicle_config_file} \n'
         )
+
+    def get_graph_snapshot(self):
+        return build_graph_snapshot(self)
 
     def load_vehicle_config(self):
         if not os.path.exists(self.vehicle_config_file):

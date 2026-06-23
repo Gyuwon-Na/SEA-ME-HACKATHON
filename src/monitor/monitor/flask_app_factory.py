@@ -38,7 +38,8 @@ def create_app( state, page_title,
                 refresh_interval_ms, image_refresh_interval_ms,
                 header_logo_path, telechips_logo_path, topst_logo_path, 
                 image_display_width, image_display_height,
-                debug_image, opencv_grayscale_topic, opencv_blur_topic, opencv_edge_topic ):
+                debug_image, opencv_grayscale_topic, opencv_blur_topic,
+                opencv_edge_topic, graph_snapshot_provider=None ):
     
     app = Flask( __name__, template_folder=str(TEMPLATE_DIR), static_folder=str(STATIC_DIR),)
     app.json.sort_keys = False
@@ -67,6 +68,12 @@ def create_app( state, page_title,
     @app.get('/api/status')
     def api_status():
         return jsonify(state.snapshot())
+
+    @app.get('/api/graph')
+    def api_graph():
+        if graph_snapshot_provider is None:
+            return jsonify({'nodes': [], 'edges': []})
+        return jsonify(graph_snapshot_provider())
 
     @app.get('/api/frame')
     def api_frame():

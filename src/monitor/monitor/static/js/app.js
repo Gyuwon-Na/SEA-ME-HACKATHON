@@ -20,6 +20,7 @@ const CARD_CLASSES = [
 
 const config = window.MONITOR_CONFIG || {
   statusEndpoint: '/api/status',
+  graphEndpoint: '/api/graph',
   frameEndpoint: '/api/frame',
   debugFrameGrayscaleEndpoint: '/api/frame/grayscale',
   debugFrameBlurEndpoint: '/api/frame/blur',
@@ -61,6 +62,11 @@ const elements = {
   storageUpdated: document.getElementById('storage-updated'),
   storageMeterFill: document.getElementById('storage-meter-fill'),
   storageDetail: document.getElementById('storage-detail'),
+  graphCard: document.getElementById('graph-card'),
+  graphChip: document.getElementById('graph-chip'),
+  graphCanvas: document.getElementById('ros-graph-canvas'),
+  graphUpdated: document.getElementById('graph-updated'),
+  graphSummary: document.getElementById('graph-summary'),
 };
 
 let imageRequestInFlight = false;
@@ -86,6 +92,143 @@ function formatUpdatedAt(updatedAt) {
   }
 
   return date.toLocaleString();
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[character]));
+}
+
+function getGraphLabel(state) {
+  switch (state) {
+    case 'live':
+      return 'LIVE';
+    case 'stale':
+      return 'STALE';
+    default:
+      return 'WAITING';
+  }
+}
+
+function renderGraphNodeCard(node, role) {
+  if (!node) {
+    return '<span class="ros-graph__node-card ros-graph__node-card--placeholder">--</span>';
+  }
+
+  return `
+    <span class="ros-graph__node-card ros-graph__node-card--${role}" title="${escapeHtml(node.label)}">
+      ${escapeHtml(node.label || node.id)}
+    </span>
+  `;
+}
+
+function renderGraphEdge(edge, topicNode) {
+  const topicLabel = topicNode?.label || edge.topic || 'topic';
+  return `
+    <div class="ros-graph__row">
+      <div class="ros-graph__column ros-graph__column--source">
+        ${renderGraphNodeCard(edge.source_node, 'source')}
+      </div>
+      <div class="ros-graph__edge" aria-label="${escapeHtml(topicLabel)}">
+        <span class="ros-graph__edge-label" title="${escapeHtml(topicLabel)}">
+          ${escapeHtml(topicLabel)}
+        </span>
+      </div>
+      <div class="ros-graph__column ros-graph__column--target">
+        ${renderGraphNodeCard(edge.target_node, 'target')}
+      </div>
+    </div>
+  `;
+}
+
+function renderGraphPublisherTopicRow(edge) {
+  const topicLabel = edge.topic_node?.label || edge.topic || 'topic';
+  return `
+    <div class="ros-graph__publisher-topic-row">
+      <div class="ros-graph__edge" aria-label="${escapeHtml(topicLabel)}">
+        <span class="ros-graph__edge-label" title="${escapeHtml(topicLabel)}">
+          ${escapeHtml(topicLabel)}
+        </span>
+      </div>
+      <div class="ros-graph__column ros-graph__column--target">
+        ${renderGraphNodeCard(edge.target_node, 'target')}
+      </div>
+    </div>
+  `;
+}
+
+function renderGraphPublisherGroup(group) {
+  return `
+    <div class="ros-graph__row ros-graph__publisher-group">
+      <div class="ros-graph__column ros-graph__column--source">
+        ${renderGraphNodeCard(group.source_node, 'source')}
+      </div>
+      <div class="ros-graph__publisher-topic-list">
+        ${group.edges.map(renderGraphPublisherTopicRow).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function buildGraphRenderItems(rows) {
+  const items = [];
+  let currentPublisherGroup = null;
+
+  rows.forEach((edge) => {
+    if (edge.direction === 'publishes') {
+      if (!currentPublisherGroup || currentPublisherGroup.source !== edge.source) {
+        currentPublisherGroup = {
+          kind: 'publisherGroup',
+          source: edge.source,
+          source_node: edge.source_node,
+          edges: [],
+        };
+        items.push(currentPublisherGroup);
+      }
+
+      currentPublisherGroup.edges.push(edge);
+      return;
+    }
+
+    currentPublisherGroup = null;
+    items.push({ kind: 'edge', edge });
+  });
+
+  return items;
+}
+
+function renderGraph(payload) {
+  if (!elements.graphCard || !elements.graphCanvas) {
+    return;
+  }
+
+  const nodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+  const edges = Array.isArray(payload.edges) ? payload.edges : [];
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const rows = edges.map((edge) => ({
+    ...edge,
+    source_node: nodeById.get(edge.source),
+    target_node: nodeById.get(edge.target),
+    topic_node: nodeById.get(`topic:${edge.topic}`),
+  }));
+  const graphState = rows.length > 0 ? 'live' : 'waiting';
+  const renderItems = buildGraphRenderItems(rows);
+  const rowMarkup = renderItems.map((item) => (
+    item.kind === 'publisherGroup'
+      ? renderGraphPublisherGroup(item)
+      : renderGraphEdge(item.edge, item.edge.topic_node)
+  )).join('');
+
+  setCardState(elements.graphCard, graphState);
+  elements.graphChip.textContent = getGraphLabel(graphState);
+  elements.graphUpdated.textContent = formatUpdatedAt(payload.updated_at);
+  elements.graphSummary.textContent = `${nodes.length} nodes / ${edges.length} edges`;
+  elements.graphCanvas.innerHTML = rowMarkup || '<p class="ros-graph__placeholder">Waiting for ROS graph</p>';
 }
 
 function setCardState(cardElement, state) {
@@ -304,15 +447,48 @@ function renderOffline() {
   setCardState(elements.imageCard, 'offline');
   setCardState(elements.controlCard, 'offline');
   setCardState(elements.storageCard, 'offline');
+  if (elements.graphCard) {
+    setCardState(elements.graphCard, 'offline');
+  }
   elements.batteryChip.textContent = 'OFFLINE';
   elements.imageChip.textContent = 'OFFLINE';
   elements.controlChip.textContent = 'OFFLINE';
   elements.storageChip.textContent = 'OFFLINE';
+  if (elements.graphChip) {
+    elements.graphChip.textContent = 'OFFLINE';
+  }
   renderRecording({ is_recording: false });
   elements.batteryUpdated.textContent = 'Unable to reach monitor server';
   elements.imageUpdated.textContent = 'Unable to reach monitor server';
   elements.controlUpdated.textContent = 'Unable to reach monitor server';
   elements.storageUpdated.textContent = 'Unable to reach monitor server';
+  if (elements.graphUpdated) {
+    elements.graphUpdated.textContent = 'Unable to reach monitor server';
+  }
+}
+
+async function fetchGraph() {
+  if (!config.graphEndpoint) {
+    return;
+  }
+
+  try {
+    const response = await fetch(config.graphEndpoint, { cache: 'no-store' });
+
+    if (!response.ok) {
+      throw new Error(`Unexpected response: ${response.status}`);
+    }
+
+    const payload = await response.json();
+    renderGraph(payload || {});
+  } catch (error) {
+    console.error('Failed to fetch ROS graph', error);
+    if (elements.graphCard) {
+      setCardState(elements.graphCard, 'stale');
+      elements.graphChip.textContent = 'STALE';
+      elements.graphUpdated.textContent = 'Unable to reach graph endpoint';
+    }
+  }
 }
 
 async function fetchStatus() {
@@ -383,11 +559,13 @@ function refreshDebugFrames() {
 
 function startPolling() {
   fetchStatus();
+  fetchGraph();
   refreshCameraFrame();
   if (config.debugImageEnabled) {
     refreshDebugFrames();
   }
   window.setInterval(fetchStatus, config.refreshIntervalMs);
+  window.setInterval(fetchGraph, config.refreshIntervalMs);
   window.setInterval(refreshCameraFrame, config.imageRefreshIntervalMs);
   if (config.debugImageEnabled) {
     window.setInterval(refreshDebugFrames, config.imageRefreshIntervalMs);

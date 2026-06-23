@@ -98,12 +98,12 @@ ros2 run control control_node --ros-args -p use_joystick_control:=true
 ```bash
 ros2 run monitor monitor_node
 ```
-1. 자율주행 모드에서 최종적으로 /control 토픽이 publish 되며, 해당 토픽 데이터는 대쉬보드 내 "실시간 제어값" 패널에서ㅇ 출력됩니다. (Figure2)  
+1. 자율주행 모드에서 최종적으로 /control 토픽이 publish 되며, 해당 토픽 데이터는 대쉬보드 내 "실시간 제어값" 패널에서 출력됩니다. (Figure2)  
 * 수동주행 모드에서 대쉬보드에 제어값이 표출되지 않습니다. joystick 패키지가 실행되는 터미널을 통해 throttle, steering 값을 확인할 수 있습니다.
 
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/7/xxx.png" alt="Dashboard Control Status">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/7/figure2-dashboard-control-status.jpg" alt="Dashboard Control Status">
   <br>
   <b>Figure 2. Dashboard Control Status</b>
 </p>

@@ -11,20 +11,27 @@
 ## 1 ) 사전 환경 셋업
 ROS2 패키지 빌드 전에 필요한 환경 설정을 진행합니다.
 
-### 1.1 필요 유틸리티 설치 - Flask
+### 1.1 필요 유틸리티 설치 - smbus2
+i2c 인터페이스 통신을 위해 smbus2를 설치합니다.
+```bash
+pip3 install smbus2
+pip3 show smbus2 # 설치 확인
+```
+
+### 1.2 필요 유틸리티 설치 - Flask
 웹 인터페이스 관련 기능을 위해 Flask를 설치합니다.
 ```bash
 python3 -m pip install --user Flask==2.2.5
 pip3 show Flask # 설치 확인
 ```
 
-### 1.2 필요 유틸리티 설치 - OpenCV
+### 1.3 필요 유틸리티 설치 - OpenCV
 컬러기반 이미지 영상처리 기능을 사용하기 위해 OpenCV 를 사용합니다. 
-```
+```bash
 sudo apt install python3-opencv
 ```
 
-### 1.3 RO2 설정 환경 자동 적용
+### 1.4 RO2 설정 환경 자동 적용
 아래 커맨드를 통해서 ROS2 설정환경을 자동 등록하실 수 있습니다.  
 해당 명령어는 한 번만 실행하면 되며, 이후 새로 여는 터미널부터 ROS 2 환경이 자동으로 적용됩니다.
 

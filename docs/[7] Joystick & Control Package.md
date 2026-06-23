@@ -139,7 +139,6 @@ ros2 run monitor monitor_node
 | `publish_hz` | float | `50.0` | publish 주기(Hz) |
 | `throttle_scale` | float | `0.12` | 기본 throttle 스케일 |
 | `throttle_deadzone` | float | `0.05` | throttle deadzone (수정 불필요)|
-| `allow_reverse` | bool | `False` | 음수 throttle 허용 여부 |
 | `steering_deadzone` | float | `0.05` | steering deadzone |
 | `steering_axis` | string | `auto` | `right_x`/`right_y`/`auto` |
 | `steering_trim` | float | `0.0` | steering 오프셋 |

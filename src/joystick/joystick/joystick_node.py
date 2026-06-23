@@ -40,7 +40,6 @@ class JoystickNode(Node):
         self.declare_parameter('publish_hz', 50.0)
         self.declare_parameter('throttle_scale', 0.12)
         self.declare_parameter('throttle_deadzone', 0.05)
-        self.declare_parameter('allow_reverse', False)
         self.declare_parameter('steering_deadzone', 0.05)
         self.declare_parameter('steering_axis', 'auto')
         self.declare_parameter('steering_trim', 0.0)
@@ -64,7 +63,6 @@ class JoystickNode(Node):
 
         self.throttle_scale = float(self.get_parameter('throttle_scale').value)
         self.throttle_deadzone = float(self.get_parameter('throttle_deadzone').value)
-        self.allow_reverse = bool(self.get_parameter('allow_reverse').value)
         self.steering_deadzone = float(self.get_parameter('steering_deadzone').value)
         self.steering_axis = str(self.get_parameter('steering_axis').value)
         self.steering_trim = float(self.get_parameter('steering_trim').value)
@@ -94,13 +92,10 @@ class JoystickNode(Node):
 
         self._prev_l1_pressed = False
         self._prev_r1_pressed = False
-        self._prev_dpad_up_pressed = False
-        self._prev_dpad_down_pressed = False
         self._prev_y_pressed = False
         self._prev_b_pressed = False
         self._prev_x_pressed = False
         self._prev_start_pressed = False
-        self.reverse_mode = False
         self.e_stop_latched = False
         self.is_recording = False
         self.recording_process = None
@@ -134,7 +129,6 @@ class JoystickNode(Node):
         self.get_logger().info(
             f'Joystick node started: topic={publish_topic}, publish_hz={self.publish_hz}, '
             f'throttle_scale={self.throttle_scale}, throttle_deadzone={self.throttle_deadzone}, '
-            f'allow_reverse={self.allow_reverse}, '
             f'steering_deadzone={self.steering_deadzone}, steering_axis={self.steering_axis}, '
             f'steering_trim={self.steering_trim}, calibration_mode={self.calibration_mode}, '
             f'calibration_step={self.calibration_step}, vehicle_config_file={self.vehicle_config_file}, '
@@ -226,22 +220,6 @@ class JoystickNode(Node):
     def update_accel_ratio_from_buttons(self, data):
         l1_pressed = bool(data.button_L1)
         r1_pressed = bool(data.button_R1)
-        dpad_up_pressed = data.dpad_up is not None
-        dpad_down_pressed = data.dpad_down is not None
-
-        if dpad_down_pressed and not self._prev_dpad_down_pressed:
-            self.accel_ratio = 4.0
-            self.reverse_mode = True
-            self.get_logger().info(
-                f'DPAD DOWN pressed: reverse mode enabled, accel_ratio fixed to {self.accel_ratio:.2f}'
-            )
-
-        if dpad_up_pressed and not self._prev_dpad_up_pressed:
-            self.accel_ratio = 0.15
-            self.reverse_mode = False
-            self.get_logger().info(
-                f'DPAD UP pressed: forward mode enabled, accel_ratio set to {self.accel_ratio:.2f}'
-            )
 
         if l1_pressed and not self._prev_l1_pressed:
             self.accel_ratio = self.clamp(
@@ -259,8 +237,6 @@ class JoystickNode(Node):
             )
             self.get_logger().info(f'accel_ratio increased to {self.accel_ratio:.3f}')
 
-        self._prev_dpad_up_pressed = dpad_up_pressed
-        self._prev_dpad_down_pressed = dpad_down_pressed
         self._prev_l1_pressed = l1_pressed
         self._prev_r1_pressed = r1_pressed
 
@@ -379,8 +355,7 @@ class JoystickNode(Node):
             self.throttle_deadzone,
         )
         throttle = self.clamp(throttle_axis * self.accel_ratio)
-        if not (self.allow_reverse or self.reverse_mode):
-            throttle = max(0.0, throttle)
+        throttle = max(0.0, throttle)
 
         steering = self.deadzone(
             self.read_steering_axis(data),
@@ -422,7 +397,6 @@ class JoystickNode(Node):
             f'right_x={self._debug_right_x:.2f} right_y={self._debug_right_y:.2f} \n'
             f'steering={self._debug_steering:.2f} throttle={self._debug_throttle:.2f} \n'
             f'accel_ratio={self.accel_ratio:.3f} \n'
-            f'Gear={"[R] " if self.reverse_mode else "[D]"} \n'
             f'trim={self.steering_trim:.2f} \n'
             f'e_stop={int(self.e_stop_latched)} \n'
             f'recording={int(self.is_recording)} \n'

@@ -1,7 +1,5 @@
 from pathlib import Path
 
-from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
 from launch import LaunchDescription
 from launch_ros.actions import Node
 
@@ -16,14 +14,8 @@ def get_vehicle_config_path():
 
 def generate_launch_description():
     vehicle_config_path = get_vehicle_config_path()
-    allow_reverse = LaunchConfiguration('allow_reverse')
 
     return LaunchDescription([
-        DeclareLaunchArgument(
-            'allow_reverse',
-            default_value='true',
-            description='Allow joystick throttle to go negative for reverse driving.',
-        ),
         Node(
             package='control',
             executable='control_node',
@@ -44,7 +36,6 @@ def generate_launch_description():
             parameters=[
                 {
                     'calibration_mode': True,
-                    'allow_reverse': allow_reverse,
                     'vehicle_config_file': vehicle_config_path,
                 },
             ],

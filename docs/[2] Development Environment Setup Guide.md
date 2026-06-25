@@ -6,7 +6,8 @@
 - D3-G TOPST 로그인
 - 와이파이 설정 가이드
 - VSCode Remote SSH 설정
-- VSCode와 Vibe Coding Tool 연동(Codex, Claude)
+- D-Racer-Kit 공식 SW 다운로드
+- VSCode Remote SSH 접속 실패 문제 해결책
 
 사용자 PC의 권장 사양은 아래와 같습니다.
 - Windows 10/11
@@ -279,7 +280,21 @@ Host d-racer
 
 <br>
 
-## 7 ) 문제 해결 - VSCode Remote SSH 접속 실패
+## 7 ) D-Racer-Kit 공식 SW 다운로드
+VSCode Remote SSH로 연결된 D3-G 터미널에서 아래 GitHub URL로부터 D-Racer-Kit 공식 SW를 clone합니다.
+
+```bash
+cd ~
+git clone https://github.com/topst-development/D-Racer-Kit.git
+cd D-Racer-Kit
+ls
+```
+
+`README.md`, `docs`, `src` 디렉터리가 보이면 정상적으로 다운로드된 것입니다.
+
+<br>
+
+## 8 ) 문제 해결 - VSCode Remote SSH 접속 실패
 
 VSCode에서 Remote SSH 접속이 되지 않는 경우 아래 항목을 먼저 확인합니다.
 

@@ -276,3 +276,22 @@ Host d-racer
   <br>
   <b>Figure 13. VSCode SSH Remote</b>
 </p>
+
+<br>
+
+## 7 ) 문제 해결 - VSCode Remote SSH 접속 실패
+
+VSCode에서 Remote SSH 접속이 되지 않는 경우 아래 항목을 먼저 확인합니다.
+
+1. D3-G에 Wi-Fi dongle이 연결되어 있는지 확인합니다.
+2. 사용자 PC와 D3-G가 같은 네트워크 대역에 연결되어 있는지 확인합니다.
+3. D3-G의 무선 LAN IP 주소가 VSCode SSH config의 `HostName`과 일치하는지 확인합니다.
+
+위 항목을 확인했는데도 접속되지 않는 경우, 기존 SSH 접속 정보가 충돌했을 수 있습니다.
+
+1. Windows 사용자 계정의 `.ssh` 폴더로 이동합니다.
+   - 예: `C:\Users\사용자명\.ssh`
+2. `known_hosts` 파일을 메모장으로 엽니다.
+3. D3-G의 IP 주소와 관련된 줄을 삭제한 뒤 저장합니다.
+4. VSCode에서 `Remote-SSH: Connect to Host`를 다시 실행합니다.
+5. 접속 확인 메시지가 표시되면 승인하고, 비밀번호 `topst`를 입력합니다.

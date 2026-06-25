@@ -27,7 +27,7 @@
   - 자율주행 모드에서 동작가능한 조이스틱 기능은 아래와 같습니다.
     - E-STOP 래치 - (3)
   
-  - bagfile record start/stop 토글 - (11)
+  - bagfile record start/stop 토글 - (8)
     - ROS2 bagfile을 취득한 일자-시간 순으로 기록합니다. 
 
 <p align="center">
@@ -171,7 +171,7 @@ ros2 run monitor monitor_node
 | `throttle_channel` | int | `1` | 스로틀 채널 (수정 불필요) |
 | `vehicle_config_file` | string | 자동 탐색 경로 | `STEER_TRIM` 로드 경로 |
 | `use_joystick_control` | bool | `False` | 입력 소스 선택 플래그 |
-| `joystick_topic` | string | `joystick` | Joystick 입력 토픽 |
+| `joystick_topic` | string | `/joystick` | Joystick 입력 토픽 |
 | `control_topic` | string | `/control` | 외부 제어 입력 토픽 |
 | `command_hz` | float | `10.0` | 액추에이터 출력 주기(Hz) |
 
@@ -197,25 +197,56 @@ ros2 topic echo /control --once
 
 <br>
 
-## 8) 자주 발생하는 이슈
-### 8-1. 차량이 움직이지 않을 때
+## 8) Record 수행
+
+조이스틱의 START 버튼(Figure 1의 8번)을 누르면 ROS2 bag record가 시작됩니다.  
+START 버튼은 토글 방식으로 동작하며, 한 번 누르면 기록을 시작하고 다시 누르면 기록을 종료합니다.
+
+녹화 상태는 Monitor 웹 화면에서 확인할 수 있습니다.  
+D-Racer 타이틀 옆 `REC` 표시가 녹색으로 바뀌면 현재 bag record가 진행 중인 상태입니다. (Figure 3)
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/8/figure3-dashboard-record-status.png" alt="Dashboard Record Status">
+  <br>
+  <b>Figure 3. Dashboard Record Status</b>
+</p>
+
+
+저장된 bagfile은 `D-Racer-Kit/bagfile` 경로에 생성됩니다.  
+각 기록은 실행 시각을 기준으로 `bag_YYYYMMDD_HHMMSS` 형식의 폴더에 저장됩니다.
+
+기록 파일은 1GiB 단위로 분할 저장됩니다.  
+또한 D3-G의 eMMC 잔여 용량이 5GiB 이하가 되면 기록이 자동으로 중지됩니다.
+
+장시간 record를 수행하기 전에는 Monitor 웹 화면에서 eMMC 잔여 용량을 먼저 확인하는 것을 권장합니다. (Figure 4) 
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/8/figure4-dashboard-storage-status.png" alt="Dashboard D3-G Storage Status">
+  <br>
+  <b>Figure 4. Dashboard D3-G eMMC Storage Status</b>
+</p>
+
+## 9) 자주 발생하는 이슈
+### 9-1. 차량이 움직이지 않을 때
 
 1. `control_node`가 실행 중인지 확인
 2. `use_joystick_control` 값이 현재 운용 모드와 맞는지 확인
 3. E-STOP이 걸렸는지(`X` 버튼) 확인
 4. I2C/PCA9685 연결 확인
-### 8-2. 조향이 한쪽으로 치우칠 때
+### 9-2. 조향이 한쪽으로 치우칠 때
 
 - `STEER_TRIM` 값 점검
 - `calibration_mode=true`에서 trim 재보정
-### 8-3. 녹화 토글이 안 될 때
+### 9-3. 녹화 토글이 안 될 때
 
 - `data_acquisition_script` 경로 유효성 확인
 - 실행 권한(`chmod +x`) 확인
+- `bagfile` 디렉터리에 쓰기 권한이 있는지 확인
+- eMMC 잔여 용량이 충분한지 확인
 
 <br>
 
-## 9) 권장 운영 시나리오
+## 10) 권장 운영 시나리오
 
 - 수동 디버깅: `manual_driving.launch.py`
 - 자율 주행 테스트: `auto_driving.launch.py` + inference/control 입력 점검

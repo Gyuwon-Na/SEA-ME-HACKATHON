@@ -106,7 +106,7 @@ ros2 run monitor monitor_node
 대시보드에 카메라 프레임을 출력합니다. (Figure 1)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/7/figure1-camera-status.png" alt="Camera Streaming">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/dev/docs/asset/7/figure1-camera-status.png" alt="Camera Streaming">
   <br>
   <b>Figure 1. Dashboard-Camera Streaming</b>
 </p>

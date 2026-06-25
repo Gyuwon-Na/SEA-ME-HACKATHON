@@ -63,7 +63,7 @@ ros2 run monitor monitor_node
 대시보드에 배터리 상태를 출력합니다. (Figure 1)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/6/figure1-battery-status.png" alt="Battery Status">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/dev/docs/asset/6/figure1-battery-status.png" alt="Battery Status">
   <br>
   <b>Figure 1. Dashboard-Battery Status</b>
 </p>

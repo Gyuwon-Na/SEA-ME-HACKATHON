@@ -30,7 +30,7 @@
 압축 해제한 파일에 진입하여, win10_64 내 설치 프로그램을 관리자 권한으로 설치합니다. Vendor Telechips Certification(VTC) 드라이버를 설치합니다.(Figure 1)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/2/figure1-vtc-driver-installation.png" alt="VTC Driver Installation">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/dev/docs/asset/2/figure1-vtc-driver-installation.png" alt="VTC Driver Installation">
   <br>
   <b>Figure 1. VTC Driver Installation</b>
 </p>
@@ -41,7 +41,7 @@
 2. USB-C to A 케이블로 D3-G와 PC를 연결합니다. (Figure 2)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/2/figure2-connect-usb-c-to-a-cable.png" alt="Connect USB-C to A Cable">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/dev/docs/asset/2/figure2-connect-usb-c-to-a-cable.png" alt="Connect USB-C to A Cable">
   <br>
   <b>Figure 2. Connect USB-C to A Cable</b>
 </p>
@@ -51,7 +51,7 @@
 3. BOOT 스위치를 누른 채로 D3-G 보드에 전원 케이블을 연결합니다. (Figure 3)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/2/figure3-d3-g-boot-mode.png" alt="D3-G Boot Mode">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/dev/docs/asset/2/figure3-d3-g-boot-mode.png" alt="D3-G Boot Mode">
   <br>
   <b>Figure 3. D3-G Boot Mode</b>
 </p>
@@ -63,7 +63,7 @@
 **참고: VTC Driver는 V5.0.0.14 이상을 사용해야 합니다. 버전은 Windows 장치 관리자에서 확인할 수 있습니다.**
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/2/figure4-windows-device-manager.png" alt="Windows Device Manager">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/dev/docs/asset/2/figure4-windows-device-manager.png" alt="Windows Device Manager">
   <br>
   <b>Figure 4. Windows Device Manager</b>
 </p>
@@ -74,7 +74,7 @@
 아래 Figure 5와 같이 진행되면 이미지 업로드가 정상적으로 완료된 것입니다.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/2/figure5-running-fwdn.bat.png" alt="Running FWDN.bat">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/dev/docs/asset/2/figure5-running-fwdn.bat.png" alt="Running FWDN.bat">
   <br>
   <b>Figure 5. Running FWDN.bat</b>
 </p>
@@ -87,7 +87,7 @@
 [Prolific PL2303 Driver << Download Link](https://github.com/theAmberLion/Prolific/blob/main/PL2303_Prolific_v3.3.2.105.exe)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/2/figure6-download-page-prolific-pl2303-driver.png" alt="Download Page Prolific PL2303 Driver">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/dev/docs/asset/2/figure6-download-page-prolific-pl2303-driver.png" alt="Download Page Prolific PL2303 Driver">
   <br>
   <b>Figure 6. Download Page Prolific PL2303 Driver</b>
 </p>
@@ -99,7 +99,7 @@
 [MobaXTerm << Download Link](https://mobaxterm.mobatek.net/download.html)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/2/figure7-mobaxterm-download-page.png" alt="MobaXTerm Download Page">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/dev/docs/asset/2/figure7-mobaxterm-download-page.png" alt="MobaXTerm Download Page">
   <br>
   <b>Figure 7. MobaXTerm Download Page</b>
 </p>
@@ -109,7 +109,7 @@
 3. D3-G와 UART 전용 케이블을 아래 Figure 8과 같이 연결합니다.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/2/figure8-connection-usb-to-ttl-cable.png" alt="Connection USB to TTL Cable">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/dev/docs/asset/2/figure8-connection-usb-to-ttl-cable.png" alt="Connection USB to TTL Cable">
   <br>
   <b>Figure 8. Connection USB to TTL Cable</b>
 </p>
@@ -129,7 +129,7 @@
 5.1 Session에서 Serial을 선택합니다(Figure 9).
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/2/figure10-select-session.png" alt="Select Session">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/dev/docs/asset/2/figure10-select-session.png" alt="Select Session">
   <br>
   <b>Figure 9. Select Session</b>
 </p>
@@ -138,7 +138,7 @@
 5.2 Basic Serial Setting에서 사용자 PC에 인식된 Serial Port를 선택하고, Speed는 115200으로 설정합니다. 인식된 시리얼 포트 번호는 Windows 장치 관리자에서 확인할 수 있습니다(Figure 10).
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/2/figure11-basic-serial-setting.png" alt="Basic Serial Setting">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/dev/docs/asset/2/figure11-basic-serial-setting.png" alt="Basic Serial Setting">
   <br>
   <b>Figure 10. Basic Serial Setting</b>
 </p>
@@ -147,7 +147,7 @@
 5.3 Advanced Serial Setting에서 Hardware Flow Control을 `None`으로 설정합니다.(Figure 11)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/2/figure12-advanced-serial-setting.png" alt="Advanced Serial Setting">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/dev/docs/asset/2/figure12-advanced-serial-setting.png" alt="Advanced Serial Setting">
   <br>
   <b>Figure 11. Advanced Serial Setting</b>
 </p>
@@ -272,7 +272,7 @@ Host d-racer
 5. 초기 원격 설정이 완료된 뒤 아래 Figure 12와 같이 열리면 성공입니다. 이제 원격으로 D3-G를 제어할 수 있습니다.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/2/figure13-vscode-ssh-remote.png" alt="VSCode SSH Remote">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/dev/docs/asset/2/figure13-vscode-ssh-remote.png" alt="VSCode SSH Remote">
   <br>
   <b>Figure 12. VSCode SSH Remote</b>
 </p>

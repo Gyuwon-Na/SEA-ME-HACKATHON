@@ -60,7 +60,7 @@ ros2 run monitor monitor_node --ros-args \
 해당 주소에 접속하면 Figure 1과 같이 대시보드가 웹 화면에 동작합니다.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/5/figure1-dashboard-default.png" alt="Dashboard Default">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/dev/docs/asset/5/figure1-dashboard-default.png" alt="Dashboard Default">
   <br>
   <b>Figure 1. Dashboard Default</b>
 </p>
@@ -117,7 +117,7 @@ ros2 run monitor monitor_node --ros-args \
 모니터 노드를 실행하면 자동으로 현재 D-Racer에서 실행 중인 노드와 토픽의 상태를 확인할 수 있습니다.(Figure 2)
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/5/figure2-ros-graph.png" alt="ROS2 Node Topic Status">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/dev/docs/asset/5/figure2-ros-graph.png" alt="ROS2 Node Topic Status">
   <br>
   <b>Figure 2. Dashboard-ROS2 Node & Topic Status</b>
 </p>

@@ -47,15 +47,15 @@ ros2 run camera camera_node
 입력시, 아래 카메라 관련 정보 로그가 출력됩니다.
 
 ```bash
-[INFO] [1780031364.989311613] [camera_node]: 
-[Camera Node] : topic=camera/image/compressed 
-[camera source] : usb 
-[width] : 320, [height] : 160 
-[camera_device] : /dev/video1 
-[flip_method] : rotate-180 
-[jpeg_quality] : 90 
-[vehicle_config_file] : /home/topst/D-Racer/src/config/vehicle_config.yaml 
-[debug_log] : False 
+[INFO] [1780031364.989311613] [camera_node]:
+[Camera Node] : topic=camera/image/compressed
+[camera source] : usb
+[width] : 320, [height] : 160
+[camera_device] : /dev/video1
+[flip_method] : rotate-180
+[jpeg_quality] : 90
+[vehicle_config_file] : /home/topst/D-Racer/src/config/vehicle_config.yaml
+[debug_log] : False
 ```
 
 
@@ -76,21 +76,21 @@ ros2 run camera camera_node --ros-args -p debug_log:=true
 입력시, 아래 카메라 관련 정보 로그가 출력됩니다.
 
 ```bash
-[INFO] [1780044122.011738490] [camera_node]: 
-[Camera Node] : topic=camera/image/compressed 
-[camera source] : usb 
-[width] : 320, [height] : 160 
-[camera_device] : /dev/video1 
-[flip_method] : rotate-180 
-[jpeg_quality] : 90 
-[vehicle_config_file] : /home/topst/D-Racer/src/config/vehicle_config.yaml 
-[debug_log] : False 
+[INFO] [1780044122.011738490] [camera_node]:
+[Camera Node] : topic=camera/image/compressed
+[camera source] : usb
+[width] : 320, [height] : 160
+[camera_device] : /dev/video1
+[flip_method] : rotate-180
+[jpeg_quality] : 90
+[vehicle_config_file] : /home/topst/D-Racer/src/config/vehicle_config.yaml
+[debug_log] : False
 ```
 
 ### 3-5. 카메라 프레임 사이즈 조절
-config/vehicle_config.yaml에서 변경 가능합니다. 
+config/vehicle_config.yaml에서 변경 가능합니다.
 ```yaml
-# Camera Setting 
+# Camera Setting
 USB_CAM: true
 MIPI_CAM: false
 USB_CAM_DEVICE: /dev/video1
@@ -103,7 +103,7 @@ ROI_LEFT: 0
 ```bash
 ros2 run monitor monitor_node
 ```
-대쉬보드에 카메라 프레임을 출력한다. (Figure1) 
+대시보드에 카메라 프레임을 출력합니다. (Figure 1)
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/7/figure1-camera-status.png" alt="Camera Streaming">
@@ -176,9 +176,9 @@ ros2 topic echo /camera/image/compressed --once
 1. 디바이스 경로 확인 (`/dev/video0`, `/dev/video1` 등)
     - `MIPI_CAM` : /dev/video0
     - `USB_CAM` : /dev/video1
-2. 카메라 USB 연결 상태 확인 후 재부팅 
+2. 카메라 USB 연결 상태 확인 후 재부팅
 3. 해상도(`IMAGE_WIDTH`, `IMAGE_HEIGHT`)를 낮춰 재시도
-4. `flip_method` 값 변경 시도 - 때에 따라 화면을 전환해야하는 경우 
+4. `flip_method` 값 변경 시도 - 때에 따라 화면을 전환해야하는 경우
 ### 8-2. 토픽은 있는데 화면이 안 뜰 때
 
 1. `ros2 topic hz`로 프레임 주기 확인

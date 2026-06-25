@@ -8,7 +8,7 @@
 
 핵심 포인트:
 - 입력: INA219 센서 값 (`bus_voltage`, `shunt_voltage`, `current`)
-- 계산: 전압 기반 배터리 퍼센트(0~100%) 
+- 계산: 전압 기반 배터리 퍼센트(0~100%)
 - 출력: `battery_msgs/msg/Battery` 메시지 (`battery_status` 필드)
 
 <br>
@@ -60,7 +60,7 @@ ros2 run battery battery_node --ros-args \
 ```bash
 ros2 run monitor monitor_node
 ```
-대쉬보드에 배터리 상태량을 출력한다. (Figure1) 
+대시보드에 배터리 상태를 출력합니다. (Figure 1)
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/6/figure1-battery-status.png" alt="Battery Status">

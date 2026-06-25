@@ -116,7 +116,7 @@ ros2 topic echo /opencv/image/grayscale --once
 <br>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/8/figure1-dashboard-opencv-debug-mode.png" alt="Dashboard OPenCV Debug Mode">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/9/figure1-dashboard-opencv-debug-mode.png" alt="Dashboard OPenCV Debug Mode">
   <br>
   <b>Figure 1. Dashboard OPenCV Debug Mode</b>
 </p>

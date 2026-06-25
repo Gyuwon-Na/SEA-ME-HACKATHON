@@ -13,7 +13,7 @@
 - 저장장치 사용량 표시
 - ROS2 노드&토픽 상태 표시
 - `debug_image=true`일 때 OpenCV 처리 영상 3종(Grayscale/Blur/Edge) 표시
-  - 자세한 사항은 [8] OpenCV Pacage 가이드 참고
+  - 자세한 사항은 [9] OpenCV Pacage 가이드 참고
   
 <br>
 
@@ -60,7 +60,7 @@ ros2 run monitor monitor_node --ros-args \
 해당 주소에 접속하면  figure 1 과 같이 대쉬보드가 웹화면에 동작합니다.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/4/figure1-dashboard-default.png" alt="Dashboard Default">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/5/figure1-dashboard-default.png" alt="Dashboard Default">
   <br>
   <b>Figure 1. Dashboard Default</b>
 </p>
@@ -117,7 +117,7 @@ ros2 run monitor monitor_node --ros-args \
 모니터 노드를 실행하면 자동으로 현재 D-Racer 에서 실행중인 노드와 토픽의 상태에 대해서 확인할 수 있습니다.(Figure 2)  
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/4/figure2-ros-graph.png" alt="ROS2 Node Topic Status">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/5/figure2-ros-graph.png" alt="ROS2 Node Topic Status">
   <br>
   <b>Figure 2. Dashboard-ROS2 Node & Topic Status</b>
 </p>

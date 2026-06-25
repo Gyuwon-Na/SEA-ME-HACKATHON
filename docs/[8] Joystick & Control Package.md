@@ -31,7 +31,7 @@
     - ROS2 bagfile을 취득한 일자-시간 순으로 기록합니다. 
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/7/figure1-joystick-mapping.png" alt="Joystick Mapping">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/8/figure1-joystick-mapping.png" alt="Joystick Mapping">
   <br>
   <b>Figure 1. Joystick Mapping</b>
 </p>
@@ -103,7 +103,7 @@ ros2 run monitor monitor_node
 
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/7/figure2-dashboard-control-status.jpg" alt="Dashboard Control Status">
+  <img src="https://raw.githubusercontent.com/topst-development/D-Racer-Kit/refs/heads/docs/revision/docs/asset/8/figure2-dashboard-control-status.jpg" alt="Dashboard Control Status">
   <br>
   <b>Figure 2. Dashboard Control Status</b>
 </p>

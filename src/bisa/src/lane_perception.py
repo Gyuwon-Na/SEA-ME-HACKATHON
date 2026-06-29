@@ -1,0 +1,278 @@
+"""Classical lane and road perception for the D-Racer camera feed."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from typing import Optional
+
+import cv2
+import numpy as np
+
+from .dracer_config import AutonomousConfig
+
+
+@dataclass
+class PathCandidate:
+    """Represents a left/right/exit road branch target in normalized error space."""
+
+    target_error: float
+    area_ratio: float
+    center_x: float
+
+
+@dataclass
+class LaneObs:
+    """Carries the compact lane observation consumed by the mission FSM."""
+
+    valid: bool
+    center_error: float = 0.0
+    curvature: float = 0.0
+    signed_curvature: float = 0.0
+    fork_seen: bool = False
+    left_branch: Optional[PathCandidate] = None
+    right_branch: Optional[PathCandidate] = None
+    rotary_seen: bool = False
+    rotary_exit_seen: bool = False
+    lost_reason: str = ""
+
+    def with_center_error(self, center_error: float) -> "LaneObs":
+        """Returns a copy with a different target error for virtual branch control."""
+
+        return replace(self, center_error=center_error, valid=True)
+
+
+def clamp(value: float, low: float, high: float) -> float:
+    """Clamps a numeric value to the configured inclusive range."""
+
+    return max(low, min(high, value))
+
+
+class LanePerception:
+    """Builds road masks, lane centers, fork candidates, and rotary hints."""
+
+    def __init__(self, config: AutonomousConfig):
+        """Initializes kernels and keeps the last valid center for dropout recovery."""
+
+        self.config = config
+        self.prev_center_error = 0.0
+        self.prev_near_center: Optional[float] = None
+
+    def build_road_mask(self, frame_bgr: np.ndarray) -> np.ndarray:
+        """Extracts the black track area with HSV thresholding and morphology."""
+
+        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        lower = np.array(self.config.lane.black_hsv_lower, dtype=np.uint8)
+        upper = np.array(self.config.lane.black_hsv_upper, dtype=np.uint8)
+        mask = cv2.inRange(hsv, lower, upper)
+        open_size = max(1, int(self.config.lane.morph_open_kernel))
+        close_size = max(1, int(self.config.lane.morph_close_kernel))
+        open_kernel = np.ones((open_size, open_size), dtype=np.uint8)
+        close_kernel = np.ones((close_size, close_size), dtype=np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
+        return mask
+
+    def get_l_channel(self, frame_bgr: np.ndarray) -> np.ndarray:
+        """Applies the ERP reference CLAHE L-channel transform for robust edges."""
+
+        try:
+            lab = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2Lab)
+            l_channel, _, _ = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            return clahe.apply(l_channel)
+        except cv2.error:
+            return np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
+
+    def region_of_interest(self, image: np.ndarray, y0_ratio: float, y1_ratio: float) -> np.ndarray:
+        """Returns a vertical ROI slice using ratios from the camera frame height."""
+
+        height = image.shape[0]
+        y0 = int(clamp(y0_ratio, 0.0, 1.0) * height)
+        y1 = int(clamp(y1_ratio, 0.0, 1.0) * height)
+        return image[y0:y1, :]
+
+    def contour_center_x(self, roi_mask: np.ndarray, min_area_ratio: float) -> Optional[float]:
+        """Finds the weighted center x of the largest valid road component."""
+
+        if roi_mask.size == 0:
+            return None
+        contours, _ = cv2.findContours(roi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+        min_area = roi_mask.shape[0] * roi_mask.shape[1] * min_area_ratio
+        valid_contours = [cnt for cnt in contours if cv2.contourArea(cnt) >= min_area]
+        if not valid_contours:
+            return None
+        merged = np.vstack(valid_contours)
+        moments = cv2.moments(merged)
+        if moments["m00"] <= 0.0:
+            return None
+        return float(moments["m10"] / moments["m00"])
+
+    def average_hough_lanes(self, frame_bgr: np.ndarray) -> tuple[Optional[float], bool, bool]:
+        """Computes lane center from Canny/Hough lines as in the ERP reference code."""
+
+        height, width = frame_bgr.shape[:2]
+        top_y = int(self.config.lane.hough_roi_top_ratio * height)
+        l_channel = self.get_l_channel(frame_bgr)
+        blur = cv2.GaussianBlur(l_channel, (5, 5), 0)
+        edges = cv2.Canny(
+            blur,
+            int(self.config.lane.hough_canny_low),
+            int(self.config.lane.hough_canny_high),
+        )
+        roi = np.zeros_like(edges)
+        vertices = np.array([[(0, height), (0, top_y), (width, top_y), (width, height)]])
+        cv2.fillPoly(roi, vertices, 255)
+        roi_edges = cv2.bitwise_and(edges, roi)
+        lines = cv2.HoughLinesP(
+            roi_edges,
+            1,
+            np.pi / 180,
+            int(self.config.lane.hough_threshold),
+            minLineLength=int(self.config.lane.hough_min_line_length),
+            maxLineGap=int(self.config.lane.hough_max_line_gap),
+        )
+        if lines is None:
+            return None, False, False
+
+        left_fit: list[tuple[float, float]] = []
+        right_fit: list[tuple[float, float]] = []
+        for raw_line in lines:
+            x1, y1, x2, y2 = raw_line.reshape(4)
+            if x1 == x2:
+                continue
+            slope, intercept = np.polyfit((x1, x2), (y1, y2), 1)
+            if slope < -self.config.lane.hough_slope_min_abs:
+                left_fit.append((float(slope), float(intercept)))
+            elif slope > self.config.lane.hough_slope_min_abs:
+                right_fit.append((float(slope), float(intercept)))
+
+        left_present = bool(left_fit)
+        right_present = bool(right_fit)
+        if not left_present and not right_present:
+            return None, False, False
+
+        assumed_width = width * self.config.lane.assumed_lane_width_ratio
+        x_targets = []
+        if left_present:
+            slope, intercept = np.average(left_fit, axis=0)
+            x_targets.append((top_y - intercept) / slope)
+        if right_present:
+            slope, intercept = np.average(right_fit, axis=0)
+            x_targets.append((top_y - intercept) / slope)
+
+        if left_present and right_present:
+            center_x = float(np.average(x_targets))
+        elif left_present:
+            center_x = float(x_targets[0] + assumed_width / 2.0)
+        else:
+            center_x = float(x_targets[0] - assumed_width / 2.0)
+        return center_x, left_present, right_present
+
+    def detect_fork_candidates(self, mask: np.ndarray) -> tuple[bool, Optional[PathCandidate], Optional[PathCandidate]]:
+        """Splits the far ROI into left/right road masses for fork decisions."""
+
+        height, width = mask.shape[:2]
+        far = self.region_of_interest(mask, self.config.roi.far_y0, self.config.roi.far_y1)
+        if far.size == 0:
+            return False, None, None
+
+        half = width // 2
+        min_ratio = self.config.lane.fork_area_ratio
+        left_area = float(cv2.countNonZero(far[:, :half])) / float(far.size)
+        right_area = float(cv2.countNonZero(far[:, half:])) / float(far.size)
+        left = self._candidate_from_roi(far[:, :half], 0, width, left_area) if left_area >= min_ratio else None
+        right = self._candidate_from_roi(far[:, half:], half, width, right_area) if right_area >= min_ratio else None
+        return left is not None and right is not None, left, right
+
+    def _candidate_from_roi(
+        self,
+        roi_mask: np.ndarray,
+        x_offset: int,
+        full_width: int,
+        area_ratio: float,
+    ) -> Optional[PathCandidate]:
+        """Creates a path candidate from ROI image moments."""
+
+        moments = cv2.moments(roi_mask)
+        if moments["m00"] <= 0.0:
+            return None
+        center_x = x_offset + float(moments["m10"] / moments["m00"])
+        target_error = (full_width / 2.0 - center_x) / (full_width / 2.0)
+        return PathCandidate(clamp(target_error, -1.0, 1.0), area_ratio, center_x)
+
+    def detect_rotary_candidates(self, mask: np.ndarray) -> tuple[bool, bool]:
+        """Estimates rotary presence and exit branches from contour shape cues."""
+
+        height, width = mask.shape[:2]
+        mid = self.region_of_interest(mask, self.config.roi.mid_y0, 1.0)
+        if mid.size == 0:
+            return False, False
+
+        contours, _ = cv2.findContours(mid, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return False, False
+        largest = max(contours, key=cv2.contourArea)
+        area_ratio = cv2.contourArea(largest) / float(mid.size)
+        perimeter = max(cv2.arcLength(largest, True), 1.0)
+        circularity = 4.0 * np.pi * cv2.contourArea(largest) / (perimeter * perimeter)
+        rotary_seen = (
+            area_ratio >= self.config.lane.rotary_area_ratio
+            and circularity >= self.config.lane.rotary_circularity_min
+        )
+
+        far = self.region_of_interest(mask, self.config.roi.far_y0, self.config.roi.far_y1)
+        left_pixels = cv2.countNonZero(far[:, : width // 3]) if far.size else 0
+        right_pixels = cv2.countNonZero(far[:, 2 * width // 3 :]) if far.size else 0
+        exit_seen = rotary_seen and max(left_pixels, right_pixels) > far.size * 0.03
+        return rotary_seen, exit_seen
+
+    def compute_lane_obs(self, frame_bgr: np.ndarray) -> LaneObs:
+        """Computes a full lane observation from one decoded BGR image."""
+
+        mask = self.build_road_mask(frame_bgr)
+        height, width = mask.shape[:2]
+        near = self.region_of_interest(mask, self.config.roi.near_y0, 1.0)
+        mid = self.region_of_interest(mask, self.config.roi.mid_y0, self.config.roi.mid_y1)
+        far = self.region_of_interest(mask, self.config.roi.far_y0, self.config.roi.far_y1)
+
+        near_center = self.contour_center_x(near, self.config.lane.min_component_area_ratio)
+        mid_center = self.contour_center_x(mid, self.config.lane.min_component_area_ratio)
+        far_center = self.contour_center_x(far, self.config.lane.min_component_area_ratio)
+
+        if near_center is None:
+            hough_center, _, _ = self.average_hough_lanes(frame_bgr)
+            near_center = hough_center
+
+        if near_center is None:
+            return LaneObs(valid=False, center_error=self.prev_center_error, lost_reason="no_road_center")
+
+        if self.prev_near_center is not None:
+            jump = abs(near_center - self.prev_near_center) / max(float(width), 1.0)
+            if jump > self.config.lane.max_center_jump:
+                near_center = self.prev_near_center
+
+        self.prev_near_center = near_center
+        center_error = (width / 2.0 - near_center) / (width / 2.0)
+        far_or_near = far_center if far_center is not None else near_center
+        mid_or_near = mid_center if mid_center is not None else near_center
+        signed_curv = (near_center - far_or_near) / max(float(width), 1.0)
+        curvature = clamp(abs(far_or_near - near_center) / max(float(width), 1.0) * 2.5, 0.0, 1.0)
+        if mid_center is not None:
+            curvature = max(curvature, clamp(abs(mid_or_near - near_center) / max(float(width), 1.0) * 2.0, 0.0, 1.0))
+
+        fork_seen, left_branch, right_branch = self.detect_fork_candidates(mask)
+        rotary_seen, rotary_exit_seen = self.detect_rotary_candidates(mask)
+        self.prev_center_error = clamp(center_error, -1.0, 1.0)
+        return LaneObs(
+            valid=True,
+            center_error=self.prev_center_error,
+            curvature=curvature,
+            signed_curvature=clamp(signed_curv, -1.0, 1.0),
+            fork_seen=fork_seen,
+            left_branch=left_branch,
+            right_branch=right_branch,
+            rotary_seen=rotary_seen,
+            rotary_exit_seen=rotary_exit_seen,
+        )

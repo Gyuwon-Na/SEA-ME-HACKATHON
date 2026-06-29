@@ -1,0 +1,110 @@
+roi:
+  near_y0: 0.70
+  mid_y0: 0.52
+  mid_y1: 0.75
+  far_y0: 0.32
+  far_y1: 0.58
+  optional_birdeye_y0: 0.35
+  detector_light: [0.20, 0.00, 0.80, 0.55]
+  detector_sign: [0.10, 0.05, 0.90, 0.70]
+  detector_dynamic: [0.00, 0.35, 1.00, 1.00]
+
+lane:
+  black_hsv_lower: [0, 0, 0]
+  black_hsv_upper: [180, 90, 90]
+  morph_open_kernel: 3
+  morph_close_kernel: 5
+  min_component_area_ratio: 0.006
+  fork_area_ratio: 0.035
+  rotary_area_ratio: 0.08
+  rotary_circularity_min: 0.18
+  hough_roi_top_ratio: 0.58
+  hough_canny_low: 50
+  hough_canny_high: 150
+  hough_threshold: 45
+  hough_min_line_length: 45
+  hough_max_line_gap: 290
+  hough_slope_min_abs: 0.40
+  assumed_lane_width_ratio: 0.62
+  max_center_jump: 0.45
+
+detector:
+  model_path: checkpoints/best.pth
+  enabled: true
+  imgsz: 320
+  inference_hz: 10.0
+  class_map:
+    traffic_green: 0
+    traffic_red: 1
+    sign_left: 2
+    sign_right: 3
+    dynamic_marker: 4
+    finish_line: 5
+  conf:
+    traffic_green: 0.60
+    traffic_red: 0.60
+    sign_left: 0.65
+    sign_right: 0.65
+    dynamic_marker: 0.60
+    finish_line: 0.55
+  green_consecutive: 3
+  sign_vote_k: 3
+  sign_vote_n: 5
+  dynamic_detect_consecutive: 2
+  dynamic_clear_consecutive: 12
+  red_consecutive_after_finish: 3
+
+throttle:
+  max: 0.40
+  min_moving: 0.12
+  launch_cap: 0.32
+  s_curve_cap: 0.24
+  fork_approach_cap: 0.20
+  fork_commit_cap: 0.25
+  post_fork_cap: 0.30
+  rotary_approach_cap: 0.20
+  rotary_inside_cap: 0.18
+  dynamic_approach_cap: 0.18
+  resume_cap: 0.30
+  finish_cap: 0.34
+  ramp_up_per_cmd: 0.03
+  steer_slowdown: 0.22
+  curvature_slowdown: 0.08
+
+steering:
+  steer_sign: 1
+  kp: 1.20
+  kd: 0.24
+  kcurv: 0.30
+  rate_limit_per_cmd: 0.10
+  straight_limit: 0.45
+  s_curve_limit: 0.80
+  fork_approach_limit: 0.55
+  fork_limit: 0.85
+  post_fork_limit: 0.65
+  dynamic_limit: 0.45
+  rotary_limit: 0.85
+  resume_limit: 0.60
+  finish_limit: 0.55
+  lost_decay: 0.70
+
+rotary:
+  direction: CCW
+  min_rotation_time_sec: 4.5
+  progress_threshold: 0.22
+  exit_stable_frames: 3
+  enter_ff: 0.35
+  circulate_ff: 0.45
+  exit_bias: -0.18
+
+mission:
+  route_mode: OUT
+  control_hz: 10.0
+  launch_min_sec: 1.0
+  fork_commit_min_sec: 0.8
+  fork_commit_timeout_sec: 1.8
+  dynamic_stop_hold_sec: 0.2
+  resume_min_sec: 1.0
+  finish_min_elapsed_sec: 8.0
+  dynamic_zone_elapsed_sec: 4.0
+  debug_log_hz: 1.0

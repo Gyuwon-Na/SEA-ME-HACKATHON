@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>bisa</name>
+  <version>0.0.0</version>
+  <description>BISA custom package for D-Racer</description>
+
+  <maintainer email="topst@todo.todo">topst</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>control_msgs</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+
+  <exec_depend>camera</exec_depend>
+  <exec_depend>control</exec_depend>
+  <exec_depend>battery</exec_depend>
+  <exec_depend>monitor</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

@@ -355,7 +355,9 @@ class JoystickNode(Node):
             self.throttle_deadzone,
         )
         throttle = self.clamp(throttle_axis * self.accel_ratio)
-        throttle = max(0.0, throttle)
+        # 후진: ESC 후진 데드밴드(~0.4) 못넘으면 안움직여서 최소세기 floor 보정
+        if throttle_axis < 0.0:
+            throttle = -max(0.42, abs(throttle))
 
         steering = self.deadzone(
             self.read_steering_axis(data),

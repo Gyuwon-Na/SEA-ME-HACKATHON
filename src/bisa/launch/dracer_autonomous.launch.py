@@ -28,6 +28,7 @@ def generate_launch_description():
     image_topic = LaunchConfiguration("image_topic")
     control_topic = LaunchConfiguration("control_topic")
     debug_log = LaunchConfiguration("debug_log")
+    publish_debug_image = LaunchConfiguration("publish_debug_image")
 
     return LaunchDescription([
         DeclareLaunchArgument("route_mode", default_value="OUT"),
@@ -36,6 +37,7 @@ def generate_launch_description():
         DeclareLaunchArgument("image_topic", default_value="/camera/image/compressed"),
         DeclareLaunchArgument("control_topic", default_value="/control"),
         DeclareLaunchArgument("debug_log", default_value="true"),
+        DeclareLaunchArgument("publish_debug_image", default_value="false"),
         Node(
             package="camera",
             executable="camera_node",
@@ -70,6 +72,7 @@ def generate_launch_description():
                 "image_topic": image_topic,
                 "control_topic": control_topic,
                 "debug_log": debug_log,
+                "publish_debug_image": publish_debug_image,
             }],
         ),
     ])

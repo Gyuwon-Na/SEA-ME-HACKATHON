@@ -98,6 +98,12 @@ rotary:
   circulate_ff: 0.45
   exit_bias: -0.18
 
+aruco:
+  enabled: true
+  dictionary: DICT_6X6_50
+  target_id: 3
+  detect_hz: 10.0
+
 mission:
   route_mode: OUT
   control_hz: 10.0

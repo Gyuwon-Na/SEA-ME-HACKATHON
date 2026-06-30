@@ -139,6 +139,16 @@ class RotaryConfig:
 
 
 @dataclass
+class ArucoConfig:
+    """Stores ArUco marker detection parameters for the PC-side visualization."""
+
+    enabled: bool = True
+    dictionary: str = "DICT_6X6_50"
+    target_id: int = 3
+    detect_hz: float = 10.0
+
+
+@dataclass
 class MissionConfig:
     """Stores mission timing and route-selection parameters."""
 
@@ -164,6 +174,7 @@ class AutonomousConfig:
     throttle: ThrottleConfig = field(default_factory=ThrottleConfig)
     steering: SteeringConfig = field(default_factory=SteeringConfig)
     rotary: RotaryConfig = field(default_factory=RotaryConfig)
+    aruco: ArucoConfig = field(default_factory=ArucoConfig)
     mission: MissionConfig = field(default_factory=MissionConfig)
 
 

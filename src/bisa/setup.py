@@ -25,6 +25,8 @@ setup(
     entry_points={
         'console_scripts': [
             'bisa_autonomous_node = bisa.autonomous_driving_node:main',
+            'viz_node = bisa.viz_node:main',
+            'param_gui_node = bisa.param_gui_node:main',
         ],
     },
 )

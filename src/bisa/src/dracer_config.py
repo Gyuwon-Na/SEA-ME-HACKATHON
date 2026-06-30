@@ -93,6 +93,7 @@ class ThrottleConfig:
     fork_approach_cap: float = 0.20
     fork_commit_cap: float = 0.25
     post_fork_cap: float = 0.30
+    post_fork_min: float = 0.25
     rotary_approach_cap: float = 0.20
     rotary_inside_cap: float = 0.18
     dynamic_approach_cap: float = 0.18

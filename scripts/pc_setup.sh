@@ -7,7 +7,7 @@
 # and prints how to match the ROS domain and launch.
 #
 # The car runs:   ros2 launch bisa vehicle.launch.py
-# The PC runs:    ros2 launch bisa pc_compute.launch.py route_mode:=OUT
+# The PC runs:    ros2 launch bisa driving.launch.py route_mode:=OUT
 #
 # Both machines must be on the same LAN and use the SAME ROS_DOMAIN_ID.
 #
@@ -103,7 +103,7 @@ NEXT STEPS
        source $WS/install/setup.bash
 
   4. On the CAR:   ros2 launch bisa vehicle.launch.py
-     On THIS PC:   ros2 launch bisa pc_compute.launch.py route_mode:=OUT
+     On THIS PC:   ros2 launch bisa driving.launch.py route_mode:=OUT
 
   5. Check topics on the PC:
        ros2 topic echo /detect_green

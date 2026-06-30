@@ -1,7 +1,7 @@
 """Vehicle-side launch: camera + low-level control ONLY.
 
 Run this on the car. All perception/computation and visualization happen on the
-PC (see pc_compute.launch.py). The car publishes /camera/image/compressed and
+PC (see driving.launch.py). The car publishes /camera/image/compressed and
 subscribes to /control. Both machines must share the same ROS_DOMAIN_ID and LAN.
 """
 

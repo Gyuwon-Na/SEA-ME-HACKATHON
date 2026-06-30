@@ -55,6 +55,12 @@ SPEC = {
         ("sign left", "detector.conf.sign_left", "f", 0.0, 1.0),
         ("sign right", "detector.conf.sign_right", "f", 0.0, 1.0),
     ],
+    "Lane ROI": [
+        ("width (horiz)", "lane_roi.width", "i", 0, 640),
+        ("height (vert)", "lane_roi.height", "i", 0, 480),
+        ("x offset", "lane_roi.x_offset", "i", -1, 640),
+        ("y offset", "lane_roi.y_offset", "i", -1, 480),
+    ],
 }
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 import cv2
@@ -99,10 +101,24 @@ class BisaAutonomousNode(Node):
         self.last_frame = None
         self.last_log_time = 0.0
 
+        # YOLO is CPU-only on this vehicle and a single predict() can exceed the
+        # camera frame interval. Running it inside image_callback would block the
+        # single-threaded executor and freeze the camera/debug stream and control
+        # loop, so inference runs on a background thread that always processes the
+        # most recent frame and drops anything it could not keep up with.
+        self._infer_lock = threading.Lock()
+        self._infer_frame = None
+        self._infer_stop = False
+        self._infer_thread = threading.Thread(
+            target=self._inference_worker, name="bisa_inference", daemon=True
+        )
+
+        # BEST_EFFORT + shallow queue: always process the newest camera frame and
+        # drop stale ones, matching the camera publisher and avoiding WiFi lag.
         image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
-            depth=5,
-            reliability=ReliabilityPolicy.RELIABLE,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
         )
         self.create_subscription(CompressedImage, self.image_topic, self.image_callback, image_qos)
@@ -120,6 +136,7 @@ class BisaAutonomousNode(Node):
         self.add_on_set_parameters_callback(self._on_set_tuning_params)
 
         self.timer = self.create_timer(1.0 / max(self.config.mission.control_hz, 1.0), self.control_loop)
+        self._infer_thread.start()
 
         self.get_logger().info(
             "BISA autonomous node started: "
@@ -267,18 +284,34 @@ class BisaAutonomousNode(Node):
         self.latest_lane = self.lane_perception.compute_lane_obs(
             frame, collect_viz=self.publish_debug_image
         )
-        now_sec = self.get_clock().now().nanoseconds / 1e9
-        previous_infer_time = self.detector.last_infer_time
-        detections = self.detector.infer(frame, now_sec)
-        if self.detector.last_infer_time != previous_infer_time:
-            # Inference actually ran this frame; refresh buffer and status snapshot.
-            self.det_buffer.push(detections)
-            self.latest_detections = detections
+        # Hand the newest frame to the background inference thread, replacing any
+        # frame it has not consumed yet so heavy YOLO never blocks this callback.
+        with self._infer_lock:
+            self._infer_frame = frame
 
+        now_sec = self.get_clock().now().nanoseconds / 1e9
         self.latest_markers = self.aruco_detector.detect(frame, now_sec)
         self.publish_detection_status()
         if self.publish_debug_image:
             self.publish_debug_overlay()
+
+    def _inference_worker(self) -> None:
+        """Runs YOLO off the executor thread so camera/control stay responsive."""
+
+        while not self._infer_stop:
+            with self._infer_lock:
+                frame = self._infer_frame
+                self._infer_frame = None
+            if frame is None:
+                time.sleep(0.005)
+                continue
+            now_sec = self.get_clock().now().nanoseconds / 1e9
+            previous_infer_time = self.detector.last_infer_time
+            detections = self.detector.infer(frame, now_sec)
+            if self.detector.last_infer_time != previous_infer_time:
+                # Inference actually ran; refresh buffer and status snapshot.
+                self.det_buffer.push(detections)
+                self.latest_detections = detections
 
     def publish_control(self, cmd: ControlCmd) -> None:
         """Publishes clamped normalized throttle/steering to the /control topic."""
@@ -325,5 +358,7 @@ def main(args=None) -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        node._infer_stop = True
+        node._infer_thread.join(timeout=1.0)
         node.destroy_node()
         rclpy.shutdown()

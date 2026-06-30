@@ -92,9 +92,9 @@ cat <<EOF
 ==> Done.
 
 NEXT STEPS
-  1. Copy the trained model to the PC (needed for green/red/sign detection):
-       $WS/src/bisa/checkpoints/best.pt
-     (lane following + ArUco + steering visualization work without it.)
+  1. The detection model ($WS/src/bisa/checkpoints/best.pt) is already in the
+     repo, so it came with the clone. (Lane following + ArUco + steering
+     visualization also work even without it.)
 
   2. Make sure the CAR uses the same domain:  export ROS_DOMAIN_ID=$DOMAIN
 

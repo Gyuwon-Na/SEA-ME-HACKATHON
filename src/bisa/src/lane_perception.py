@@ -87,6 +87,28 @@ class LanePerception:
         except cv2.error:
             return np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
 
+    def lane_roi_rect(self, frame_width: int, frame_height: int) -> tuple[int, int, int, int]:
+        """Returns the (x0, y0, w, h) lane ROI box in full-frame pixel coords.
+
+        Width/height come from the live-tunable config; negative offsets center
+        the box horizontally and anchor it to the bottom of the frame.
+        """
+
+        cfg = self.config.lane_roi
+        if not getattr(cfg, "enabled", True):
+            return 0, 0, frame_width, frame_height
+        roi_w = int(clamp(float(cfg.width), 1.0, float(frame_width)))
+        roi_h = int(clamp(float(cfg.height), 1.0, float(frame_height)))
+        if cfg.x_offset < 0:
+            x0 = (frame_width - roi_w) // 2
+        else:
+            x0 = int(clamp(float(cfg.x_offset), 0.0, float(frame_width - roi_w)))
+        if cfg.y_offset < 0:
+            y0 = frame_height - roi_h
+        else:
+            y0 = int(clamp(float(cfg.y_offset), 0.0, float(frame_height - roi_h)))
+        return x0, y0, roi_w, roi_h
+
     def region_of_interest(self, image: np.ndarray, y0_ratio: float, y1_ratio: float) -> np.ndarray:
         """Returns a vertical ROI slice using ratios from the camera frame height."""
 
@@ -257,12 +279,17 @@ class LanePerception:
         return rotary_seen, exit_seen
 
     def _record_obs_viz(self, width, height, near_center, mid_center, far_center,
-                        lane_center, center_error) -> None:
-        """Stores ROI bands and centers for the PC debug overlay."""
+                        lane_center, center_error, roi_rect) -> None:
+        """Stores ROI bands and centers for the PC debug overlay.
+
+        Coordinates are recorded in ROI-local space; ``roi_offset`` lets the
+        overlay translate them back onto the full camera frame.
+        """
 
         def band(y0_ratio, y1_ratio):
             return (int(clamp(y0_ratio, 0.0, 1.0) * height), int(clamp(y1_ratio, 0.0, 1.0) * height))
 
+        x0, y0, roi_w, roi_h = roi_rect
         self.last_viz.update({
             "width": int(width),
             "height": int(height),
@@ -274,12 +301,21 @@ class LanePerception:
             "far_center": far_center,
             "lane_center_x": lane_center,
             "center_error": center_error,
+            "roi_rect": (int(x0), int(y0), int(roi_w), int(roi_h)),
+            "roi_offset": (int(x0), int(y0)),
         })
 
     def compute_lane_obs(self, frame_bgr: np.ndarray, collect_viz: bool = False) -> LaneObs:
         """Computes a full lane observation from one decoded BGR image."""
 
-        mask = self.build_road_mask(frame_bgr)
+        full_height, full_width = frame_bgr.shape[:2]
+        x0, y0, roi_w, roi_h = self.lane_roi_rect(full_width, full_height)
+        roi_rect = (x0, y0, roi_w, roi_h)
+        # Crop the lane search to the ROI box only; light/sign/aruco detection
+        # keeps using the full frame elsewhere in the pipeline.
+        roi_frame = frame_bgr[y0:y0 + roi_h, x0:x0 + roi_w]
+
+        mask = self.build_road_mask(roi_frame)
         height, width = mask.shape[:2]
         near = self.region_of_interest(mask, self.config.roi.near_y0, 1.0)
         mid = self.region_of_interest(mask, self.config.roi.mid_y0, self.config.roi.mid_y1)
@@ -292,36 +328,40 @@ class LanePerception:
         # On the PC overlay path always run the Hough pass so detected lane lines
         # can be drawn even when the road-mask centroid already found a center.
         if near_center is None or collect_viz:
-            hough_center, _, _ = self.average_hough_lanes(frame_bgr, record=collect_viz)
+            hough_center, _, _ = self.average_hough_lanes(roi_frame, record=collect_viz)
             if near_center is None:
                 near_center = hough_center
 
         if near_center is None:
             if collect_viz:
                 self._record_obs_viz(width, height, None, mid_center, far_center,
-                                     None, self.prev_center_error)
+                                     None, self.prev_center_error, roi_rect)
             return LaneObs(valid=False, center_error=self.prev_center_error, lost_reason="no_road_center")
 
+        # Steering error is measured against the full-frame center (vehicle
+        # heading), so translate the ROI-local center back into frame x.
+        near_center_full = near_center + x0
         if self.prev_near_center is not None:
-            jump = abs(near_center - self.prev_near_center) / max(float(width), 1.0)
+            jump = abs(near_center_full - self.prev_near_center) / max(float(full_width), 1.0)
             if jump > self.config.lane.max_center_jump:
-                near_center = self.prev_near_center
+                near_center_full = self.prev_near_center
+                near_center = near_center_full - x0
 
-        self.prev_near_center = near_center
-        center_error = (width / 2.0 - near_center) / (width / 2.0)
+        self.prev_near_center = near_center_full
+        center_error = (full_width / 2.0 - near_center_full) / (full_width / 2.0)
         far_or_near = far_center if far_center is not None else near_center
         mid_or_near = mid_center if mid_center is not None else near_center
-        signed_curv = (near_center - far_or_near) / max(float(width), 1.0)
-        curvature = clamp(abs(far_or_near - near_center) / max(float(width), 1.0) * 2.5, 0.0, 1.0)
+        signed_curv = (near_center - far_or_near) / max(float(full_width), 1.0)
+        curvature = clamp(abs(far_or_near - near_center) / max(float(full_width), 1.0) * 2.5, 0.0, 1.0)
         if mid_center is not None:
-            curvature = max(curvature, clamp(abs(mid_or_near - near_center) / max(float(width), 1.0) * 2.0, 0.0, 1.0))
+            curvature = max(curvature, clamp(abs(mid_or_near - near_center) / max(float(full_width), 1.0) * 2.0, 0.0, 1.0))
 
         fork_seen, left_branch, right_branch = self.detect_fork_candidates(mask)
         rotary_seen, rotary_exit_seen = self.detect_rotary_candidates(mask)
         self.prev_center_error = clamp(center_error, -1.0, 1.0)
         if collect_viz:
             self._record_obs_viz(width, height, near_center, mid_center, far_center,
-                                 near_center, self.prev_center_error)
+                                 near_center, self.prev_center_error, roi_rect)
         return LaneObs(
             valid=True,
             center_error=self.prev_center_error,

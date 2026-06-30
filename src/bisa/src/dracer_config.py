@@ -28,6 +28,27 @@ class RoiConfig:
 
 
 @dataclass
+class LaneRoiConfig:
+    """Pixel-space rectangular ROI that limits the classical lane pipeline only.
+
+    The full camera frame is still used for traffic-light, sign, and ArUco
+    detection; cropping happens solely for lane finding so the lane search area
+    can stay small (e.g. 640x240) while the camera keeps its native size.
+
+    ``width``/``height`` are live-tunable via sliders (rqt_reconfigure /
+    ``ros2 param set``). A negative ``x_offset`` centers the box horizontally and
+    a negative ``y_offset`` anchors it to the bottom of the frame, so by default
+    the ROI sits on the bottom strip where the lane appears.
+    """
+
+    enabled: bool = True
+    width: int = 640
+    height: int = 240
+    x_offset: int = -1
+    y_offset: int = -1
+
+
+@dataclass
 class LaneVisionConfig:
     """Stores tunable parameters for road mask and Hough fallback lane detection."""
 
@@ -75,6 +96,8 @@ class DetectorConfig:
         "finish_line": 0.55,
     })
     green_consecutive: int = 3
+    green_vote_k: int = 3
+    green_vote_n: int = 6
     sign_vote_k: int = 3
     sign_vote_n: int = 5
     dynamic_detect_consecutive: int = 2
@@ -169,6 +192,7 @@ class AutonomousConfig:
     """Top-level config object shared by perception, detection, and control."""
 
     roi: RoiConfig = field(default_factory=RoiConfig)
+    lane_roi: LaneRoiConfig = field(default_factory=LaneRoiConfig)
     lane: LaneVisionConfig = field(default_factory=LaneVisionConfig)
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     throttle: ThrottleConfig = field(default_factory=ThrottleConfig)

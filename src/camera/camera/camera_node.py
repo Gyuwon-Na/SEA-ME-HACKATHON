@@ -66,11 +66,12 @@ class CameraNode(Node):
         self.camera_device = camera_device
         self.flip_method = flip_method
 
-        # QoS compatible with web_video_server and monitor subscribers.
+        # BEST_EFFORT for low-latency streaming over WiFi/LAN: drop late frames
+        # instead of retransmitting (RELIABLE caused head-of-line blocking lag).
         self.image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
-            depth=10,
-            reliability=ReliabilityPolicy.RELIABLE,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
         )
         self.publisher_ = self.create_publisher(CompressedImage, publish_topic, self.image_qos)

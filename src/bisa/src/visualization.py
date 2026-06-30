@@ -18,6 +18,7 @@ COLOR_LANE_CENTER = (0, 165, 255)   # perceived lane center path
 COLOR_STEER = (0, 0, 255)       # steering angle line
 COLOR_ARUCO = (255, 0, 255)     # aruco marker
 COLOR_ARUCO_TARGET = (0, 255, 255)  # target id marker
+COLOR_ROI = (255, 128, 0)       # lane-detection ROI box
 COLOR_HUD = (255, 255, 255)
 
 DET_COLORS = {
@@ -36,20 +37,39 @@ def _ipt(value) -> int:
     return int(round(value))
 
 
-def draw_lanes(frame, lane_viz) -> None:
-    """Draws raw hough segments, averaged lane lines, and the lane-center path."""
+def draw_lane_roi(frame, lane_viz) -> None:
+    """Draws the lane-detection ROI box on the full camera frame."""
 
     if not lane_viz:
         return
+    rect = lane_viz.get("roi_rect")
+    if not rect:
+        return
+    x0, y0, w, h = rect
+    cv2.rectangle(frame, (x0, y0), (x0 + w, y0 + h), COLOR_ROI, 2)
+    cv2.putText(frame, f"lane ROI {w}x{h}", (x0 + 4, max(14, y0 + 18)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_ROI, 1, cv2.LINE_AA)
+
+
+def draw_lanes(frame, lane_viz) -> None:
+    """Draws raw hough segments, averaged lane lines, and the lane-center path.
+
+    Perception runs in ROI-local coordinates, so every point is translated by
+    ``roi_offset`` to land in the correct place on the full frame.
+    """
+
+    if not lane_viz:
+        return
+    ox, oy = lane_viz.get("roi_offset", (0, 0))
     for seg in lane_viz.get("hough_segments", []) or []:
         x1, y1, x2, y2 = seg
-        cv2.line(frame, (x1, y1), (x2, y2), COLOR_LANE_RAW, 1)
+        cv2.line(frame, (x1 + ox, y1 + oy), (x2 + ox, y2 + oy), COLOR_LANE_RAW, 1)
 
     for key in ("hough_left", "hough_right"):
         line = lane_viz.get(key)
         if line:
             (x1, y1), (x2, y2) = line
-            cv2.line(frame, (_ipt(x1), _ipt(y1)), (_ipt(x2), _ipt(y2)), COLOR_LANE, 3)
+            cv2.line(frame, (_ipt(x1) + ox, _ipt(y1) + oy), (_ipt(x2) + ox, _ipt(y2) + oy), COLOR_LANE, 3)
 
     # Perceived lane center as a path through far -> mid -> near centroids.
     pts = []
@@ -60,7 +80,7 @@ def draw_lanes(frame, lane_viz) -> None:
         band = lane_viz.get(band_key)
         if cx is not None and band is not None:
             y_mid = (band[0] + band[1]) // 2
-            pts.append((_ipt(cx), y_mid))
+            pts.append((_ipt(cx) + ox, y_mid + oy))
     for i, point in enumerate(pts):
         cv2.circle(frame, point, 5, COLOR_LANE_CENTER, -1)
         if i > 0:
@@ -120,6 +140,7 @@ def draw_overlay(frame, lane_viz, detections, markers, cmd, state, target_id=3):
     """Draws the full debug overlay on a copy of the frame and returns it."""
 
     out = frame.copy()
+    draw_lane_roi(out, lane_viz)
     draw_lanes(out, lane_viz)
     draw_center_and_steering(out, float(getattr(cmd, "steering", 0.0)))
     draw_detections(out, detections)

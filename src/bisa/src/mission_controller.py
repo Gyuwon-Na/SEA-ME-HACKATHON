@@ -211,7 +211,11 @@ class OutCourseFSM(BaseCourseFSM):
 
         if self.state == "OUT_WAIT_GREEN":
             cmd = ControlCmd(0.0, 0.0)
-            if detector.stable_consecutive("traffic_green", self.config.detector.green_consecutive):
+            if detector.stable_seen(
+                "traffic_green",
+                self.config.detector.green_vote_k,
+                self.config.detector.green_vote_n,
+            ):
                 self.transition("OUT_LAUNCH", now)
 
         elif self.state == "OUT_LAUNCH":
@@ -373,7 +377,11 @@ class InCourseFSM(BaseCourseFSM):
 
         if self.state == "IN_WAIT_GREEN":
             cmd = ControlCmd(0.0, 0.0)
-            if detector.stable_consecutive("traffic_green", self.config.detector.green_consecutive):
+            if detector.stable_seen(
+                "traffic_green",
+                self.config.detector.green_vote_k,
+                self.config.detector.green_vote_n,
+            ):
                 self.transition("IN_LAUNCH", now)
 
         elif self.state == "IN_LAUNCH":

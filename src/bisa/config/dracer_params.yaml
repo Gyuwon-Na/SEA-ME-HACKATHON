@@ -9,6 +9,16 @@ roi:
   detector_sign: [0.10, 0.05, 0.90, 0.70]
   detector_dynamic: [0.00, 0.35, 1.00, 1.00]
 
+# Lane-only ROI. Camera stays full size for light/sign/aruco detection; only the
+# lane pipeline is cropped to this box. width/height are slider-adjustable live.
+# x_offset < 0 => centered horizontally, y_offset < 0 => anchored to frame bottom.
+lane_roi:
+  enabled: true
+  width: 640
+  height: 240
+  x_offset: -1
+  y_offset: -1
+
 lane:
   black_hsv_lower: [0, 0, 0]
   black_hsv_upper: [180, 90, 90]
@@ -48,6 +58,8 @@ detector:
     dynamic_marker: 0.60
     finish_line: 0.55
   green_consecutive: 3
+  green_vote_k: 3
+  green_vote_n: 6
   sign_vote_k: 3
   sign_vote_n: 5
   dynamic_detect_consecutive: 2

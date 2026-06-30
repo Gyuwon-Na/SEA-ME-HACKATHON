@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,7 +85,17 @@ class DetectionBuffer:
 
 
 class BestPthDetector:
-    """Runs the fine-tuned best.pth model when ultralytics is available."""
+    """Runs the fine-tuned best.pt model when ultralytics is available."""
+
+    # The shipped best.pt is a 4-class image classifier whose label names differ
+    # from the mission class names the FSM expects. Translate them here so a
+    # classification checkpoint drops straight into the detection/vote pipeline.
+    CLASSIFY_NAME_ALIASES = {
+        "green_light": "traffic_green",
+        "red_light": "traffic_red",
+        "left_turn": "sign_left",
+        "right_turn": "sign_right",
+    }
 
     def __init__(self, config: AutonomousConfig, model_path: str, logger=None):
         """Initializes lazy model loading so syntax tests do not require torch."""
@@ -93,6 +104,7 @@ class BestPthDetector:
         self.model_path = str(Path(model_path).expanduser())
         self.logger = logger
         self.model = None
+        self.task = "detect"
         self.last_infer_time = 0.0
         self.load_error: Exception | None = None
 
@@ -113,9 +125,15 @@ class BestPthDetector:
             self._log_warn(f"Detector model not found: {self.model_path}")
             return False
         try:
+            import torch
             from ultralytics import YOLO
 
+            # This vehicle has no CUDA/Vulkan compute device (Telechips TCC8050 /
+            # PowerVR), so inference is CPU-only. Cap threads to leave headroom
+            # for the ROS control loop on the quad-core CPU.
+            torch.set_num_threads(max(1, min(4, (os.cpu_count() or 4) - 1)))
             self.model = YOLO(self.model_path)
+            self.task = str(getattr(self.model, "task", "detect"))
             return True
         except Exception as exc:  # pragma: no cover - depends on target vehicle env.
             self.load_error = exc
@@ -142,8 +160,17 @@ class BestPthDetector:
         results = self.model.predict(
             source=frame_bgr,
             imgsz=int(self.config.detector.imgsz),
+            device="cpu",
             verbose=False,
         )
+        if not results:
+            return []
+
+        if self.task == "classify":
+            return self._classify_detections(
+                results[0], frame_bgr.shape[1], frame_bgr.shape[0]
+            )
+
         detections: list[Detection] = []
         for result in results:
             boxes = getattr(result, "boxes", None)
@@ -167,6 +194,30 @@ class BestPthDetector:
                 if self.in_expected_roi(det, frame_bgr.shape[1], frame_bgr.shape[0]):
                     detections.append(det)
         return detections
+
+    def _classify_detections(self, result, width: int, height: int) -> list[Detection]:
+        """Turns a whole-frame classification result into one mission detection."""
+
+        probs = getattr(result, "probs", None)
+        if probs is None:
+            return []
+        top1 = int(probs.top1)
+        conf = float(probs.top1conf)
+        model_names = getattr(self.model, "names", {}) or {}
+        raw_name = str(model_names.get(top1, top1))
+        cls_name = self.CLASSIFY_NAME_ALIASES.get(raw_name, raw_name)
+        if conf < self.config.detector.conf.get(cls_name, 0.55):
+            return []
+        return [
+            Detection(
+                cls=cls_name,
+                conf=conf,
+                bbox=(0.0, 0.0, float(width), float(height)),
+                cx=width / 2.0,
+                cy=height / 2.0,
+                area=float(width * height),
+            )
+        ]
 
     def _class_name_from_index(self, cls_index: int) -> str:
         """Maps model class IDs to mission class names via CLASS_MAP."""

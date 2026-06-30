@@ -59,6 +59,7 @@ class LaneController:
         steer: float,
         curvature: float,
         force_stop: bool = False,
+        section_min: float = None,
     ) -> float:
         """Schedules throttle with immediate braking and ramped acceleration."""
 
@@ -67,16 +68,18 @@ class LaneController:
             return 0.0
 
         cap = clamp(section_cap, 0.0, self.config.throttle.max)
+        floor = self.config.throttle.min_moving if section_min is None else section_min
+        floor = min(floor, cap)
         target = cap
         target -= self.config.throttle.steer_slowdown * abs(steer)
         target -= self.config.throttle.curvature_slowdown * curvature
-        target = clamp(target, self.config.throttle.min_moving, cap)
+        target = clamp(target, floor, cap)
         if target > self.prev_throttle:
             target = min(target, self.prev_throttle + self.config.throttle.ramp_up_per_cmd)
         self.prev_throttle = target
         return target
 
-    def lane_follow(self, lane: LaneObs, cap: float, steer_limit: float) -> ControlCmd:
+    def lane_follow(self, lane: LaneObs, cap: float, steer_limit: float, section_min: float = None) -> ControlCmd:
         """Follows the latest lane observation with cautious lost-lane behavior."""
 
         if not lane.valid:
@@ -91,7 +94,7 @@ class LaneController:
             return ControlCmd(throttle, steer)
 
         steer = self.steering_from_lane(lane, steer_ff=0.0, steer_limit=steer_limit)
-        throttle = self.throttle_scheduler(cap, steer, lane.curvature)
+        throttle = self.throttle_scheduler(cap, steer, lane.curvature, section_min=section_min)
         return ControlCmd(throttle, steer)
 
     def hold_or_zero_steering(self) -> float:
@@ -249,10 +252,12 @@ class OutCourseFSM(BaseCourseFSM):
         elif self.state == "OUT_POST_FORK":
             cap = self.config.throttle.post_fork_cap
             limit = self.config.steering.post_fork_limit
+            section_min = self.config.throttle.post_fork_min
             if self.likely_dynamic_zone(lane, now):
                 cap = self.config.throttle.dynamic_approach_cap
                 limit = self.config.steering.dynamic_limit
-            cmd = self.controller.lane_follow(lane, cap, limit)
+                section_min = None
+            cmd = self.controller.lane_follow(lane, cap, limit, section_min=section_min)
             if detector.stable_consecutive("dynamic_marker", self.config.detector.dynamic_detect_consecutive):
                 self.transition("OUT_DYNAMIC_STOP", now)
 

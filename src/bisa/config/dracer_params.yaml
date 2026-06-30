@@ -29,7 +29,7 @@ lane:
   max_center_jump: 0.45
 
 detector:
-  model_path: checkpoints/best.pth
+  model_path: checkpoints/best.pt
   enabled: true
   imgsz: 320
   inference_hz: 10.0
@@ -56,12 +56,13 @@ detector:
 
 throttle:
   max: 0.40
-  min_moving: 0.12
+  min_moving: 0.20
   launch_cap: 0.32
   s_curve_cap: 0.24
   fork_approach_cap: 0.20
   fork_commit_cap: 0.25
   post_fork_cap: 0.30
+  post_fork_min: 0.25
   rotary_approach_cap: 0.20
   rotary_inside_cap: 0.18
   dynamic_approach_cap: 0.18

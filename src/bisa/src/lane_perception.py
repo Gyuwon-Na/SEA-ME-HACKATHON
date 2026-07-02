@@ -317,20 +317,26 @@ class LanePerception:
 
         mask = self.build_road_mask(roi_frame)
         height, width = mask.shape[:2]
-        near = self.region_of_interest(mask, self.config.roi.near_y0, 1.0)
         mid = self.region_of_interest(mask, self.config.roi.mid_y0, self.config.roi.mid_y1)
         far = self.region_of_interest(mask, self.config.roi.far_y0, self.config.roi.far_y1)
 
-        near_center = self.contour_center_x(near, self.config.lane.min_component_area_ratio)
+        # Primary lane center follows the reference lane_detector_1029.py exactly:
+        # L-channel CLAHE -> GaussianBlur -> Canny -> Hough lines -> slope-split
+        # average -> lane center from the left/right line x at the ROI top. This
+        # always runs (the PC does the heavy compute), matching the reference which
+        # is purely Hough-line based rather than road-mask based.
+        hough_center, _, _ = self.average_hough_lanes(roi_frame, record=collect_viz)
+        near_center = hough_center
+        if near_center is None:
+            # Fall back to the black-road-mask centroid only when no lane line was
+            # found, so a fully black frame still yields a usable center.
+            near = self.region_of_interest(mask, self.config.roi.near_y0, 1.0)
+            near_center = self.contour_center_x(near, self.config.lane.min_component_area_ratio)
+
+        # Far/mid centroids stay mask-based; they feed curvature and fork/rotary
+        # cues the reference never computes but the mission FSM depends on.
         mid_center = self.contour_center_x(mid, self.config.lane.min_component_area_ratio)
         far_center = self.contour_center_x(far, self.config.lane.min_component_area_ratio)
-
-        # On the PC overlay path always run the Hough pass so detected lane lines
-        # can be drawn even when the road-mask centroid already found a center.
-        if near_center is None or collect_viz:
-            hough_center, _, _ = self.average_hough_lanes(roi_frame, record=collect_viz)
-            if near_center is None:
-                near_center = hough_center
 
         if near_center is None:
             if collect_viz:

@@ -16,7 +16,7 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import Bool, String
 
-from . import visualization
+from . import traffic_light, visualization
 from .aruco_detector import ArucoDetector
 from .dracer_config import load_config, resolve_package_relative_path
 from .lane_perception import LaneObs, LanePerception, clamp
@@ -91,6 +91,7 @@ class BisaAutonomousNode(Node):
         self.lane_perception = LanePerception(self.config)
         self.det_buffer = DetectionBuffer(maxlen=40)
         self.detector = BestPthDetector(self.config, resolved_model, logger=self.get_logger())
+        self.light_analyzer = traffic_light.TrafficLightAnalyzer(self.config)
         self.aruco_detector = ArucoDetector(self.config)
         self.controller = LaneController(self.config)
         self.fsm = make_course_fsm(self.config, self.controller)
@@ -247,6 +248,9 @@ class BisaAutonomousNode(Node):
 
         if self.last_frame is None:
             return
+        light_roi = (
+            self.config.roi.detector_light if self.config.traffic_light.enabled else None
+        )
         overlay = visualization.draw_overlay(
             self.last_frame,
             self.lane_perception.last_viz,
@@ -255,6 +259,8 @@ class BisaAutonomousNode(Node):
             self.last_cmd,
             self.fsm.state,
             target_id=self.config.aruco.target_id,
+            light_roi=light_roi,
+            light_states=self.light_analyzer.last_states,
         )
         ok, encoded = cv2.imencode(".jpg", overlay)
         if not ok:
@@ -305,11 +311,16 @@ class BisaAutonomousNode(Node):
             if frame is None:
                 time.sleep(0.005)
                 continue
+            # Optional CLAHE/color-correction preprocessing shared by the YOLO
+            # detector and the HSV traffic-light analyzer (no-op when disabled).
+            proc = traffic_light.preprocess_frame(frame, self.config.color_correction)
             now_sec = self.get_clock().now().nanoseconds / 1e9
             previous_infer_time = self.detector.last_infer_time
-            detections = self.detector.infer(frame, now_sec)
+            detections = self.detector.infer(proc, now_sec)
             if self.detector.last_infer_time != previous_infer_time:
                 # Inference actually ran; refresh buffer and status snapshot.
+                # Fold in HSV traffic-light detections so they share the vote path.
+                detections = detections + self.light_analyzer.detect(proc)
                 self.det_buffer.push(detections)
                 self.latest_detections = detections
 
@@ -319,7 +330,7 @@ class BisaAutonomousNode(Node):
         msg = Control()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.steering = float(clamp(cmd.steering, -1.0, 1.0))
-        msg.throttle = float(clamp(cmd.throttle, 0.0, self.config.throttle.max))
+        msg.throttle = float(clamp(cmd.throttle, 0.0, self.config.throttle.speed_max))
         self.control_pub.publish(msg)
 
     def control_loop(self) -> None:

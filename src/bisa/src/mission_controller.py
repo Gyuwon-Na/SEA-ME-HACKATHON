@@ -25,6 +25,7 @@ class LaneController:
 
         self.config = config
         self.prev_error = 0.0
+        self.error_integral = 0.0
         self.prev_steer = 0.0
         self.prev_throttle = 0.0
 
@@ -38,10 +39,15 @@ class LaneController:
 
         if not lane.valid:
             raw = self.prev_steer * self.config.steering.lost_decay
+            # Bleed the integral while lane is lost to avoid windup on recovery.
+            self.error_integral *= self.config.steering.lost_decay
         else:
             d_error = lane.center_error - self.prev_error
+            # Clamped integral term (anti-windup); ki defaults to 0 => pure PD.
+            self.error_integral = clamp(self.error_integral + lane.center_error, -2.0, 2.0)
             raw = (
                 self.config.steering.kp * lane.center_error
+                + self.config.steering.ki * self.error_integral
                 + self.config.steering.kd * d_error
                 + self.config.steering.kcurv * lane.signed_curvature
                 + steer_ff
@@ -67,8 +73,12 @@ class LaneController:
             self.prev_throttle = 0.0
             return 0.0
 
-        cap = clamp(section_cap, 0.0, self.config.throttle.max)
-        floor = self.config.throttle.min_moving if section_min is None else section_min
+        speed_min = self.config.throttle.speed_min
+        speed_max = self.config.throttle.speed_max
+        # Squeeze the per-state cap into the [speed_min, speed_max] band so the
+        # commanded throttle always maps into that band while moving.
+        cap = clamp(section_cap, speed_min, speed_max)
+        floor = speed_min if section_min is None else clamp(section_min, speed_min, cap)
         floor = min(floor, cap)
         target = cap
         target -= self.config.throttle.steer_slowdown * abs(steer)
@@ -89,7 +99,7 @@ class LaneController:
                 self.config.steering.rate_limit_per_cmd,
             )
             self.prev_steer = steer
-            throttle = min(self.prev_throttle, self.config.throttle.min_moving)
+            throttle = min(self.prev_throttle, self.config.throttle.speed_min)
             self.prev_throttle = throttle
             return ControlCmd(throttle, steer)
 
@@ -486,9 +496,39 @@ class InCourseFSM(BaseCourseFSM):
         return cmd
 
 
+class LaneTestFSM(BaseCourseFSM):
+    """Pure lane-following mode for verifying lane detection + steering.
+
+    No green-light gate and no mission transitions: it just follows the lane at
+    the configured speed band on every tick. Select with route_mode=LANE so the
+    car starts driving immediately without needing a traffic light.
+    """
+
+    def __init__(self, config: AutonomousConfig, controller: LaneController):
+        """Creates the lane-verification state machine."""
+
+        super().__init__(config, controller)
+        self.state = "LANE_TEST"
+
+    def step(self, lane: LaneObs, detector: DetectionBuffer, now: float) -> ControlCmd:
+        """Follows the lane every tick, capped by the speed band."""
+
+        if self.start_t <= 0.0:
+            self.start_t = now
+            self.enter_t = now
+        return self.controller.lane_follow(
+            lane,
+            self.config.throttle.speed_max,
+            self.config.steering.s_curve_limit,
+        )
+
+
 def make_course_fsm(config: AutonomousConfig, controller: LaneController) -> BaseCourseFSM:
     """Creates the route-specific FSM selected by route_mode."""
 
-    if config.mission.route_mode.upper() == "IN":
+    route = config.mission.route_mode.upper()
+    if route in ("LANE", "LANE_TEST", "TEST"):
+        return LaneTestFSM(config, controller)
+    if route == "IN":
         return InCourseFSM(config, controller)
     return OutCourseFSM(config, controller)

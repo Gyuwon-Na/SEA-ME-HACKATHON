@@ -20,7 +20,8 @@ try:
 except ModuleNotFoundError:
     yaml = None
 
-# Curated tuning subset. kind: 'f' float, 'i' int, 'hsv_v' V of black_hsv_upper.
+# Curated tuning subset, grouped per algorithm (one Notebook tab per key).
+# kind: 'f' float, 'i' int, 'b' bool (0/1), 'hsv_v' V of black_hsv_upper.
 # (label, dotted_name, kind, lo, hi)
 SPEC = {
     "Lane": [
@@ -35,9 +36,10 @@ SPEC = {
         ("fork area", "lane.fork_area_ratio", "f", 0.0, 0.2),
         ("rotary area", "lane.rotary_area_ratio", "f", 0.0, 0.3),
     ],
-    "Steering": [
-        ("kp", "steering.kp", "f", 0.0, 4.0),
-        ("kd", "steering.kd", "f", 0.0, 2.0),
+    "Steering (PID)": [
+        ("PID Kp", "steering.kp", "f", 0.0, 4.0),
+        ("PID Ki", "steering.ki", "f", 0.0, 1.0),
+        ("PID Kd", "steering.kd", "f", 0.0, 2.0),
         ("kcurv", "steering.kcurv", "f", 0.0, 2.0),
         ("straight limit", "steering.straight_limit", "f", 0.0, 1.0),
         ("s-curve limit", "steering.s_curve_limit", "f", 0.0, 1.0),
@@ -45,9 +47,36 @@ SPEC = {
         ("steer sign", "steering.steer_sign", "i", -1, 1),
     ],
     "Throttle": [
-        ("max", "throttle.max", "f", 0.0, 1.0),
+        ("min speed", "throttle.speed_min", "f", 0.0, 1.0),
+        ("max speed", "throttle.speed_max", "f", 0.0, 1.0),
         ("launch cap", "throttle.launch_cap", "f", 0.0, 1.0),
         ("s-curve cap", "throttle.s_curve_cap", "f", 0.0, 1.0),
+    ],
+    "Color Correction": [
+        ("enabled", "color_correction.enabled", "b", 0, 1),
+        ("clahe clip", "color_correction.clahe_clip", "f", 0.0, 8.0),
+        ("sat boost", "color_correction.saturation_boost", "f", 0.0, 3.0),
+        ("brightness", "color_correction.brightness", "i", -50, 50),
+        ("contrast", "color_correction.contrast", "f", 0.0, 3.0),
+        ("saturation", "color_correction.saturation", "f", 0.0, 3.0),
+        ("gamma", "color_correction.gamma", "f", 0.1, 3.0),
+    ],
+    "Traffic Light": [
+        ("enabled", "traffic_light.enabled", "b", 0, 1),
+        ("green H lo", "traffic_light.green_h_lo", "i", 0, 180),
+        ("green H hi", "traffic_light.green_h_hi", "i", 0, 180),
+        ("green S min", "traffic_light.green_s_min", "i", 0, 255),
+        ("green V min", "traffic_light.green_v_min", "i", 0, 255),
+        ("red H1 hi", "traffic_light.red_h1_hi", "i", 0, 180),
+        ("red H2 lo", "traffic_light.red_h2_lo", "i", 0, 180),
+        ("red S min", "traffic_light.red_s_min", "i", 0, 255),
+        ("red V min", "traffic_light.red_v_min", "i", 0, 255),
+        ("yellow H lo", "traffic_light.yellow_h_lo", "i", 0, 180),
+        ("yellow H hi", "traffic_light.yellow_h_hi", "i", 0, 180),
+        ("min on ratio", "traffic_light.min_on_ratio", "f", 0.0, 0.5),
+        ("hough param2", "traffic_light.hough_param2", "i", 1, 100),
+        ("hough minR", "traffic_light.hough_min_radius", "i", 0, 50),
+        ("hough maxR", "traffic_light.hough_max_radius", "i", 0, 100),
     ],
     "Detector conf": [
         ("green", "detector.conf.traffic_green", "f", 0.0, 1.0),
@@ -133,6 +162,8 @@ class ParamGuiNode(Node):
 def build_param(name: str, kind: str, value, hsv_base) -> Parameter:
     """Builds an rclpy Parameter for one control's current value."""
 
+    if kind == "b":
+        return Parameter(name, Parameter.Type.BOOL, bool(round(value)))
     if kind == "i":
         return Parameter(name, Parameter.Type.INTEGER, int(round(value)))
     if kind == "hsv_v":
@@ -165,16 +196,23 @@ def main(args=None) -> None:
             node.send([build_param(n, k, value, hsv_base)])
         return _send
 
+    # One Notebook tab per algorithm group so the active values are easy to scan.
+    notebook = ttk.Notebook(root)
+    notebook.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+    root.rowconfigure(0, weight=1)
+    root.columnconfigure(0, weight=1)
+
     scales = {}
-    col = 0
     for section, items in SPEC.items():
-        frame = ttk.LabelFrame(root, text=section)
-        frame.grid(row=0, column=col, padx=6, pady=6, sticky="n")
-        col += 1
+        tab = ttk.Frame(notebook, padding=8)
+        notebook.add(tab, text=section)
         for row, (label, name, kind, lo, hi) in enumerate(items):
-            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=4)
+            ttk.Label(tab, text=label).grid(row=row, column=0, sticky="w", padx=4)
             if kind == "hsv_v":
                 init = float(hsv_base[2]) if len(hsv_base) > 2 else 90.0
+                resolution = 1.0
+            elif kind == "b":
+                init = 1.0 if bool(get_nested(data, name, False)) else 0.0
                 resolution = 1.0
             elif kind == "i":
                 init = float(get_nested(data, name, lo))
@@ -182,15 +220,15 @@ def main(args=None) -> None:
             else:
                 init = float(get_nested(data, name, lo))
                 resolution = max((hi - lo) / 200.0, 0.001)
-            scale = tk.Scale(frame, from_=lo, to=hi, orient="horizontal",
-                             resolution=resolution, length=220)
+            scale = tk.Scale(tab, from_=lo, to=hi, orient="horizontal",
+                             resolution=resolution, length=240)
             scale.set(init)
             scale.grid(row=row, column=1, padx=4, pady=1)
             scale.bind("<ButtonRelease-1>", make_sender(name, kind))
             scales[name] = scale
 
     status = ttk.Label(root, text=f"target: {node.target_node}  (drag a slider to apply)")
-    status.grid(row=1, column=0, columnspan=max(col, 1), pady=4)
+    status.grid(row=1, column=0, pady=4)
 
     def pump():
         rclpy.spin_once(node, timeout_sec=0.0)

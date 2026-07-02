@@ -79,6 +79,10 @@ class DetectorConfig:
     enabled: bool = True
     imgsz: int = 320
     inference_hz: float = 10.0
+    # Inference device: 'auto' uses CUDA when available (PC GPU) else CPU. The
+    # heavy detector runs on the operator PC, so a GPU there offloads the weak
+    # vehicle board entirely. Set 'cpu'/'cuda' to force one.
+    device: str = "auto"
     class_map: dict[str, int] = field(default_factory=lambda: {
         "traffic_green": 0,
         "traffic_red": 1,
@@ -107,10 +111,17 @@ class DetectorConfig:
 
 @dataclass
 class ThrottleConfig:
-    """Stores normalized throttle caps and ramp behavior for each mission state."""
+    """Stores normalized throttle caps and ramp behavior for each mission state.
 
-    max: float = 0.40
-    min_moving: float = 0.12
+    ``speed_min``/``speed_max`` are the single source of truth for the moving
+    speed band: every commanded throttle (while not stopped) is mapped into
+    ``[speed_min, speed_max]``. Change these two to retune the overall speed.
+    The per-state ``*_cap`` values only shape the *relative* speed inside that
+    band; they are clamped into it.
+    """
+
+    speed_min: float = 0.20
+    speed_max: float = 0.30
     launch_cap: float = 0.32
     s_curve_cap: float = 0.24
     fork_approach_cap: float = 0.20
@@ -133,6 +144,7 @@ class SteeringConfig:
 
     steer_sign: int = 1
     kp: float = 1.20
+    ki: float = 0.0
     kd: float = 0.24
     kcurv: float = 0.30
     rate_limit_per_cmd: float = 0.10
@@ -172,6 +184,60 @@ class ArucoConfig:
 
 
 @dataclass
+class ColorCorrectionConfig:
+    """Frame preprocessing shared before detection (traffic_light_processor.py parity).
+
+    Off by default so on-vehicle runs pay nothing. When ``enabled`` the frame fed
+    to the detector/traffic-light analyzer goes through CLAHE -> saturation boost
+    -> brightness/contrast/saturation/gamma, mirroring the reference pipeline. The
+    lane and debug-overlay frames keep using the raw image.
+    """
+
+    enabled: bool = False
+    clahe_clip: float = 2.0
+    clahe_tile: int = 8
+    saturation_boost: float = 1.5
+    brightness: int = 0        # additive, -50..50 (convertScaleAbs beta)
+    contrast: float = 1.0      # multiplicative, 0..3 (convertScaleAbs alpha)
+    saturation: float = 1.0    # HSV S scale, 0..3
+    gamma: float = 1.0         # gamma LUT, 0.1..3
+
+
+@dataclass
+class TrafficLightConfig:
+    """HSV color analysis of the traffic-light ROI (traffic_light_processor.py parity).
+
+    Off by default. When ``enabled`` the analyzer runs the same red/yellow/green
+    HSV masks (with HoughCircles confirmation for red/yellow) as the reference,
+    over the ``roi.detector_light`` region, and emits traffic_green/traffic_red
+    detections that feed the existing vote/FSM path. HSV bounds are stored as
+    scalars so each maps to one tuning slider.
+    """
+
+    enabled: bool = False
+    red_h1_hi: int = 10        # upper hue of the low-red band [0, red_h1_hi]
+    red_h2_lo: int = 170       # lower hue of the high-red band [red_h2_lo, 180]
+    red_s_min: int = 120
+    red_v_min: int = 100
+    yellow_h_lo: int = 15
+    yellow_h_hi: int = 32
+    yellow_s_min: int = 30
+    yellow_v_min: int = 30
+    green_h_lo: int = 40
+    green_h_hi: int = 90
+    green_s_min: int = 40
+    green_v_min: int = 40
+    # Fraction of one vertical band (1/3 of the light ROI) that must match its
+    # color to count that lamp lit. Slider-tunable live.
+    min_on_ratio: float = 0.01
+    hough_min_dist: int = 20
+    hough_param1: int = 50
+    hough_param2: int = 10
+    hough_min_radius: int = 2
+    hough_max_radius: int = 30
+
+
+@dataclass
 class MissionConfig:
     """Stores mission timing and route-selection parameters."""
 
@@ -199,6 +265,8 @@ class AutonomousConfig:
     steering: SteeringConfig = field(default_factory=SteeringConfig)
     rotary: RotaryConfig = field(default_factory=RotaryConfig)
     aruco: ArucoConfig = field(default_factory=ArucoConfig)
+    color_correction: ColorCorrectionConfig = field(default_factory=ColorCorrectionConfig)
+    traffic_light: TrafficLightConfig = field(default_factory=TrafficLightConfig)
     mission: MissionConfig = field(default_factory=MissionConfig)
 
 

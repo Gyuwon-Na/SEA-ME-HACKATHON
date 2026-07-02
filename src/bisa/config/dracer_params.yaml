@@ -43,6 +43,8 @@ detector:
   enabled: true
   imgsz: 320
   inference_hz: 10.0
+  # auto = CUDA GPU on the PC when available, else CPU. Force with cpu / cuda.
+  device: auto
   class_map:
     traffic_green: 0
     traffic_red: 1
@@ -67,8 +69,10 @@ detector:
   red_consecutive_after_finish: 3
 
 throttle:
-  max: 0.40
-  min_moving: 0.20
+  # Moving speed band. Every throttle command (while not stopped) maps into
+  # [speed_min, speed_max]. Change these two to retune overall speed.
+  speed_min: 0.20
+  speed_max: 0.30
   launch_cap: 0.32
   s_curve_cap: 0.24
   fork_approach_cap: 0.20
@@ -87,6 +91,7 @@ throttle:
 steering:
   steer_sign: 1
   kp: 1.20
+  ki: 0.0
   kd: 0.24
   kcurv: 0.30
   rate_limit_per_cmd: 0.10
@@ -115,6 +120,41 @@ aruco:
   dictionary: DICT_6X6_50
   target_id: 3
   detect_hz: 10.0
+
+# Frame preprocessing shared by the YOLO detector and the HSV traffic-light
+# analyzer. Off by default so the vehicle pays nothing; enable while tuning.
+color_correction:
+  enabled: false
+  clahe_clip: 2.0
+  clahe_tile: 8
+  saturation_boost: 1.5
+  brightness: 0
+  contrast: 1.0
+  saturation: 1.0
+  gamma: 1.0
+
+# HSV traffic-light color analysis over roi.detector_light. Emits
+# traffic_green/traffic_red detections into the vote path when enabled.
+traffic_light:
+  enabled: false
+  red_h1_hi: 10
+  red_h2_lo: 170
+  red_s_min: 120
+  red_v_min: 100
+  yellow_h_lo: 15
+  yellow_h_hi: 32
+  yellow_s_min: 30
+  yellow_v_min: 30
+  green_h_lo: 40
+  green_h_hi: 90
+  green_s_min: 40
+  green_v_min: 40
+  min_on_ratio: 0.01
+  hough_min_dist: 20
+  hough_param1: 50
+  hough_param2: 10
+  hough_min_radius: 2
+  hough_max_radius: 30
 
 mission:
   route_mode: OUT

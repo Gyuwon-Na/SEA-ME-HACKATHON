@@ -105,8 +105,26 @@ class BestPthDetector:
         self.logger = logger
         self.model = None
         self.task = "detect"
+        self.device = "cpu"
         self.last_infer_time = 0.0
         self.load_error: Exception | None = None
+
+    def _resolve_device(self) -> str:
+        """Picks the inference device, auto-detecting a CUDA GPU on the PC."""
+
+        preference = str(getattr(self.config.detector, "device", "auto")).lower()
+        if preference in ("cpu",):
+            return "cpu"
+        if preference in ("cuda", "gpu", "0", "cuda:0"):
+            return "cuda:0"
+        try:  # 'auto'
+            import torch
+
+            if torch.cuda.is_available():
+                return "cuda:0"
+        except Exception:  # pragma: no cover - depends on target env.
+            pass
+        return "cpu"
 
     def _log_warn(self, message: str) -> None:
         """Writes warnings through ROS logger when available."""
@@ -128,12 +146,17 @@ class BestPthDetector:
             import torch
             from ultralytics import YOLO
 
-            # This vehicle has no CUDA/Vulkan compute device (Telechips TCC8050 /
-            # PowerVR), so inference is CPU-only. Cap threads to leave headroom
-            # for the ROS control loop on the quad-core CPU.
-            torch.set_num_threads(max(1, min(4, (os.cpu_count() or 4) - 1)))
+            self.device = self._resolve_device()
+            # Only cap CPU threads when falling back to CPU (e.g. the all-on-vehicle
+            # launch). On the PC GPU path torch manages the device itself.
+            if self.device == "cpu":
+                torch.set_num_threads(max(1, min(4, (os.cpu_count() or 4) - 1)))
             self.model = YOLO(self.model_path)
             self.task = str(getattr(self.model, "task", "detect"))
+            if self.logger is not None:
+                self.logger.info(
+                    f"Detector loaded on device={self.device} (task={self.task})"
+                )
             return True
         except Exception as exc:  # pragma: no cover - depends on target vehicle env.
             self.load_error = exc
@@ -160,7 +183,7 @@ class BestPthDetector:
         results = self.model.predict(
             source=frame_bgr,
             imgsz=int(self.config.detector.imgsz),
-            device="cpu",
+            device=self.device,
             verbose=False,
         )
         if not results:

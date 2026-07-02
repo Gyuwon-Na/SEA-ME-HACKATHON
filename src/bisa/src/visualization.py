@@ -9,16 +9,19 @@ from __future__ import annotations
 import math
 
 import cv2
+import numpy as np
 
 # BGR colors.
 COLOR_LANE = (0, 255, 0)        # detected lane lines (solid)
 COLOR_LANE_RAW = (0, 160, 0)    # raw hough segments (faint)
 COLOR_CENTER_LINE = (255, 255, 0)   # image vertical center line
-COLOR_LANE_CENTER = (0, 165, 255)   # perceived lane center path
+COLOR_LANE_CENTER = (0, 255, 0)     # perceived lane center marker (reference green)
+COLOR_VEHICLE_CENTER = (0, 0, 255)  # vehicle center marker (reference red)
 COLOR_STEER = (0, 0, 255)       # steering angle line
 COLOR_ARUCO = (255, 0, 255)     # aruco marker
 COLOR_ARUCO_TARGET = (0, 255, 255)  # target id marker
 COLOR_ROI = (255, 128, 0)       # lane-detection ROI box
+COLOR_LIGHT_ROI = (0, 255, 255)     # traffic-light analysis ROI box
 COLOR_HUD = (255, 255, 255)
 
 DET_COLORS = {
@@ -52,39 +55,57 @@ def draw_lane_roi(frame, lane_viz) -> None:
 
 
 def draw_lanes(frame, lane_viz) -> None:
-    """Draws raw hough segments, averaged lane lines, and the lane-center path.
+    """Draws averaged lane lines plus lane-center vs vehicle-center markers.
 
-    Perception runs in ROI-local coordinates, so every point is translated by
-    ``roi_offset`` to land in the correct place on the full frame.
+    Mirrors the reference ``lane_detector_1029.py`` visualization: bold green
+    averaged lane lines blended translucently over the frame (display_lines +
+    addWeighted), a green lane-center dot, and a red vehicle-center dot so the
+    steering error is visible at a glance. Perception runs in ROI-local
+    coordinates, so points are translated by ``roi_offset`` onto the full frame.
     """
 
     if not lane_viz:
         return
+    height_f, width_f = frame.shape[:2]
     ox, oy = lane_viz.get("roi_offset", (0, 0))
-    for seg in lane_viz.get("hough_segments", []) or []:
-        x1, y1, x2, y2 = seg
-        cv2.line(frame, (x1 + ox, y1 + oy), (x2 + ox, y2 + oy), COLOR_LANE_RAW, 1)
 
+    # Bold averaged lane lines on a separate layer, then blend (reference look).
+    segments = []
     for key in ("hough_left", "hough_right"):
         line = lane_viz.get(key)
         if line:
             (x1, y1), (x2, y2) = line
-            cv2.line(frame, (_ipt(x1) + ox, _ipt(y1) + oy), (_ipt(x2) + ox, _ipt(y2) + oy), COLOR_LANE, 3)
+            segments.append(((_ipt(x1) + ox, _ipt(y1) + oy), (_ipt(x2) + ox, _ipt(y2) + oy)))
+    if segments:
+        layer = np.zeros_like(frame)
+        for point_a, point_b in segments:
+            cv2.line(layer, point_a, point_b, COLOR_LANE, 6)
+        cv2.addWeighted(frame, 0.8, layer, 1.0, 0.0, dst=frame)
 
-    # Perceived lane center as a path through far -> mid -> near centroids.
-    pts = []
-    for center_key, band_key in (("far_center", "far_band"),
-                                 ("mid_center", "mid_band"),
-                                 ("near_center", "near_band")):
-        cx = lane_viz.get(center_key)
-        band = lane_viz.get(band_key)
-        if cx is not None and band is not None:
-            y_mid = (band[0] + band[1]) // 2
-            pts.append((_ipt(cx) + ox, y_mid + oy))
-    for i, point in enumerate(pts):
-        cv2.circle(frame, point, 5, COLOR_LANE_CENTER, -1)
-        if i > 0:
-            cv2.line(frame, pts[i - 1], point, COLOR_LANE_CENTER, 2)
+    # Lane-center (green) vs vehicle-center (red) comparison at the near band.
+    near_band = lane_viz.get("near_band")
+    near_center = lane_viz.get("near_center")
+    if near_band is not None:
+        y_marker = (near_band[0] + near_band[1]) // 2 + oy
+        cv2.circle(frame, (width_f // 2, y_marker), 8, COLOR_VEHICLE_CENTER, -1)
+        if near_center is not None:
+            cv2.circle(frame, (_ipt(near_center) + ox, y_marker), 8, COLOR_LANE_CENTER, -1)
+
+
+def draw_light_roi(frame, light_roi, light_states=None) -> None:
+    """Draws the traffic-light HSV ROI box and its detected color state."""
+
+    if not light_roi:
+        return
+    height, width = frame.shape[:2]
+    x0, y0, x1, y1 = light_roi
+    p0 = (_ipt(x0 * width), _ipt(y0 * height))
+    p1 = (_ipt(x1 * width), _ipt(y1 * height))
+    cv2.rectangle(frame, p0, p1, COLOR_LIGHT_ROI, 2)
+    active = [name.upper() for name, on in (light_states or {}).items() if on]
+    label = "light: " + (", ".join(active) if active else "-")
+    cv2.putText(frame, label, (p0[0] + 4, max(14, p0[1] + 18)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_LIGHT_ROI, 1, cv2.LINE_AA)
 
 
 def draw_center_and_steering(frame, steering: float) -> None:
@@ -136,7 +157,8 @@ def draw_hud(frame, lines) -> None:
         y += 22
 
 
-def draw_overlay(frame, lane_viz, detections, markers, cmd, state, target_id=3):
+def draw_overlay(frame, lane_viz, detections, markers, cmd, state, target_id=3,
+                 light_roi=None, light_states=None):
     """Draws the full debug overlay on a copy of the frame and returns it."""
 
     out = frame.copy()
@@ -144,6 +166,7 @@ def draw_overlay(frame, lane_viz, detections, markers, cmd, state, target_id=3):
     draw_lanes(out, lane_viz)
     draw_center_and_steering(out, float(getattr(cmd, "steering", 0.0)))
     draw_detections(out, detections)
+    draw_light_roi(out, light_roi, light_states)
     draw_aruco(out, markers, target_id)
 
     det_classes = sorted({det.cls for det in (detections or [])})

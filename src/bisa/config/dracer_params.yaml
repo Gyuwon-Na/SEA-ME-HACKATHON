@@ -31,12 +31,12 @@ lane:
   hough_roi_top_ratio: 0.58
   hough_canny_low: 50
   hough_canny_high: 150
-  hough_threshold: 45
-  hough_min_line_length: 45
+  hough_threshold: 38          # was 45: 커브의 짧은 세그먼트도 라인으로 채택 (표 낮춤)
+  hough_min_line_length: 30    # was 45: 급커브에서 조각난 짧은 선분도 살림
   hough_max_line_gap: 290
-  hough_slope_min_abs: 0.40
+  hough_slope_min_abs: 0.22    # was 0.40: 커브에서 수평에 가까워진 차선이 버려지는 문제 해결(핵심)
   assumed_lane_width_ratio: 0.62
-  max_center_jump: 0.45
+  max_center_jump: 0.70        # was 0.45: 급커브의 정상적인 중심 이동을 "튐"으로 오인해 되돌리지 않도록
 
 detector:
   model_path: checkpoints/best.pt
@@ -71,8 +71,8 @@ detector:
 throttle:
   # Moving speed band. Every throttle command (while not stopped) maps into
   # [speed_min, speed_max]. Change these two to retune overall speed.
-  speed_min: 0.20
-  speed_max: 0.30
+  speed_min: 0.10
+  speed_max: 0.15
   launch_cap: 0.32
   s_curve_cap: 0.24
   fork_approach_cap: 0.20

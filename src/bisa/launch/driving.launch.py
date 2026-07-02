@@ -40,7 +40,7 @@ def generate_launch_description():
     enable_viz = LaunchConfiguration("enable_viz")
 
     return LaunchDescription([
-        DeclareLaunchArgument("route_mode", default_value="OUT"),
+        DeclareLaunchArgument("route_mode", default_value="LANE"),
         DeclareLaunchArgument("config_file", default_value=default_config_path()),
         DeclareLaunchArgument("model_path", default_value=default_model_path()),
         DeclareLaunchArgument("image_topic", default_value="/camera/image/compressed"),

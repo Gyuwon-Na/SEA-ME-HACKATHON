@@ -71,8 +71,8 @@ detector:
 throttle:
   # Moving speed band. Every throttle command (while not stopped) maps into
   # [speed_min, speed_max]. Change these two to retune overall speed.
-  speed_min: 0.10
-  speed_max: 0.15
+  speed_min: 0.15
+  speed_max: 0.2
   launch_cap: 0.32
   s_curve_cap: 0.24
   fork_approach_cap: 0.20
@@ -89,7 +89,7 @@ throttle:
   curvature_slowdown: 0.08
 
 steering:
-  steer_sign: 1
+  steer_sign: -1   # +steer = right (hardware 좌/우 -1/+1); steer toward lane center
   kp: 1.20
   ki: 0.0
   kd: 0.24

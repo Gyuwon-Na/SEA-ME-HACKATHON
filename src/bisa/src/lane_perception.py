@@ -220,6 +220,84 @@ class LanePerception:
             center_x = float(x_targets[0] - assumed_width / 2.0)
         return center_x, left_present, right_present
 
+    def build_line_mask(self, frame_bgr: np.ndarray) -> np.ndarray:
+        """Extracts bright white + yellow lane boundary lines from the ROI.
+
+        The track is a dark mat whose brightness drifts with lighting, so the
+        drivable area cannot be thresholded reliably. The white/yellow boundary
+        lines are far more distinctive: white is bright + low-saturation and
+        yellow is a fixed hue wedge. White uses an adaptive brightness floor
+        (max of an absolute floor and a high ROI percentile) so it tracks the
+        exposure of each frame instead of a brittle fixed value.
+        """
+
+        cfg = self.config.lane
+        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        h, s, v = cv2.split(hsv)
+        v_floor = max(int(cfg.white_v_min), int(np.percentile(v, cfg.white_v_percentile)))
+        white = (v >= v_floor) & (s <= int(cfg.white_s_max))
+        yellow = (
+            (h >= int(cfg.line_yellow_h_lo))
+            & (h <= int(cfg.line_yellow_h_hi))
+            & (s >= int(cfg.line_yellow_s_min))
+            & (v >= int(cfg.line_yellow_v_min))
+        )
+        mask = (white | yellow).astype(np.uint8) * 255
+        open_size = max(1, int(cfg.morph_open_kernel))
+        close_size = max(1, int(cfg.morph_close_kernel))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((open_size, open_size), np.uint8))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((close_size, close_size), np.uint8))
+        return mask
+
+    def _band_line_centers(self, band_mask: np.ndarray) -> tuple[Optional[float], Optional[float]]:
+        """Returns (left_line_x, right_line_x) in band-local x, or None if absent.
+
+        Splits the band at its horizontal midpoint and takes the intensity-
+        weighted centroid of lit columns on each side, but only when at least one
+        column is lit across ``line_col_row_frac`` of the band's rows -- this
+        rejects diffuse background speckle (which never forms a tall column) while
+        keeping thin, near-vertical lane lines.
+        """
+
+        rows, width = band_mask.shape[:2]
+        if rows == 0 or width == 0:
+            return None, None
+        col_counts = (band_mask > 0).sum(axis=0).astype(np.float64)
+        min_col = max(3.0, rows * float(self.config.lane.line_col_row_frac))
+        half = width // 2
+
+        def side_center(counts: np.ndarray, base: int) -> Optional[float]:
+            if counts.size == 0 or counts.max() < min_col:
+                return None
+            strong = counts >= min_col
+            weights = counts * strong
+            total = weights.sum()
+            if total <= 0.0:
+                return None
+            xs = np.arange(counts.size, dtype=np.float64)
+            return base + float((xs * weights).sum() / total)
+
+        left_x = side_center(col_counts[:half], 0)
+        right_x = side_center(col_counts[half:], half)
+        return left_x, right_x
+
+    def _lane_center_from_band(
+        self, band_mask: np.ndarray, roi_width: int
+    ) -> tuple[Optional[float], bool, bool]:
+        """Combines the band's left/right lines into one lane-center x (ROI-local)."""
+
+        left_x, right_x = self._band_line_centers(band_mask)
+        half_width = float(self.config.lane.lane_half_width_ratio) * float(roi_width)
+        if left_x is not None and right_x is not None:
+            self._lane_half_width = max(20.0, (right_x - left_x) / 2.0)
+            return (left_x + right_x) / 2.0, True, True
+        span = getattr(self, "_lane_half_width", half_width)
+        if left_x is not None:
+            return left_x + span, True, False
+        if right_x is not None:
+            return right_x - span, False, True
+        return None, False, False
+
     def detect_fork_candidates(self, mask: np.ndarray) -> tuple[bool, Optional[PathCandidate], Optional[PathCandidate]]:
         """Splits the far ROI into left/right road masses for fork decisions."""
 
@@ -315,35 +393,30 @@ class LanePerception:
         # keeps using the full frame elsewhere in the pipeline.
         roi_frame = frame_bgr[y0:y0 + roi_h, x0:x0 + roi_w]
 
-        mask = self.build_road_mask(roi_frame)
-        height, width = mask.shape[:2]
-        mid = self.region_of_interest(mask, self.config.roi.mid_y0, self.config.roi.mid_y1)
-        far = self.region_of_interest(mask, self.config.roi.far_y0, self.config.roi.far_y1)
+        # Primary detection is the white/yellow boundary-line mask: on this track
+        # the drivable mat is dark grey whose brightness drifts with lighting, so
+        # a "black road" threshold is unreliable, while the bright boundary lines
+        # are stable. Near/far lane centers both come from this one mask so the
+        # curvature sign is consistent with the steering error.
+        line_mask = self.build_line_mask(roi_frame)
+        height, width = line_mask.shape[:2]
+        near_band = self.region_of_interest(line_mask, self.config.roi.near_y0, 1.0)
+        mid_band = self.region_of_interest(line_mask, self.config.roi.mid_y0, self.config.roi.mid_y1)
+        far_band = self.region_of_interest(line_mask, self.config.roi.far_y0, self.config.roi.far_y1)
 
-        # Primary lane center follows the reference lane_detector_1029.py exactly:
-        # L-channel CLAHE -> GaussianBlur -> Canny -> Hough lines -> slope-split
-        # average -> lane center from the left/right line x at the ROI top. This
-        # always runs (the PC does the heavy compute), matching the reference which
-        # is purely Hough-line based rather than road-mask based.
-        hough_center, _, _ = self.average_hough_lanes(roi_frame, record=collect_viz)
-        near_center = hough_center
-        if near_center is None:
-            # Fall back to the black-road-mask centroid only when no lane line was
-            # found, so a fully black frame still yields a usable center.
-            near = self.region_of_interest(mask, self.config.roi.near_y0, 1.0)
-            near_center = self.contour_center_x(near, self.config.lane.min_component_area_ratio)
-
-        # Far/mid centroids stay mask-based; they feed curvature and fork/rotary
-        # cues the reference never computes but the mission FSM depends on.
-        mid_center = self.contour_center_x(mid, self.config.lane.min_component_area_ratio)
-        far_center = self.contour_center_x(far, self.config.lane.min_component_area_ratio)
+        near_center, near_left, near_right = self._lane_center_from_band(near_band, width)
+        mid_center, _, _ = self._lane_center_from_band(mid_band, width)
+        far_center, _, _ = self._lane_center_from_band(far_band, width)
 
         if near_center is None:
+            # No boundary line near the vehicle: fall back to the last known
+            # center so a momentary dropout coasts instead of snapping to zero.
             if collect_viz:
-                self._record_obs_viz(width, height, None, mid_center, far_center,
-                                     None, self.prev_center_error, roi_rect)
-            return LaneObs(valid=False, center_error=self.prev_center_error, lost_reason="no_road_center")
+                self._record_line_viz(width, height, None, mid_center, far_center,
+                                      None, near_left, near_right, roi_rect)
+            return LaneObs(valid=False, center_error=self.prev_center_error, lost_reason="no_line_center")
 
+        near_center = clamp(near_center, 0.0, float(width))
         # Steering error is measured against the full-frame center (vehicle
         # heading), so translate the ROI-local center back into frame x.
         near_center_full = near_center + x0
@@ -355,19 +428,24 @@ class LanePerception:
 
         self.prev_near_center = near_center_full
         center_error = (full_width / 2.0 - near_center_full) / (full_width / 2.0)
-        far_or_near = far_center if far_center is not None else near_center
-        mid_or_near = mid_center if mid_center is not None else near_center
-        signed_curv = (near_center - far_or_near) / max(float(full_width), 1.0)
-        curvature = clamp(abs(far_or_near - near_center) / max(float(full_width), 1.0) * 2.5, 0.0, 1.0)
+        # Look-ahead center for curvature: prefer far, then mid, then near.
+        ahead = far_center if far_center is not None else mid_center
+        if ahead is None:
+            ahead = near_center
+        signed_curv = (near_center - ahead) / max(float(full_width), 1.0)
+        curvature = clamp(abs(ahead - near_center) / max(float(full_width), 1.0) * 2.5, 0.0, 1.0)
         if mid_center is not None:
-            curvature = max(curvature, clamp(abs(mid_or_near - near_center) / max(float(full_width), 1.0) * 2.0, 0.0, 1.0))
+            curvature = max(curvature, clamp(abs(mid_center - near_center) / max(float(full_width), 1.0) * 2.0, 0.0, 1.0))
 
-        fork_seen, left_branch, right_branch = self.detect_fork_candidates(mask)
-        rotary_seen, rotary_exit_seen = self.detect_rotary_candidates(mask)
+        # Fork/rotary geometric cues still come from the dark-road area mask; they
+        # only matter in the OUT/IN mission modes, not pure lane following.
+        road_mask = self.build_road_mask(roi_frame)
+        fork_seen, left_branch, right_branch = self.detect_fork_candidates(road_mask)
+        rotary_seen, rotary_exit_seen = self.detect_rotary_candidates(road_mask)
         self.prev_center_error = clamp(center_error, -1.0, 1.0)
         if collect_viz:
-            self._record_obs_viz(width, height, near_center, mid_center, far_center,
-                                 near_center, self.prev_center_error, roi_rect)
+            self._record_line_viz(width, height, near_center, mid_center, far_center,
+                                  near_center, near_left, near_right, roi_rect)
         return LaneObs(
             valid=True,
             center_error=self.prev_center_error,
@@ -379,3 +457,36 @@ class LanePerception:
             rotary_seen=rotary_seen,
             rotary_exit_seen=rotary_exit_seen,
         )
+
+    def _record_line_viz(self, width, height, near_center, mid_center, far_center,
+                         lane_center, near_left, near_right, roi_rect) -> None:
+        """Stores line-detection ROI bands and centers for the PC debug overlay."""
+
+        def band(y0_ratio, y1_ratio):
+            return (int(clamp(y0_ratio, 0.0, 1.0) * height), int(clamp(y1_ratio, 0.0, 1.0) * height))
+
+        near_b = band(self.config.roi.near_y0, 1.0)
+        far_b = band(self.config.roi.far_y0, self.config.roi.far_y1)
+        x0, y0, roi_w, roi_h = roi_rect
+        # Draw detected boundary lines as short vertical markers at their x within
+        # the near band so the operator can see left/right line pickups.
+        segs = {"hough_left": None, "hough_right": None}
+        if near_left and near_center is not None:
+            segs["hough_left"] = ((float(near_center), near_b[0]), (float(near_center), near_b[1]))
+        self.last_viz.update({
+            "width": int(width),
+            "height": int(height),
+            "near_band": near_b,
+            "mid_band": band(self.config.roi.mid_y0, self.config.roi.mid_y1),
+            "far_band": far_b,
+            "near_center": near_center,
+            "mid_center": mid_center,
+            "far_center": far_center,
+            "lane_center_x": lane_center,
+            "center_error": self.prev_center_error,
+            "roi_rect": (int(x0), int(y0), int(roi_w), int(roi_h)),
+            "roi_offset": (int(x0), int(y0)),
+            "hough_left": None,
+            "hough_right": None,
+            "hough_segments": [],
+        })

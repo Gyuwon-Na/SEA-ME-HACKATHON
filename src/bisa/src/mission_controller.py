@@ -35,29 +35,38 @@ class LaneController:
         return previous + clamp(target - previous, -max_delta, max_delta)
 
     def steering_from_lane(self, lane: LaneObs, steer_ff: float = 0.0, steer_limit: float = 0.80) -> float:
-        """Computes PD lane steering plus curvature/feedforward correction."""
+        """Computes PD lane steering plus curvature/feedforward correction.
+
+        Works entirely in *published* steering space: ``self.prev_steer`` always
+        holds the last command that was actually sent, so the lost-lane decay in
+        every branch stays sign-consistent. ``steer_sign`` maps the internal
+        error/curvature convention onto the hardware direction (+ = right) and is
+        applied once, to the combined PD + feedforward term.
+        """
 
         if not lane.valid:
-            raw = self.prev_steer * self.config.steering.lost_decay
+            # Decay the last published command toward zero; no sign flip.
+            target = self.prev_steer * self.config.steering.lost_decay
             # Bleed the integral while lane is lost to avoid windup on recovery.
             self.error_integral *= self.config.steering.lost_decay
         else:
             d_error = lane.center_error - self.prev_error
             # Clamped integral term (anti-windup); ki defaults to 0 => pure PD.
             self.error_integral = clamp(self.error_integral + lane.center_error, -2.0, 2.0)
-            raw = (
+            pd = (
                 self.config.steering.kp * lane.center_error
                 + self.config.steering.ki * self.error_integral
                 + self.config.steering.kd * d_error
                 + self.config.steering.kcurv * lane.signed_curvature
                 + steer_ff
             )
+            target = float(self.config.steering.steer_sign) * pd
             self.prev_error = lane.center_error
 
-        raw = clamp(raw, -steer_limit, steer_limit)
-        steer = self.rate_limit(raw, self.prev_steer, self.config.steering.rate_limit_per_cmd)
+        target = clamp(target, -steer_limit, steer_limit)
+        steer = self.rate_limit(target, self.prev_steer, self.config.steering.rate_limit_per_cmd)
         self.prev_steer = steer
-        return float(self.config.steering.steer_sign) * steer
+        return steer
 
     def throttle_scheduler(
         self,

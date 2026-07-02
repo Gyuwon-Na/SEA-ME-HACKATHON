@@ -69,6 +69,18 @@ class LaneVisionConfig:
     hough_slope_min_abs: float = 0.40
     assumed_lane_width_ratio: float = 0.62
     max_center_jump: float = 0.45
+    # White/yellow lane-line detection (primary center source on this track:
+    # dark mat with bright boundary lines). White is thresholded adaptively so
+    # it survives lighting changes; yellow is a fixed HSV wedge.
+    white_v_min: int = 140          # absolute floor for "white" brightness (V)
+    white_v_percentile: float = 80.0  # adaptive floor: this percentile of ROI V
+    white_s_max: int = 90           # white lines have low saturation
+    line_yellow_h_lo: int = 15
+    line_yellow_h_hi: int = 42
+    line_yellow_s_min: int = 70
+    line_yellow_v_min: int = 80
+    line_col_row_frac: float = 0.10  # a column must be lit in >= this frac of band rows to count as a line
+    lane_half_width_ratio: float = 0.30  # single-line offset (frac of ROI width) toward the missing line
 
 
 @dataclass

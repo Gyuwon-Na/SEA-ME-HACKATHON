@@ -39,6 +39,10 @@ def generate_launch_description():
     enable_gui = LaunchConfiguration("enable_gui")
     enable_viz = LaunchConfiguration("enable_viz")
 
+    # NOTE: the operator gamepad + joystick_node run on the CAR (vehicle.launch),
+    # not here. This PC is often WSL, which exposes neither /dev/input/js0 nor the
+    # I2C bus, so control_node/joystick_node cannot run here. Plug the wireless
+    # pad's USB dongle into the car; the wireless pad stays in the operator's hand.
     return LaunchDescription([
         DeclareLaunchArgument("route_mode", default_value="OUT"),
         DeclareLaunchArgument("config_file", default_value=default_config_path()),

@@ -32,6 +32,9 @@ class ControlNode(Node):
         self.declare_parameter('joystick_topic', 'joystick')
         self.declare_parameter('control_topic', '/control')
         self.declare_parameter('command_hz', 10.0)
+        # Failsafe: if the active source goes silent longer than this, cut
+        # throttle (hold steering). Guards against WiFi/PC/joystick dropouts.
+        self.declare_parameter('command_timeout_sec', 0.5)
 
         i2c_bus = int(self.get_parameter('i2c_bus').value)
         pca9685_addr = int(self.get_parameter('pca9685_addr').value)
@@ -46,6 +49,7 @@ class ControlNode(Node):
         command_hz = float(self.get_parameter('command_hz').value)
         if command_hz <= 0.0:
             raise ValueError('command_hz must be greater than 0')
+        self.command_timeout_sec = float(self.get_parameter('command_timeout_sec').value)
 
         self.command_hz = command_hz
         self.steer_trim = self.load_steer_trim()
@@ -71,9 +75,20 @@ class ControlNode(Node):
             f'  vehicle_config_file={self.vehicle_config_file}'
         )
 
-        self.throttle = 0.0
-        self.steering = self.steer_trim
+        # Drive mode is chosen at runtime by the joystick (manual_mode flag).
+        # use_joystick_control only seeds the initial mode for backward compat.
+        self.manual_mode = self.use_joystick_control
         self.e_stop_active = False
+        self.last_steering = self.steer_trim
+
+        # Latest command from each source, kept independently so switching modes
+        # is instant and one source never clobbers the other.
+        self.auto_steering = self.steer_trim
+        self.auto_throttle = 0.0
+        self.last_auto_time = None
+        self.manual_steering = self.steer_trim
+        self.manual_throttle = 0.0
+        self.last_joystick_time = None
 
         # Control inputs
         self.create_subscription(
@@ -92,12 +107,31 @@ class ControlNode(Node):
         # Command output loop
         self.timer = self.create_timer(1.0 / self.command_hz, self.timer_callback)
 
+    def now_sec(self):
+        return self.get_clock().now().nanoseconds / 1e9
+
     def timer_callback(self):
         if self.e_stop_active:
-            self.apply_actuation(self.steering, 0.0)
+            self.apply_actuation(self.last_steering, 0.0)
             return
 
-        self.apply_actuation(self.steering, self.throttle)
+        # Arbitrate: MANUAL uses the joystick, AUTO uses /control.
+        if self.manual_mode:
+            steering, throttle, last_time = (
+                self.manual_steering, self.manual_throttle, self.last_joystick_time
+            )
+        else:
+            steering, throttle, last_time = (
+                self.auto_steering, self.auto_throttle, self.last_auto_time
+            )
+
+        # Failsafe: if the active source is stale (never arrived or dropped out),
+        # cut throttle but keep steering so the car coasts straight to a stop.
+        if last_time is None or (self.now_sec() - last_time) > self.command_timeout_sec:
+            throttle = 0.0
+
+        self.last_steering = steering
+        self.apply_actuation(steering, throttle)
 
     def apply_actuation(self, steering, throttle):
         self.d3_racer.set_steering_percent(float(steering))
@@ -108,26 +142,37 @@ class ControlNode(Node):
             self.engage_e_stop()
             return
 
-        if self.e_stop_active or not self.use_joystick_control:
+        if self.e_stop_active:
             return
 
-        self.steering = float(msg.control_msg.steering)
-        self.throttle = float(msg.control_msg.throttle)
+        # The joystick owns the drive mode; record its command either way so a
+        # switch to MANUAL takes effect on the very next tick.
+        previous_mode = self.manual_mode
+        self.manual_mode = bool(msg.manual_mode)
+        if self.manual_mode != previous_mode:
+            self.get_logger().info(
+                f'Drive mode -> {"MANUAL" if self.manual_mode else "AUTO"}'
+            )
+        self.manual_steering = float(msg.control_msg.steering)
+        self.manual_throttle = float(msg.control_msg.throttle)
+        self.last_joystick_time = self.now_sec()
 
     def control_callback(self, msg: Control):
-        if self.e_stop_active or self.use_joystick_control:
+        if self.e_stop_active:
             return
 
-        self.steering = float(msg.steering)
-        self.throttle = float(msg.throttle)
+        # Always record the autonomous command (even while in MANUAL) so a switch
+        # back to AUTO is instant. Mode selection happens in timer_callback.
+        self.auto_steering = float(msg.steering)
+        self.auto_throttle = float(msg.throttle)
+        self.last_auto_time = self.now_sec()
 
     def engage_e_stop(self):
         if self.e_stop_active:
             return
 
         self.e_stop_active = True
-        self.throttle = 0.0
-        self.apply_actuation(self.steering, 0.0)
+        self.apply_actuation(self.last_steering, 0.0)
         self.get_logger().warning('E-STOP engaged. Ignoring incoming throttle commands.')
 
     def load_steer_trim(self):

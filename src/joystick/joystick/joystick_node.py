@@ -55,6 +55,8 @@ class JoystickNode(Node):
         self.declare_parameter('accel_ratio_max', 0.4)
         self.declare_parameter('debug_log_enable', True)
         self.declare_parameter('debug_log_hz', 5.0)
+        # Start in AUTO; the A button latch-toggles AUTO<->MANUAL at runtime.
+        self.declare_parameter('start_in_manual', False)
 
         publish_topic = str(self.get_parameter('publish_topic').value)
         publish_hz = float(self.get_parameter('publish_hz').value)
@@ -79,6 +81,7 @@ class JoystickNode(Node):
         self.accel_ratio_max = float(self.get_parameter('accel_ratio_max').value)
         self.debug_log_enable = bool(self.get_parameter('debug_log_enable').value)
         self.debug_log_hz = float(self.get_parameter('debug_log_hz').value)
+        self.manual_mode = bool(self.get_parameter('start_in_manual').value)
         self.publish_hz = publish_hz
 
         if self.accel_ratio_min > self.accel_ratio_max:
@@ -96,6 +99,7 @@ class JoystickNode(Node):
         self._prev_b_pressed = False
         self._prev_x_pressed = False
         self._prev_start_pressed = False
+        self._prev_a_pressed = False
         self.e_stop_latched = False
         self.is_recording = False
         self.recording_process = None
@@ -249,6 +253,19 @@ class JoystickNode(Node):
 
         self._prev_x_pressed = x_pressed
 
+    def update_mode_from_buttons(self, data):
+        # A button latch-toggles AUTO <-> MANUAL. control_node arbitrates on the
+        # published manual_mode flag, so this is the single source of drive mode.
+        a_pressed = bool(data.button_a)
+
+        if a_pressed and not self._prev_a_pressed:
+            self.manual_mode = not self.manual_mode
+            self.get_logger().info(
+                f'Drive mode -> {"MANUAL" if self.manual_mode else "AUTO"} (joystick A)'
+            )
+
+        self._prev_a_pressed = a_pressed
+
     def start_recording(self):
         if self.recording_process is not None and self.recording_process.poll() is None:
             self.is_recording = True
@@ -334,6 +351,7 @@ class JoystickNode(Node):
                 self.update_accel_ratio_from_buttons(data)
                 self.update_steering_trim_from_buttons(data)
                 self.update_e_stop_from_buttons(data)
+                self.update_mode_from_buttons(data)
                 self.update_recording_from_buttons(data)
                 with self.lock:
                     self.latest_input = data
@@ -385,6 +403,7 @@ class JoystickNode(Node):
         msg.accel_ratio = float(self.accel_ratio)
         msg.e_stop_en = bool(self.e_stop_latched)
         msg.is_recording = bool(self.is_recording)
+        msg.manual_mode = bool(self.manual_mode)
         self.joystick_pub.publish(msg)
 
     def debug_timer_callback(self):
@@ -400,6 +419,7 @@ class JoystickNode(Node):
             f'steering={self._debug_steering:.2f} throttle={self._debug_throttle:.2f} \n'
             f'accel_ratio={self.accel_ratio:.3f} \n'
             f'trim={self.steering_trim:.2f} \n'
+            f'mode={"MANUAL" if self.manual_mode else "AUTO"} \n'
             f'e_stop={int(self.e_stop_latched)} \n'
             f'recording={int(self.is_recording)} \n'
             f'L1={l1_state} R1={r1_state}\n'

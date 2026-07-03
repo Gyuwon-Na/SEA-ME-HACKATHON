@@ -1,3 +1,11 @@
+# Standalone CAR-SIDE manual driving / steer-trim calibration: it starts its own
+# control_node (starts in MANUAL) plus a car-side joystick_node.
+#
+# WARNING: do NOT run this alongside vehicle.launch.py or driving.launch.py.
+# Those already start a control_node; two control_nodes both drive the same
+# PCA9685 over I2C and fight each other. For normal auto/manual driving use
+# vehicle.launch (car) + driving.launch (PC) and toggle mode with the joystick
+# A button instead of launching this.
 from pathlib import Path
 
 from launch import LaunchDescription

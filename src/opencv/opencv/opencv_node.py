@@ -21,10 +21,13 @@ class OpenCvNode(Node):
         if not 0 <= self.jpeg_quality <= 100:
             raise ValueError('jpeg_quality must be in range [0, 100]')
 
+        # Match the camera publisher: BEST_EFFORT/depth-1. RELIABLE here was
+        # incompatible with the BEST_EFFORT camera (subscription received no
+        # frames) and made the derived debug streams retransmit over WiFi.
         image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
-            depth=10,
-            reliability=ReliabilityPolicy.RELIABLE,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
         )
 

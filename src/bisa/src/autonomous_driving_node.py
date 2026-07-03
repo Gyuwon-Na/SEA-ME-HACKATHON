@@ -130,7 +130,12 @@ class BisaAutonomousNode(Node):
         self.detect_red_pub = self.create_publisher(Bool, "detect_red", 10)
         self.detect_sign_pub = self.create_publisher(String, "detect_sign", 10)
         self.detect_aruco_pub = self.create_publisher(String, "detect_aruco", 10)
-        self.debug_image_pub = self.create_publisher(CompressedImage, self.debug_image_topic, 5)
+        # Debug JPEG stream reuses the camera's BEST_EFFORT/depth-1 profile so it
+        # drops stale frames instead of triggering RELIABLE retransmits, which
+        # caused WiFi head-of-line blocking against the viz/monitor subscribers.
+        self.debug_image_pub = self.create_publisher(
+            CompressedImage, self.debug_image_topic, image_qos
+        )
 
         # Expose tunable config as flat dotted ROS parameters and apply live edits.
         self._declare_tuning_params()
@@ -297,9 +302,6 @@ class BisaAutonomousNode(Node):
 
         now_sec = self.get_clock().now().nanoseconds / 1e9
         self.latest_markers = self.aruco_detector.detect(frame, now_sec)
-        self.publish_detection_status()
-        if self.publish_debug_image:
-            self.publish_debug_overlay()
 
     def _inference_worker(self) -> None:
         """Runs YOLO off the executor thread so camera/control stay responsive."""
@@ -354,6 +356,14 @@ class BisaAutonomousNode(Node):
             cmd = self.fsm.step(self.latest_lane, self.det_buffer, now_sec)
         self.last_cmd = cmd
         self.publish_control(cmd)
+        # Status flags and the debug overlay are published here at control_hz,
+        # not once per camera frame. Detections/markers only refresh at
+        # inference/aruco rate, so per-frame publishing re-sent identical data
+        # (and re-encoded the overlay JPEG) ~3x, starving the single-threaded
+        # executor and the control loop.
+        self.publish_detection_status()
+        if self.publish_debug_image:
+            self.publish_debug_overlay()
         self.log_status(now_sec, cmd)
 
     def log_status(self, now_sec: float, cmd: ControlCmd) -> None:

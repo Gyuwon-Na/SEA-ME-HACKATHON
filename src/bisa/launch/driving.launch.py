@@ -45,6 +45,7 @@ def generate_launch_description():
     debug_image_topic = LaunchConfiguration("debug_image_topic")
     enable_gui = LaunchConfiguration("enable_gui")
     enable_viz = LaunchConfiguration("enable_viz")
+    enable_power_gui = LaunchConfiguration("enable_power_gui")
 
     # NOTE: the operator gamepad + joystick_node run on the CAR (vehicle.launch),
     # not here. This PC is often WSL, which exposes neither /dev/input/js0 nor the
@@ -73,6 +74,9 @@ def generate_launch_description():
         DeclareLaunchArgument("debug_image_topic", default_value="/bisa/debug/image/compressed"),
         DeclareLaunchArgument("enable_gui", default_value="true"),
         DeclareLaunchArgument("enable_viz", default_value="true"),
+        # Standalone tkinter power monitor (battery V/A/W + board-5V/motor
+        # estimate + sag plot). Turn off with `enable_power_gui:=false`.
+        DeclareLaunchArgument("enable_power_gui", default_value="true"),
         Node(
             package="bisa",
             executable="bisa_autonomous_node",
@@ -104,5 +108,16 @@ def generate_launch_description():
             output="screen",
             condition=IfCondition(enable_gui),
             parameters=[{"target_node": "bisa_autonomous_node", "config_file": config_file}],
+        ),
+        Node(
+            package="bisa",
+            executable="power_gui_node",
+            name="bisa_power_gui_node",
+            output="screen",
+            condition=IfCondition(enable_power_gui),
+            parameters=[{
+                "brownout_voltage": 6.0,        # 2S pack sag alarm line (~12.0 for 4S).
+                "board_current_limit_a": 5.0,   # D3-G rated 5A.
+            }],
         ),
     ])

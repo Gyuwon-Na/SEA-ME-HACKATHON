@@ -333,11 +333,25 @@ class BisaAutonomousNode(Node):
         msg.throttle = float(clamp(cmd.throttle, 0.0, self.config.throttle.speed_max))
         self.control_pub.publish(msg)
 
+    def target_marker_visible(self) -> bool:
+        """Returns True while the configured target ArUco marker is in view."""
+
+        if not self.config.aruco.enabled:
+            return False
+        target = self.config.aruco.target_id
+        return any(marker.id == target for marker in self.latest_markers)
+
     def control_loop(self) -> None:
         """Runs the mission FSM at a fixed rate and publishes one control command."""
 
         now_sec = self.get_clock().now().nanoseconds / 1e9
-        cmd = self.fsm.step(self.latest_lane, self.det_buffer, now_sec)
+        if self.target_marker_visible():
+            # Target ArUco marker in view: stop immediately and hold the FSM in
+            # place. The mission resumes from the same state once it disappears.
+            self.controller.prev_throttle = 0.0
+            cmd = ControlCmd(0.0, self.last_cmd.steering)
+        else:
+            cmd = self.fsm.step(self.latest_lane, self.det_buffer, now_sec)
         self.last_cmd = cmd
         self.publish_control(cmd)
         self.log_status(now_sec, cmd)

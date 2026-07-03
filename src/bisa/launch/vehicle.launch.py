@@ -36,7 +36,12 @@ def generate_launch_description():
             output="screen",
             parameters=[{
                 "publish_topic": image_topic,
-                "publish_hz": 30.0,
+                # PC consumes at most control_hz/inference_hz (=10Hz), so streaming
+                # faster just burns the weak vehicle board's CPU + WiFi power for
+                # frames nobody reads. Matched to 10 to cut capture/encode/stream ~3x.
+                "publish_hz": 10.0,
+                # Lower JPEG quality trims encode CPU and WiFi bytes (radio power).
+                "jpeg_quality": 45,
                 "debug_log": False,
             }],
         ),
@@ -60,6 +65,20 @@ def generate_launch_description():
             parameters=[{
                 "calibration_mode": False,
                 "start_in_manual": False,
+            }],
+        ),
+        # Battery/power monitor. Publishes battery_status (%) plus the raw
+        # /battery/voltage, /battery/current_ma, /battery/power_w topics. Runs on
+        # the car (I2C bus 3). 5Hz: battery values change slowly, so a low rate
+        # keeps the I2C read load off the board.
+        Node(
+            package="battery",
+            executable="battery_node",
+            name="battery_node",
+            output="screen",
+            parameters=[{
+                "publish_hz": 5.0,
+                "debug_log": False,
             }],
         ),
     ])

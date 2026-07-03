@@ -14,7 +14,7 @@ from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CompressedImage
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Float32, Int32, String
 
 from . import traffic_light, visualization
 from .aruco_detector import ArucoDetector
@@ -130,6 +130,12 @@ class BisaAutonomousNode(Node):
         self.detect_red_pub = self.create_publisher(Bool, "detect_red", 10)
         self.detect_sign_pub = self.create_publisher(String, "detect_sign", 10)
         self.detect_aruco_pub = self.create_publisher(String, "detect_aruco", 10)
+        # Mission FSM + rotary diagnostics for `ros2 topic echo` while manually
+        # driving the car through the rotary to watch the state machine advance.
+        self.mission_state_pub = self.create_publisher(String, "/mission/state", 10)
+        self.rotary_progress_pub = self.create_publisher(Float32, "/mission/rotary_progress", 10)
+        self.exit_line_count_pub = self.create_publisher(Int32, "/mission/exit_line_count", 10)
+        self.rotary_exit_seen_pub = self.create_publisher(Bool, "/mission/rotary_exit_seen", 10)
         # Debug JPEG stream reuses the camera's BEST_EFFORT/depth-1 profile so it
         # drops stale frames instead of triggering RELIABLE retransmits, which
         # caused WiFi head-of-line blocking against the viz/monitor subscribers.
@@ -248,6 +254,14 @@ class BisaAutonomousNode(Node):
         ids = sorted({m.id for m in self.latest_markers})
         self.detect_aruco_pub.publish(String(data=f"ids={ids}" if ids else "none"))
 
+    def publish_mission_status(self) -> None:
+        """Publishes FSM state and rotary diagnostics for PC-side echo monitoring."""
+
+        self.mission_state_pub.publish(String(data=self.fsm.state))
+        self.rotary_progress_pub.publish(Float32(data=float(getattr(self.fsm, "rotary_progress", 0.0))))
+        self.exit_line_count_pub.publish(Int32(data=int(getattr(self.fsm, "exit_line_count", 0))))
+        self.rotary_exit_seen_pub.publish(Bool(data=bool(self.latest_lane.rotary_exit_seen)))
+
     def publish_debug_overlay(self) -> None:
         """Draws the overlay on the latest frame and publishes it as JPEG."""
 
@@ -362,6 +376,7 @@ class BisaAutonomousNode(Node):
         # (and re-encoded the overlay JPEG) ~3x, starving the single-threaded
         # executor and the control loop.
         self.publish_detection_status()
+        self.publish_mission_status()
         if self.publish_debug_image:
             self.publish_debug_overlay()
         self.log_status(now_sec, cmd)
@@ -376,10 +391,17 @@ class BisaAutonomousNode(Node):
             return
         self.last_log_time = now_sec
         lane = self.latest_lane
+        rotary_extra = ""
+        if getattr(self.fsm, "exit_line_count", None) is not None:
+            rotary_extra = (
+                f" prog={getattr(self.fsm, 'rotary_progress', 0.0):.2f} "
+                f"lines={getattr(self.fsm, 'exit_line_count', 0)} "
+                f"lock={int(getattr(self.fsm, 'line_lockout', False))}"
+            )
         self.get_logger().info(
             f"state={self.fsm.state} throttle={cmd.throttle:.2f} steering={cmd.steering:.2f} "
             f"lane_valid={lane.valid} err={lane.center_error:.2f} curv={lane.curvature:.2f} "
-            f"fork={lane.fork_seen} rotary={lane.rotary_seen}/{lane.rotary_exit_seen}"
+            f"fork={lane.fork_seen} rotary={lane.rotary_seen}/{lane.rotary_exit_seen}{rotary_extra}"
         )
 
 

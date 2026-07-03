@@ -275,7 +275,7 @@ class LanePerception:
         far = self.region_of_interest(mask, self.config.roi.far_y0, self.config.roi.far_y1)
         left_pixels = cv2.countNonZero(far[:, : width // 3]) if far.size else 0
         right_pixels = cv2.countNonZero(far[:, 2 * width // 3 :]) if far.size else 0
-        exit_seen = rotary_seen and max(left_pixels, right_pixels) > far.size * 0.03
+        exit_seen = rotary_seen and max(left_pixels, right_pixels) > far.size * self.config.lane.rotary_exit_pixel_ratio
         return rotary_seen, exit_seen
 
     def _record_obs_viz(self, width, height, near_center, mid_center, far_center,

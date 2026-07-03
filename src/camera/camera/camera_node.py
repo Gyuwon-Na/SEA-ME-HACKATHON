@@ -24,13 +24,13 @@ class CameraNode(Node):
         # ROS parameters
         self.declare_parameter('vehicle_config_file', get_default_vehicle_config_path())
         self.declare_parameter('publish_topic', 'camera/image/compressed')
-        self.declare_parameter('publish_hz', 30.0)
+        self.declare_parameter('publish_hz', 15.0)
         self.declare_parameter('camera_device', '/dev/video0')
         self.declare_parameter('usb_camera_device', '/dev/video1')
         self.declare_parameter('mipi_camera_device', '/dev/video0')
         self.declare_parameter('flip_method', 'rotate-180')
-        self.declare_parameter('jpeg_quality', 90)
-        self.declare_parameter('debug_log', True)
+        self.declare_parameter('jpeg_quality', 60)
+        self.declare_parameter('debug_log', False)
 
         self.vehicle_config_file = os.path.expanduser(
             str(self.get_parameter('vehicle_config_file').value)
@@ -142,27 +142,33 @@ class CameraNode(Node):
         return usb_cam, mipi_cam
 
     def build_candidate_pipelines(self, camera_device, flip_method):
+        # Request the source at the publish rate (not a hardcoded 30fps): otherwise
+        # v4l2src keeps delivering 30fps and jpegdec/videoconvert burn CPU decoding
+        # frames the timer never publishes. Matching the caps rate cuts that decode
+        # load on the weak vehicle board. If a camera rejects this exact framerate
+        # the capture fails to open; bump publish_hz to a mode the device supports.
+        fps = max(1, int(round(self.publish_hz)))
         if self.usb_cam_enabled:
             # Many USB webcams expose MJPG by default.
             mjpg_pipeline = (
                 f"v4l2src device={camera_device} io-mode=2 ! "
-                "image/jpeg,framerate=30/1 ! jpegdec ! "
+                f"image/jpeg,framerate={fps}/1 ! jpegdec ! "
                 "videoconvert ! videoscale ! "
-                f"video/x-raw,format=BGR,width={self.image_width},height={self.image_height},framerate=30/1 ! "
+                f"video/x-raw,format=BGR,width={self.image_width},height={self.image_height},framerate={fps}/1 ! "
                 "appsink sync=false drop=true max-buffers=1"
             )
             # Fallback for raw USB camera modes.
             raw_pipeline = (
                 f"v4l2src device={camera_device} io-mode=2 ! "
                 "videoconvert ! videoscale ! "
-                f"video/x-raw,format=BGR,width={self.image_width},height={self.image_height},framerate=30/1 ! "
+                f"video/x-raw,format=BGR,width={self.image_width},height={self.image_height},framerate={fps}/1 ! "
                 "appsink sync=false drop=true max-buffers=1"
             )
             return [mjpg_pipeline, raw_pipeline]
 
         mipi_pipeline = (
             f"v4l2src device={camera_device} io-mode=2 ! "
-            f"video/x-raw,format=NV12,width={self.image_width},height={self.image_height},framerate=30/1 ! "
+            f"video/x-raw,format=NV12,width={self.image_width},height={self.image_height},framerate={fps}/1 ! "
             f"videoconvert ! videoflip method={flip_method} ! "
             "video/x-raw,format=BGR ! appsink sync=false drop=true max-buffers=1"
         )

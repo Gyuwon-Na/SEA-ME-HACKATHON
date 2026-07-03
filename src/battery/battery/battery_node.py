@@ -4,6 +4,7 @@ import rclpy
 from rclpy.node import Node
 
 from battery_msgs.msg import Battery
+from std_msgs.msg import Float32
 from topst_utils.ina219 import INA219, INA_ADDR, I2C_BUS
 
 
@@ -13,7 +14,8 @@ class BatteryPublisher(Node):
 
         # ROS parameters
         self.declare_parameter('publish_topic', 'battery_status')
-        self.declare_parameter('publish_hz', 10.0)
+        # Battery values change slowly; 5Hz keeps I2C read load off the board.
+        self.declare_parameter('publish_hz', 5.0)
         self.declare_parameter('i2c_bus', I2C_BUS)
         self.declare_parameter('ina_addr', INA_ADDR)
         self.declare_parameter('r_shunt_ohm', 0.1)
@@ -42,6 +44,11 @@ class BatteryPublisher(Node):
         self.publish_hz = publish_hz
 
         self.publisher_ = self.create_publisher(Battery, publish_topic, 10)
+        # Raw electrical readings so `ros2 topic echo` / the monitor can show real
+        # power values, not just the percentage the Battery message carries.
+        self.voltage_pub = self.create_publisher(Float32, '/battery/voltage', 10)
+        self.current_pub = self.create_publisher(Float32, '/battery/current_ma', 10)
+        self.power_pub = self.create_publisher(Float32, '/battery/power_w', 10)
         self.bus = SMBus(i2c_bus)
         self.ina219 = INA219(
             self.bus,
@@ -71,6 +78,7 @@ class BatteryPublisher(Node):
             bus_voltage = self.ina219.bus_voltage
             shunt_voltage = self.ina219.shunt_voltage
             current_ma = self.ina219.current
+            power_w = self.ina219.power
 
             load_voltage = bus_voltage + shunt_voltage if self.use_load_voltage else bus_voltage
             battery_percentage = self.voltage_to_percentage(load_voltage)
@@ -79,12 +87,17 @@ class BatteryPublisher(Node):
             msg.battery_status = float(battery_percentage)
             self.publisher_.publish(msg)
 
+            self.voltage_pub.publish(Float32(data=float(load_voltage)))
+            self.current_pub.publish(Float32(data=float(current_ma)))
+            self.power_pub.publish(Float32(data=float(power_w)))
+
             if self.debug_log:
                 self.get_logger().info('\n'
                     f'[Battery Status] : bus={bus_voltage:.3f}V \n'
                     f'[shunt] : {shunt_voltage:.5f}V \n'
                     f'[load] : {load_voltage:.3f}V \n'
                     f'[current] : {current_ma:.1f}mA  \n'
+                    f'[power] : {power_w:.2f}W \n'
                     f'[status] : {battery_percentage:.1f}% \n'
                 )
         except Exception as exc:

@@ -28,6 +28,7 @@ lane:
   fork_area_ratio: 0.035
   rotary_area_ratio: 0.08
   rotary_circularity_min: 0.18
+  rotary_exit_pixel_ratio: 0.03   # 출구 개구부 픽셀 % 게이트. 노이즈로 자주 뜨면 올리고, 실제 출구를 놓치면 내림.
   hough_roi_top_ratio: 0.58
   hough_canny_low: 50
   hough_canny_high: 150
@@ -107,13 +108,16 @@ steering:
   lost_decay: 0.70
 
 rotary:
-  direction: CCW
-  min_rotation_time_sec: 4.5
-  progress_threshold: 0.22
-  exit_stable_frames: 3
+  direction: CW               # 시계방향 강제. rotary_sign()이 CW=-1로 enter_ff/circulate_ff에 곱함.
+                              # 실차에서 반대로 돌면 steer_sign 또는 enter/circulate_ff 부호 확인.
+  min_rotation_time_sec: 4.5  # "한 바퀴" proxy (시간). 실측 한 바퀴 시간보다 약간 짧게.
+  progress_threshold: 0.22    # "한 바퀴" proxy (누적 조향). rosbag으로 한 바퀴 prog 값 보고 튜닝.
+  exit_stable_frames: 3       # 실선이 "존재"로 인정되는 연속 프레임 수 (debounce)
   enter_ff: 0.35
   circulate_ff: 0.45
   exit_bias: -0.18
+  exit_line_events_to_exit: 2 # 실선 이벤트 N번째에 탈출 (1번째=진입쪽 실선 무시, 2번째=탈출)
+  line_clear_frames: 3        # 실선이 이만큼 연속으로 안 보여야 lockout 해제 → 다음 이벤트로 인정
 
 aruco:
   enabled: true

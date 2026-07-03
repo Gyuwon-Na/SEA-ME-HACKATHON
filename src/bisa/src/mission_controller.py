@@ -320,6 +320,12 @@ class InCourseFSM(BaseCourseFSM):
         self.rotary_progress = 0.0
         self.last_progress_t: float | None = None
         self.exit_seen_count = 0
+        # Distinct exit-line events counted with a lockout so one physical line
+        # spanning many frames counts once. First event is ignored; exit arms on
+        # exit_line_events_to_exit (default 2) once rotation_ok is also satisfied.
+        self.exit_line_count = 0
+        self.line_lockout = False
+        self.line_clear_count = 0
 
     def rotary_sign(self) -> float:
         """Returns feedforward steering sign for clockwise/counterclockwise rotary."""
@@ -332,6 +338,9 @@ class InCourseFSM(BaseCourseFSM):
         self.rotary_progress = 0.0
         self.last_progress_t = now
         self.exit_seen_count = 0
+        self.exit_line_count = 0
+        self.line_lockout = False
+        self.line_clear_count = 0
 
     def update_rotary_progress(self, steer: float, throttle: float, now: float) -> float:
         """Integrates steering and throttle as a camera-only rotation proxy."""
@@ -350,6 +359,37 @@ class InCourseFSM(BaseCourseFSM):
         time_ok = self.elapsed(now) >= self.config.rotary.min_rotation_time_sec
         progress_ok = self.rotary_progress >= self.config.rotary.progress_threshold
         return time_ok and progress_ok
+
+    def update_exit_line_events(self, lane: LaneObs) -> bool:
+        """Debounces the exit-line signal and counts distinct line events.
+
+        Returns whether a stable exit line is present this tick. A line event is
+        counted once on the rising edge (line_lockout); the lockout releases only
+        after the raw signal has been absent for line_clear_frames consecutive
+        ticks, so a single physical line seen over many frames counts once. This
+        is what lets the FSM ignore the first exit line and arm exit on the
+        second (see IN_ROTARY_CIRCULATE).
+        """
+
+        raw = lane.rotary_exit_seen
+        if raw:
+            self.exit_seen_count += 1
+        else:
+            self.exit_seen_count = 0
+        line_present = self.exit_seen_count >= self.config.rotary.exit_stable_frames
+
+        if line_present and not self.line_lockout:
+            self.exit_line_count += 1
+            self.line_lockout = True
+            self.line_clear_count = 0
+        if self.line_lockout:
+            if raw:
+                self.line_clear_count = 0
+            else:
+                self.line_clear_count += 1
+                if self.line_clear_count >= self.config.rotary.line_clear_frames:
+                    self.line_lockout = False
+        return line_present
 
     def rotary_entry_valid(self, lane: LaneObs) -> bool:
         """Verifies the front road is connected enough to enter the rotary."""
@@ -434,11 +474,16 @@ class InCourseFSM(BaseCourseFSM):
             throttle = self.controller.throttle_scheduler(self.config.throttle.rotary_inside_cap, steer, lane.curvature)
             cmd = ControlCmd(throttle, steer)
             self.update_rotary_progress(steer, throttle, now)
-            if self.rotation_ok(now) and lane.rotary_exit_seen:
-                self.exit_seen_count += 1
-            else:
-                self.exit_seen_count = 0
-            if self.exit_seen_count >= self.config.rotary.exit_stable_frames:
+            line_present = self.update_exit_line_events(lane)
+            # Exit only on the Nth distinct exit-line event (the first is ignored)
+            # AND after the full-lap proxy (min rotation time + accumulated
+            # steering) is satisfied. Both gates guard against leaving early on the
+            # entry-adjacent line or on a noisy branch opening.
+            if (
+                line_present
+                and self.exit_line_count >= self.config.rotary.exit_line_events_to_exit
+                and self.rotation_ok(now)
+            ):
                 self.transition("IN_ROTARY_EXIT_READY", now)
 
         elif self.state == "IN_ROTARY_EXIT_READY":

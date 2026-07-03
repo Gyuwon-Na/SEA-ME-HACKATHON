@@ -681,3 +681,94 @@ code {
     padding: 14px;
   }
 }
+
+/* Power Status card (INA219 voltage/current/watt + sag/motor estimate). */
+.power-readings {
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.power-reading {
+  flex: 1;
+  text-align: center;
+}
+
+.power-reading__value {
+  margin: 0;
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: var(--text-strong);
+}
+
+.power-reading__name {
+  margin: 2px 0 0;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.power-chart {
+  height: 64px;
+  margin: 8px 0 12px;
+  border: 1px solid var(--surface-border);
+  border-radius: 10px;
+  background: rgba(30, 30, 30, 0.55);
+  overflow: hidden;
+}
+
+.power-chart__svg {
+  display: block;
+  width: 100%;
+  height: 64px;
+}
+
+.power-chart__placeholder {
+  margin: 0;
+  padding: 22px 0;
+  text-align: center;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.power-split {
+  margin: 4px 0 12px;
+}
+
+.power-split__row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.8rem;
+  margin: 3px 0;
+  color: var(--text-muted);
+}
+
+.power-split__value {
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+}
+
+.power-split-bar {
+  display: flex;
+  height: 8px;
+  margin-top: 6px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(157, 161, 166, 0.18);
+}
+
+.power-split-bar__baseline {
+  height: 100%;
+  width: 0%;
+  background: var(--state-live);
+  transition: width 200ms ease;
+}
+
+.power-split-bar__motor {
+  height: 100%;
+  width: 0%;
+  background: #ce9178;
+  transition: width 200ms ease;
+}

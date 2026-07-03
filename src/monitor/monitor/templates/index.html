@@ -108,6 +108,61 @@
           </dl>
         </article>
 
+        <article class="status-card power-card is-waiting" id="power-card">
+          <div class="status-card__header">
+            <div>
+              <p class="status-card__label">Power Status</p>
+              <p class="status-card__subtitle">전압 · 전류 · 전력 (INA219, 단일 센서)</p>
+            </div>
+            <span class="status-chip" id="power-chip">WAITING</span>
+          </div>
+
+          <div class="power-readings">
+            <div class="power-reading">
+              <p class="power-reading__value" id="power-voltage">--.- V</p>
+              <p class="power-reading__name">Voltage</p>
+            </div>
+            <div class="power-reading">
+              <p class="power-reading__value" id="power-watt">--.- W</p>
+              <p class="power-reading__name">Power</p>
+            </div>
+            <div class="power-reading">
+              <p class="power-reading__value" id="power-current">--- mA</p>
+              <p class="power-reading__name">Current</p>
+            </div>
+          </div>
+
+          <div class="power-chart" id="power-chart" aria-hidden="true">
+            <p class="power-chart__placeholder">Waiting for samples</p>
+          </div>
+
+          <div class="power-split">
+            <div class="power-split__row">
+              <span class="power-split__name">Baseline (board+cam)</span>
+              <span class="power-split__value" id="power-baseline">-- W</span>
+            </div>
+            <div class="power-split__row">
+              <span class="power-split__name">Motor (est.)</span>
+              <span class="power-split__value" id="power-motor">-- W</span>
+            </div>
+            <div class="power-split-bar">
+              <div class="power-split-bar__baseline" id="power-split-baseline"></div>
+              <div class="power-split-bar__motor" id="power-split-motor"></div>
+            </div>
+          </div>
+
+          <dl class="status-meta">
+            <div class="status-meta__row">
+              <dt>Sag (droop)</dt>
+              <dd id="power-droop">-- V</dd>
+            </div>
+            <div class="status-meta__row">
+              <dt>Updated</dt>
+              <dd id="power-updated">Waiting for message</dd>
+            </div>
+          </dl>
+        </article>
+
         <article class="status-card control-card is-waiting" id="control-card">
           <div class="status-card__header">
             <div>

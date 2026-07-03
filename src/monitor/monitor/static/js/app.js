@@ -8,6 +8,10 @@ const STORAGE_THRESHOLDS = {
   caution: 85,
 };
 
+// Voltage droop (max-min over the rolling window) that flags a weak/sagging
+// supply even when the absolute brownout line has not been crossed.
+const POWER_DROOP_CAUTION = 0.8;
+
 const CARD_CLASSES = [
   'is-good',
   'is-live',
@@ -67,6 +71,18 @@ const elements = {
   graphCanvas: document.getElementById('ros-graph-canvas'),
   graphUpdated: document.getElementById('graph-updated'),
   graphSummary: document.getElementById('graph-summary'),
+  powerCard: document.getElementById('power-card'),
+  powerChip: document.getElementById('power-chip'),
+  powerVoltage: document.getElementById('power-voltage'),
+  powerWatt: document.getElementById('power-watt'),
+  powerCurrent: document.getElementById('power-current'),
+  powerChart: document.getElementById('power-chart'),
+  powerBaseline: document.getElementById('power-baseline'),
+  powerMotor: document.getElementById('power-motor'),
+  powerSplitBaseline: document.getElementById('power-split-baseline'),
+  powerSplitMotor: document.getElementById('power-split-motor'),
+  powerDroop: document.getElementById('power-droop'),
+  powerUpdated: document.getElementById('power-updated'),
 };
 
 let imageRequestInFlight = false;
@@ -442,6 +458,128 @@ function renderStorage(data) {
   elements.storageDetail.textContent = `${data.used_space_display || '--'} / ${data.total_space_display || '--'} used`;
 }
 
+function getPowerState(data) {
+  if (!data.has_data) {
+    return 'waiting';
+  }
+
+  if (data.is_stale) {
+    return 'stale';
+  }
+
+  if (data.sag_active) {
+    return 'low';
+  }
+
+  if (data.droop !== null && data.droop !== undefined && data.droop >= POWER_DROOP_CAUTION) {
+    return 'caution';
+  }
+
+  return 'live';
+}
+
+function getPowerLabel(state) {
+  switch (state) {
+    case 'live':
+      return 'LIVE';
+    case 'caution':
+      return 'SAG';
+    case 'low':
+      return 'BROWNOUT';
+    case 'stale':
+      return 'STALE';
+    default:
+      return 'WAITING';
+  }
+}
+
+function buildPowerSparkline(history, brownoutVoltage) {
+  const voltages = history && Array.isArray(history.v) ? history.v : [];
+  const throttles = history && Array.isArray(history.thr) ? history.thr : [];
+
+  if (voltages.length < 2) {
+    return '<p class="power-chart__placeholder">Waiting for samples</p>';
+  }
+
+  const width = 300;
+  const height = 64;
+  const pad = 4;
+  const hasThreshold = brownoutVoltage !== null && brownoutVoltage !== undefined && Number.isFinite(Number(brownoutVoltage));
+
+  let vMin = Math.min(...voltages);
+  let vMax = Math.max(...voltages);
+  if (hasThreshold) {
+    vMin = Math.min(vMin, Number(brownoutVoltage));
+    vMax = Math.max(vMax, Number(brownoutVoltage));
+  }
+  if (vMax - vMin < 0.1) {
+    vMax += 0.05;
+    vMin -= 0.05;
+  }
+
+  const count = voltages.length;
+  const xAt = (index) => pad + (index / (count - 1)) * (width - 2 * pad);
+  const yAt = (value) => pad + (1 - (value - vMin) / (vMax - vMin)) * (height - 2 * pad);
+
+  let throttleBars = '';
+  const barWidth = (width - 2 * pad) / count;
+  for (let i = 0; i < throttles.length; i += 1) {
+    const magnitude = Math.min(1, Math.abs(Number(throttles[i]) || 0));
+    if (magnitude < 0.02) {
+      continue;
+    }
+    const barHeight = magnitude * (height - 2 * pad);
+    throttleBars += `<rect x="${xAt(i).toFixed(1)}" y="${(height - pad - barHeight).toFixed(1)}" width="${barWidth.toFixed(1)}" height="${barHeight.toFixed(1)}" fill="rgba(220,220,170,0.20)"></rect>`;
+  }
+
+  const points = voltages
+    .map((value, index) => `${xAt(index).toFixed(1)},${yAt(value).toFixed(1)}`)
+    .join(' ');
+
+  let thresholdLine = '';
+  if (hasThreshold && Number(brownoutVoltage) >= vMin && Number(brownoutVoltage) <= vMax) {
+    const yThreshold = yAt(Number(brownoutVoltage)).toFixed(1);
+    thresholdLine = `<line x1="${pad}" y1="${yThreshold}" x2="${width - pad}" y2="${yThreshold}" stroke="rgba(244,135,113,0.9)" stroke-width="1" stroke-dasharray="4 3"></line>`;
+  }
+
+  return `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" class="power-chart__svg">${throttleBars}${thresholdLine}<polyline points="${points}" fill="none" stroke="#4ec9b0" stroke-width="1.5"></polyline></svg>`;
+}
+
+function renderPower(data) {
+  if (!elements.powerCard) {
+    return;
+  }
+
+  const state = getPowerState(data);
+  setCardState(elements.powerCard, state);
+  elements.powerChip.textContent = getPowerLabel(state);
+  elements.powerVoltage.textContent = data.voltage_display || '--.- V';
+  elements.powerWatt.textContent = data.watt_display || '--.- W';
+  elements.powerCurrent.textContent = data.current_display || '--- mA';
+  elements.powerDroop.textContent = data.droop_display || '-- V';
+  elements.powerUpdated.textContent = formatUpdatedAt(data.updated_at);
+
+  const baseline = data.baseline_w === null || data.baseline_w === undefined ? null : Number(data.baseline_w);
+  const motor = data.motor_w === null || data.motor_w === undefined ? null : Number(data.motor_w);
+  elements.powerBaseline.textContent = baseline === null ? '-- W' : `${baseline.toFixed(2)} W`;
+  elements.powerMotor.textContent = motor === null ? '-- W' : `${motor.toFixed(2)} W`;
+
+  const total = (baseline || 0) + (motor || 0);
+  if (elements.powerSplitBaseline && elements.powerSplitMotor) {
+    if (total > 0) {
+      elements.powerSplitBaseline.style.width = `${(100 * (baseline || 0) / total).toFixed(1)}%`;
+      elements.powerSplitMotor.style.width = `${(100 * (motor || 0) / total).toFixed(1)}%`;
+    } else {
+      elements.powerSplitBaseline.style.width = '0%';
+      elements.powerSplitMotor.style.width = '0%';
+    }
+  }
+
+  if (elements.powerChart) {
+    elements.powerChart.innerHTML = buildPowerSparkline(data.history, data.brownout_voltage);
+  }
+}
+
 function renderOffline() {
   setCardState(elements.batteryCard, 'offline');
   setCardState(elements.imageCard, 'offline');
@@ -449,6 +587,11 @@ function renderOffline() {
   setCardState(elements.storageCard, 'offline');
   if (elements.graphCard) {
     setCardState(elements.graphCard, 'offline');
+  }
+  if (elements.powerCard) {
+    setCardState(elements.powerCard, 'offline');
+    elements.powerChip.textContent = 'OFFLINE';
+    elements.powerUpdated.textContent = 'Unable to reach monitor server';
   }
   elements.batteryChip.textContent = 'OFFLINE';
   elements.imageChip.textContent = 'OFFLINE';
@@ -505,6 +648,11 @@ async function fetchStatus() {
     renderControl(payload.control || {});
     renderRecording(payload.recording || {});
     renderStorage(payload.storage || {});
+    try {
+      renderPower(payload.power || {});
+    } catch (powerError) {
+      console.error('Failed to render power panel', powerError);
+    }
   } catch (error) {
     console.error('Failed to fetch monitor status', error);
     renderOffline();

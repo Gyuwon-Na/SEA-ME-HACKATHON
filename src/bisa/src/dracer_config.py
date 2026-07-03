@@ -60,6 +60,10 @@ class LaneVisionConfig:
     fork_area_ratio: float = 0.035
     rotary_area_ratio: float = 0.08
     rotary_circularity_min: float = 0.18
+    # Min fraction of the far ROI that a left/right opening must fill to count as
+    # a rotary exit branch (rotary_exit_seen). This is the "pixel %" exit gate;
+    # raise it to reject noisy openings, lower it if real exits are missed.
+    rotary_exit_pixel_ratio: float = 0.03
     hough_roi_top_ratio: float = 0.58
     hough_canny_low: int = 50
     hough_canny_high: int = 150
@@ -164,13 +168,21 @@ class SteeringConfig:
 class RotaryConfig:
     """Stores shortcut-course rotary progress and exit timing parameters."""
 
-    direction: str = "CCW"
+    direction: str = "CW"
     min_rotation_time_sec: float = 4.5
     progress_threshold: float = 0.22
     exit_stable_frames: int = 3
     enter_ff: float = 0.35
     circulate_ff: float = 0.45
     exit_bias: float = -0.18
+    # "Ignore the first exit line, take the second" logic. A line event is only
+    # counted once (line_lockout) and the lockout releases after the exit signal
+    # has been absent for line_clear_frames consecutive control ticks, so a single
+    # physical line seen over many frames counts once. Exit is armed only after
+    # exit_line_events_to_exit distinct line events AND rotation_ok (full-lap
+    # proxy = min_rotation_time_sec + progress_threshold) are both satisfied.
+    exit_line_events_to_exit: int = 2
+    line_clear_frames: int = 3
 
 
 @dataclass

@@ -36,6 +36,20 @@ SPEC = {
         ("fork area", "lane.fork_area_ratio", "f", 0.0, 0.2),
         ("rotary area", "lane.rotary_area_ratio", "f", 0.0, 0.3),
     ],
+    # Roundabout (IN course). direction is a string (CW/CCW), not slider-tunable;
+    # set it in dracer_params.yaml or via `ros2 param set ... rotary.direction`.
+    "Rotary": [
+        ("exit pixel %", "lane.rotary_exit_pixel_ratio", "f", 0.0, 0.3),
+        ("rotary circ min", "lane.rotary_circularity_min", "f", 0.0, 1.0),
+        ("min rot time s", "rotary.min_rotation_time_sec", "f", 0.0, 15.0),
+        ("progress thresh", "rotary.progress_threshold", "f", 0.0, 2.0),
+        ("exit stable frm", "rotary.exit_stable_frames", "i", 1, 15),
+        ("line clear frm", "rotary.line_clear_frames", "i", 1, 15),
+        ("lines to exit", "rotary.exit_line_events_to_exit", "i", 1, 5),
+        ("enter ff", "rotary.enter_ff", "f", 0.0, 1.0),
+        ("circulate ff", "rotary.circulate_ff", "f", 0.0, 1.0),
+        ("exit bias", "rotary.exit_bias", "f", -1.0, 1.0),
+    ],
     "Steering (PID)": [
         ("PID Kp", "steering.kp", "f", 0.0, 4.0),
         ("PID Ki", "steering.ki", "f", 0.0, 1.0),

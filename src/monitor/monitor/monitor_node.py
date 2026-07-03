@@ -11,6 +11,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CompressedImage
+from std_msgs.msg import Float32
 import yaml
 
 from .flask_app_factory import FLASK_IMPORT_ERROR, FlaskServerThread, create_app
@@ -64,6 +65,13 @@ class MonitorNode(Node):
         self.declare_parameter('opencv_edge_topic', '/opencv/image/edge')
         self.declare_parameter('control_topic', '/control')
         self.declare_parameter('joystick_topic', 'joystick')
+        # Raw power telemetry published by battery_node (std_msgs/Float32).
+        self.declare_parameter('power_voltage_topic', '/battery/voltage')
+        self.declare_parameter('power_current_topic', '/battery/current_ma')
+        self.declare_parameter('power_watt_topic', '/battery/power_w')
+        # Absolute sag alarm line. Set to the pack: 2S ~6.0, 4S ~12.0.
+        self.declare_parameter('brownout_voltage', 6.0)
+        self.declare_parameter('power_history_len', 150)
         self.declare_parameter('storage_path', '/')
         self.declare_parameter('storage_poll_interval_sec', 1.0)
         self.declare_parameter('web_host', '192.168.0.12')
@@ -131,6 +139,16 @@ class MonitorNode(Node):
                 f'Storage path {requested_storage_path} does not exist. Falling back to /.'
             )
 
+        self.power_voltage_topic = str(self.get_parameter('power_voltage_topic').value)
+        self.power_current_topic = str(self.get_parameter('power_current_topic').value)
+        self.power_watt_topic = str(self.get_parameter('power_watt_topic').value)
+        brownout_voltage = float(self.get_parameter('brownout_voltage').value)
+        power_history_len = int(self.get_parameter('power_history_len').value)
+        # Latest raw readings; the watt message drives one combined history sample.
+        self._latest_voltage = None
+        self._latest_current_ma = None
+        self._latest_watt = None
+
         self.header_logo_path = resolve_resource_path('Telechips-CI-White.png')
         self.telechips_logo_path = resolve_resource_path('Telechips-CI-White.png')
         self.topst_logo_path = resolve_resource_path('TOPST-Logo(White).png')
@@ -138,6 +156,8 @@ class MonitorNode(Node):
             stale_timeout_sec,
             image_source_width,
             image_source_height,
+            brownout_voltage=brownout_voltage,
+            power_history_len=power_history_len,
         )
         self.app = create_app(
             self.state,
@@ -212,6 +232,24 @@ class MonitorNode(Node):
             Joystick,
             self.joystick_topic,
             self.joystick_callback,
+            10,
+        )
+        self.create_subscription(
+            Float32,
+            self.power_voltage_topic,
+            self.power_voltage_callback,
+            10,
+        )
+        self.create_subscription(
+            Float32,
+            self.power_current_topic,
+            self.power_current_callback,
+            10,
+        )
+        self.create_subscription(
+            Float32,
+            self.power_watt_topic,
+            self.power_watt_callback,
             10,
         )
         self.storage_timer = self.create_timer(
@@ -335,6 +373,29 @@ class MonitorNode(Node):
 
         if self.debug_log:
             self.get_logger().info(f'Recording updated: is_recording={msg.is_recording}')
+
+    def power_voltage_callback(self, msg):
+        self._latest_voltage = float(msg.data)
+
+    def power_current_callback(self, msg):
+        self._latest_current_ma = float(msg.data)
+
+    def power_watt_callback(self, msg):
+        # battery_node publishes voltage/current/watt together each tick, so the
+        # watt message is the trigger that commits one combined history sample
+        # with the freshest voltage/current alongside it.
+        self._latest_watt = float(msg.data)
+        self.state.update_power(
+            self._latest_voltage,
+            self._latest_current_ma,
+            self._latest_watt,
+        )
+
+        if self.debug_log:
+            self.get_logger().info(
+                f'Power updated: V={self._latest_voltage} '
+                f'I={self._latest_current_ma}mA P={self._latest_watt}W'
+            )
 
     def storage_timer_callback(self):
         try:

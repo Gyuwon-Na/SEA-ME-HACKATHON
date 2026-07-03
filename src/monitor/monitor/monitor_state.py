@@ -1,10 +1,18 @@
+from collections import deque
 from datetime import datetime, timezone
 import threading
 import time
 
 
 class MonitorState:
-    def __init__( self, stale_timeout_sec, image_source_width, image_source_height ):
+    def __init__(
+        self,
+        stale_timeout_sec,
+        image_source_width,
+        image_source_height,
+        brownout_voltage=6.0,
+        power_history_len=150,
+    ):
         self._lock = threading.Lock()
         self._stale_timeout_sec = stale_timeout_sec
 
@@ -57,6 +65,19 @@ class MonitorState:
         self._storage_total_bytes = None
         self._storage_updated_at = None
         self._storage_updated_monotonic = None
+
+        # Power telemetry from the INA219 (voltage/current/watt) plus a rolling
+        # window used to show voltage droop under load and a rough motor-vs-
+        # baseline power split. brownout_voltage is the absolute sag alarm line;
+        # set it to the pack (2S ~6.0V, 4S ~12.0V) via the monitor_node param.
+        self._brownout_voltage = float(brownout_voltage)
+        self._power_voltage = None
+        self._power_current_ma = None
+        self._power_watt = None
+        self._power_updated_at = None
+        self._power_updated_monotonic = None
+        # Each sample: (voltage, current_ma, watt, throttle_at_sample).
+        self._power_history = deque(maxlen=int(power_history_len))
 
     def _is_stale(self, updated_monotonic):
         if updated_monotonic is None:
@@ -126,6 +147,22 @@ class MonitorState:
             self._storage_updated_at = datetime.now(timezone.utc)
             self._storage_updated_monotonic = time.monotonic()
 
+    def update_power(self, voltage, current_ma, watt):
+        with self._lock:
+            self._power_voltage = None if voltage is None else float(voltage)
+            self._power_current_ma = None if current_ma is None else float(current_ma)
+            self._power_watt = None if watt is None else float(watt)
+            self._power_updated_at = datetime.now(timezone.utc)
+            self._power_updated_monotonic = time.monotonic()
+            throttle = self._throttle if self._throttle is not None else 0.0
+            if self._power_voltage is not None:
+                self._power_history.append((
+                    self._power_voltage,
+                    self._power_current_ma,
+                    self._power_watt,
+                    float(throttle),
+                ))
+
     def get_latest_frame(self):
         with self._lock:
             return self._image_frame
@@ -164,6 +201,14 @@ class MonitorState:
             storage_updated_at = self._storage_updated_at
             storage_updated_monotonic = self._storage_updated_monotonic
 
+            power_voltage = self._power_voltage
+            power_current_ma = self._power_current_ma
+            power_watt = self._power_watt
+            power_updated_at = self._power_updated_at
+            power_updated_monotonic = self._power_updated_monotonic
+            brownout_voltage = self._brownout_voltage
+            power_history = list(self._power_history)
+
         battery_has_data = battery_status is not None
         image_has_data = image_updated_at is not None
         control_has_data = throttle is not None and steering is not None
@@ -172,6 +217,26 @@ class MonitorState:
             and storage_used_bytes is not None
             and storage_total_bytes is not None
         )
+
+        power_has_data = power_voltage is not None
+        volts = [sample[0] for sample in power_history if sample[0] is not None]
+        v_min = min(volts) if volts else None
+        v_max = max(volts) if volts else None
+        droop = (v_max - v_min) if (v_min is not None and v_max is not None) else None
+        # Baseline = the lightest power seen while roughly idle (|throttle|<0.05),
+        # i.e. board + camera + servo draw. Motor draw is estimated as the excess
+        # above that baseline. This is an ESTIMATE from one sensor, not a per-rail
+        # measurement.
+        idle_watts = [
+            sample[2] for sample in power_history
+            if sample[2] is not None and abs(sample[3]) < 0.05
+        ]
+        any_watts = [sample[2] for sample in power_history if sample[2] is not None]
+        baseline_w = min(idle_watts) if idle_watts else (min(any_watts) if any_watts else None)
+        motor_w = None
+        if power_watt is not None and baseline_w is not None:
+            motor_w = max(0.0, power_watt - baseline_w)
+        sag_active = power_has_data and power_voltage <= brownout_voltage
         debug_image = {}
         for key in ('grayscale', 'blur', 'edge'):
             updated_at = debug_updated_at[key]
@@ -222,6 +287,30 @@ class MonitorState:
                 ),
                 'used_space_display': self._format_gb(storage_used_bytes),
                 'total_space_display': self._format_gb(storage_total_bytes),
+            },
+            'power': {
+                'has_data': power_has_data,
+                'is_stale': self._is_stale(power_updated_monotonic),
+                'updated_at': None if power_updated_at is None else power_updated_at.isoformat(),
+                'voltage': None if power_voltage is None else round(power_voltage, 3),
+                'voltage_display': '--.- V' if power_voltage is None else f'{power_voltage:.2f} V',
+                'current_ma': None if power_current_ma is None else round(power_current_ma, 1),
+                'current_display': '--- mA' if power_current_ma is None else f'{power_current_ma:.0f} mA',
+                'watt': None if power_watt is None else round(power_watt, 2),
+                'watt_display': '--.- W' if power_watt is None else f'{power_watt:.2f} W',
+                'v_min': None if v_min is None else round(v_min, 3),
+                'v_max': None if v_max is None else round(v_max, 3),
+                'droop': None if droop is None else round(droop, 3),
+                'droop_display': '-- V' if droop is None else f'{droop:.2f} V',
+                'baseline_w': None if baseline_w is None else round(baseline_w, 2),
+                'motor_w': None if motor_w is None else round(motor_w, 2),
+                'brownout_voltage': round(brownout_voltage, 2),
+                'sag_active': bool(sag_active),
+                'history': {
+                    'v': [round(sample[0], 3) for sample in power_history],
+                    'w': [None if sample[2] is None else round(sample[2], 2) for sample in power_history],
+                    'thr': [round(sample[3], 2) for sample in power_history],
+                },
             },
             'debug_image': debug_image,
         }

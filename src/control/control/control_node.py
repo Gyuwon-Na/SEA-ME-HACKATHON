@@ -47,6 +47,10 @@ class ControlNode(Node):
         self.declare_parameter('guard_low_voltage', 6.5)
         self.declare_parameter('guard_critical_voltage', 6.2)
         self.declare_parameter('guard_min_scale', 0.75)
+        # Output floor: never drag a moving forward command below the tuned
+        # minimum-rolling throttle (throttle.speed_min), or the guard would
+        # stall the car it promised to keep moving.
+        self.declare_parameter('guard_floor_throttle', 0.20)
         self.declare_parameter('battery_voltage_topic', '/battery/voltage')
 
         i2c_bus = int(self.get_parameter('i2c_bus').value)
@@ -116,6 +120,7 @@ class ControlNode(Node):
         except (ValueError, TypeError) as exc:
             self.get_logger().error(f'Voltage guard disabled (bad params): {exc}')
             self.voltage_guard = VoltageGuard(enabled=False)
+        self.guard_floor_throttle = float(self.get_parameter('guard_floor_throttle').value)
         self.guard_was_active = False
 
         # Control inputs
@@ -172,9 +177,14 @@ class ControlNode(Node):
         # FORWARD ONLY: reverse commands are floored at -0.42 by joystick_node to
         # clear the ESC's ~0.4 reverse deadband; scaling them would silently
         # disable reverse AND braking while the guard is active.
+        # OUTPUT FLOOR: never drag a moving forward command below the tuned
+        # minimum-rolling throttle, or the guard would stall the car it
+        # promised to keep moving (AUTO band 0.20-0.22 scaled would land ~0.15).
         guard_scale = self.voltage_guard.tick(self.now_sec())
         if throttle > 0.0:
-            throttle *= guard_scale
+            scaled = throttle * guard_scale
+            floor = min(throttle, self.guard_floor_throttle)
+            throttle = max(scaled, floor)
         self.guard_scale_pub.publish(Float32(data=float(guard_scale)))
         if self.voltage_guard.active != self.guard_was_active:
             self.guard_was_active = self.voltage_guard.active

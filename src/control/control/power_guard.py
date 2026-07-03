@@ -19,9 +19,11 @@ anywhere. Behavior:
   stop is its own failure).
 * Scale cuts are applied instantly, recovery is rate-limited
   (``recover_per_tick``) so the guard doesn't chatter.
-* If voltage data goes stale (battery_node died), the guard releases toward 1.0
-  through the same slow-recovery path rather than pinning the car to a stale
-  limit.
+* If voltage data goes stale (battery_node died), the guard HOLDS its current
+  scale rather than releasing to 1.0: battery_node swallows INA219 I2C errors
+  and just stops publishing, and that correlated failure is most likely mid-sag
+  — releasing would floor the throttle exactly when the pack is weakest. With
+  min_scale at 0.75 the held limit still keeps the car driving.
 """
 
 from __future__ import annotations
@@ -96,10 +98,13 @@ class VoltageGuard:
             return self.scale
 
         stale = (
-            self.last_update is None
-            or (now - self.last_update) > self.stale_sec
+            self.last_update is not None
+            and (now - self.last_update) > self.stale_sec
         )
-        target = 1.0 if stale else self.target_scale()
+        # Stale: HOLD the current limit (fail-safe) — a dead battery_node is
+        # most likely a mid-sag correlated failure, and releasing to full
+        # throttle then would brown out the board. Never-any-data stays 1.0.
+        target = self.scale if stale else self.target_scale()
 
         if target < self.scale:
             # Sag: cut immediately — headroom protection cannot wait.

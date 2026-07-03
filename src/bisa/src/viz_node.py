@@ -28,7 +28,7 @@ class VizNode(Node):
 
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
-            depth=2,
+            depth=1,
             reliability=ReliabilityPolicy.BEST_EFFORT,
         )
         self.create_subscription(CompressedImage, topic, self.on_image, qos)

@@ -71,8 +71,8 @@ detector:
 throttle:
   # Moving speed band. Every throttle command (while not stopped) maps into
   # [speed_min, speed_max]. Change these two to retune overall speed.
-  speed_min: 0.10
-  speed_max: 0.15
+  speed_min: 0.20
+  speed_max: 0.25
   launch_cap: 0.32
   s_curve_cap: 0.24
   fork_approach_cap: 0.20

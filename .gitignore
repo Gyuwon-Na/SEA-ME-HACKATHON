@@ -6,3 +6,10 @@ install/
 __pycache__/
 src/makedb/
 src/inference/
+
+# ROS bag files
+*.db3
+*.mcap
+*.bag
+bagfile/
+rosbag2_*/

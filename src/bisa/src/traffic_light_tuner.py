@@ -12,9 +12,12 @@ One window:
 
 Controls window "TL Controls": the color-correction chain (CLAHE / saturation /
 brightness / ... — boosting these makes the lit lamp pop and detect better, and
-the Detect window always shows the corrected frame so the effect is live), the
-green/red HSV bounds the classifier uses, its row_min_ratio, and the YOLO
-conf/imgsz. Keys: 's' prints a copy-paste YAML block, 'q' quits.
+the Detect window always shows the corrected frame so the effect is live), plus
+the filters of the ACTIVE classifier — green/red HSV bounds for color/lit (lit
+adds two brightness fields), or the LAB a-channel / L thresholds for lab — with
+row_min_ratio and the YOLO conf/imgsz always shown. Keys: 'm' cycles the
+classifier (color->lit->lab, rebuilding the sliders), 's' prints a copy-paste
+YAML block, 'q' quits.
 
 Run:  ros2 run bisa traffic_light_tuner
       ros2 run bisa traffic_light_tuner --ros-args -p video_path:=/path/to/clip.mp4
@@ -41,11 +44,14 @@ WIN_DETECT = "Detect"
 # (trackbar label, config path, kind, lo, hi)
 #   kind 'x10'/'x100' store value*10 or *100; 'boff' stores value+50 (bipolar);
 #   'imgsz32' stores imgsz/32; 'raw' stores the integer directly.
-# Color correction runs before the detector so boosting saturation / CLAHE here
-# makes the lit lamp pop and detect better — the Detect window ALWAYS shows the
-# corrected frame, so the effect is visible live. Below that, the green/red HSV
-# bounds the classifier uses, its ratio, and YOLO conf/imgsz.
-SLIDERS = [
+# The slider set depends on the classifier (cycle it with the 'm' key):
+#   * color correction + row_min_ratio + conf + imgsz are always shown;
+#   * color/lit modes add the green/red HSV bounds (lit adds two more);
+#   * lab mode adds the LAB a-channel / L thresholds INSTEAD of HSV.
+# Color correction runs before the detector so boosting saturation / CLAHE makes
+# the lit lamp pop and detect better — the Detect window ALWAYS shows the
+# corrected frame, so the effect is visible live.
+CC_SLIDERS = [
     ("clahe_clip x10", "color_correction.clahe_clip", "x10", 0, 80),
     ("clahe_tile", "color_correction.clahe_tile", "raw", 1, 16),
     ("sat_boost x10", "color_correction.saturation_boost", "x10", 0, 30),
@@ -53,6 +59,8 @@ SLIDERS = [
     ("contrast x10", "color_correction.contrast", "x10", 0, 30),
     ("saturation x10", "color_correction.saturation", "x10", 0, 30),
     ("gamma x10", "color_correction.gamma", "x10", 1, 30),
+]
+HSV_SLIDERS = [
     ("green H lo", "traffic_light.green_h_lo", "raw", 0, 180),
     ("green H hi", "traffic_light.green_h_hi", "raw", 0, 180),
     ("green S min", "traffic_light.green_s_min", "raw", 0, 255),
@@ -61,10 +69,36 @@ SLIDERS = [
     ("red H2 lo", "traffic_light.red_h2_lo", "raw", 0, 180),
     ("red S min", "traffic_light.red_s_min", "raw", 0, 255),
     ("red V min", "traffic_light.red_v_min", "raw", 0, 255),
+]
+LIT_SLIDERS = [
+    ("row lit V min", "traffic_light.row_lit_v_min", "raw", 0, 255),
+    ("row white S max", "traffic_light.row_white_s_max", "raw", 0, 255),
+]
+LAB_SLIDERS = [
+    ("lab a red min", "traffic_light.lab_a_red_min", "raw", 128, 255),
+    ("lab a green max", "traffic_light.lab_a_green_max", "raw", 0, 128),
+    ("lab L min", "traffic_light.lab_l_min", "raw", 0, 255),
+]
+TAIL_SLIDERS = [
     ("row min ratio x100", "traffic_light.row_min_ratio", "x100", 0, 50),
     ("conf x100", "detector.conf", "x100", 1, 100),
     ("imgsz /32", "detector.imgsz", "imgsz32", 5, 30),
 ]
+CLASSIFIER_CYCLE = ("color", "lit", "lab")
+
+
+def sliders_for(mode: str) -> list:
+    """Returns the trackbar set for a classifier: LAB gets LAB filters, HSV modes
+    get the green/red bounds (lit adds two), plus the always-on CC/tail sliders."""
+
+    sliders = list(CC_SLIDERS)
+    if str(mode).lower() == "lab":
+        sliders += LAB_SLIDERS
+    else:
+        sliders += HSV_SLIDERS
+        if str(mode).lower() == "lit":
+            sliders += LIT_SLIDERS
+    return sliders + TAIL_SLIDERS
 
 
 def default_config_path() -> str:
@@ -126,6 +160,8 @@ class TlTunerNode(Node):
         self.detector = BestPthDetector(self.config, model_path, logger=self.get_logger())
         self.detector.load_model()
 
+        # Active slider set follows the classifier; 'm' cycles it and rebuilds.
+        self.sliders = sliders_for(self.config.traffic_light.classifier)
         self._build_windows()
 
         # Latest frame is stored by the input source and drawn by a steady GUI
@@ -155,22 +191,38 @@ class TlTunerNode(Node):
     # ----- setup -------------------------------------------------------------
 
     def _build_windows(self) -> None:
-        """Creates the control + image windows and initializes every slider."""
+        """Creates the image + control windows and the initial slider set."""
 
         cv2.namedWindow(WIN_DETECT, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(WIN_DETECT, 640, 480)
-        cv2.namedWindow(CONTROLS, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(CONTROLS, 460, 720)
         # Spread the windows so WSLg does not stack them on top of each other
         # (a common "the window opened but I can't see it" cause).
         cv2.moveWindow(WIN_DETECT, 20, 20)
+        self._build_controls()
+
+    def _build_controls(self) -> None:
+        """(Re)creates the controls window with the trackbars for ``self.sliders``."""
+
+        cv2.namedWindow(CONTROLS, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(CONTROLS, 460, 720)
         cv2.moveWindow(CONTROLS, 680, 20)
-        for label, path, kind, lo, hi in SLIDERS:
+        for label, path, kind, lo, hi in self.sliders:
             init = self._encode(path, kind)
             init = max(lo, min(hi, init))
             cv2.createTrackbar(label, CONTROLS, init, hi, lambda _v: None)
             if lo > 0:
                 cv2.setTrackbarMin(label, CONTROLS, lo)
+
+    def _cycle_classifier(self) -> None:
+        """Advances the classifier (color->lit->lab) and rebuilds the sliders."""
+
+        cur = str(self.config.traffic_light.classifier).lower()
+        idx = CLASSIFIER_CYCLE.index(cur) if cur in CLASSIFIER_CYCLE else 0
+        self.config.traffic_light.classifier = CLASSIFIER_CYCLE[(idx + 1) % len(CLASSIFIER_CYCLE)]
+        self.sliders = sliders_for(self.config.traffic_light.classifier)
+        cv2.destroyWindow(CONTROLS)
+        self._build_controls()
+        self.get_logger().info(f"classifier -> {self.config.traffic_light.classifier}")
 
     def _cfg_get(self, path: str):
         """Reads a dotted config path; ``detector.conf`` returns the light conf."""
@@ -201,7 +253,7 @@ class TlTunerNode(Node):
     def _read_sliders(self) -> None:
         """Pulls every trackbar position back into the shared config object."""
 
-        for label, path, kind, _lo, _hi in SLIDERS:
+        for label, path, kind, _lo, _hi in self.sliders:
             pos = cv2.getTrackbarPos(label, CONTROLS)
             if kind == "x10":
                 value = pos / 10.0
@@ -285,7 +337,7 @@ class TlTunerNode(Node):
 
         self._hud(detect_view, [
             f"classifier={self.config.traffic_light.classifier}  lights={n_on}",
-            "s=dump params  q=quit",
+            "m=cycle classifier  s=dump params  q=quit",
         ])
 
         cv2.imshow(WIN_DETECT, detect_view)
@@ -323,8 +375,15 @@ class TlTunerNode(Node):
                   "contrast", "saturation", "gamma"):
             print(f"  {f}: {getattr(cc, f)}")
         print("traffic_light:")
-        for f in ("green_h_lo", "green_h_hi", "green_s_min", "green_v_min",
-                  "red_h1_hi", "red_h2_lo", "red_s_min", "red_v_min", "row_min_ratio"):
+        print(f"  classifier: {tl.classifier}")
+        fields = ["green_h_lo", "green_h_hi", "green_s_min", "green_v_min",
+                  "red_h1_hi", "red_h2_lo", "red_s_min", "red_v_min", "row_min_ratio"]
+        mode = str(tl.classifier).lower()
+        if mode == "lit":
+            fields += ["row_lit_v_min", "row_white_s_max"]
+        elif mode == "lab":
+            fields += ["lab_a_red_min", "lab_a_green_max", "lab_l_min"]
+        for f in fields:
             print(f"  {f}: {getattr(tl, f)}")
         print("detector:")
         print(f"  imgsz: {det.imgsz}")
@@ -374,6 +433,8 @@ class TlTunerNode(Node):
             rclpy.shutdown()
         elif key == ord("s"):
             self._dump_yaml()
+        elif key == ord("m"):
+            self._cycle_classifier()
 
 
 def main(args=None) -> None:

@@ -153,17 +153,24 @@ traffic_light:
   # 이긴 칸의 매칭(color)/점등(lit) 픽셀 비율이 이 값 이상이어야 인정, 아니면 drop.
   row_min_ratio: 0.02
   # lit 분류기 전용: 점등 픽셀 = V>=row_lit_v_min AND 색마스크, 또는 그 밝은 색
-  # 링 근처의 백열 픽셀(S<=row_white_s_max). color 분류기에선 미사용.
+  # 링 근처의 백열 픽셀(S<=row_white_s_max). color/lab 분류기에선 미사용.
   row_lit_v_min: 220
   row_white_s_max: 80
+  # lab 분류기 전용: OpenCV 8bit LAB은 초록↔빨강 a채널 중심이 128.
+  # a>=lab_a_red_min=빨강, a<=lab_a_green_max=초록, L>=lab_l_min 픽셀만 카운트.
+  lab_a_red_min: 150
+  lab_a_green_max: 110
+  lab_l_min: 40
   # 주행 파이프라인이 쓸 분류기:
-  #   color = 레퍼런스 순수 색비율(밝기 무시). 기본값. 대회 신호등은 안 쓰는
+  #   color = 레퍼런스 순수 색비율(HSV, 밝기 무시). 기본값. 대회 신호등은 안 쓰는
   #           불을 검은 테이프로 가려서 색이 있는 건 켜진 램프뿐 → 꺼진 렌즈에
   #           속을 일이 없음. 엄격한 밝기 게이트가 없어 흐린/역광 램프도 덜 놓침.
   #           야외 검증됨.
-  #   lit   = 발광 게이팅(V>=row_lit_v_min + 백열코어). 테이프 없이 꺼진 렌즈가
-  #           색을 유지할 때만 필요. V>=220 게이트가 흐린 램프를 놓칠 수 있음.
-  classifier: color
+  #   lit   = 발광 게이팅(HSV V>=row_lit_v_min + 백열코어). 테이프 없이 꺼진
+  #           렌즈가 색을 유지할 때만 필요. V>=220 게이트가 흐린 램프를 놓칠 수 있음.
+  #   lab   = LAB a채널(빨강=a큼, 초록=a작음). hue 랩어라운드 없고 조명 변화에
+  #           더 안정적, HSV green 범위가 놓치는 청록 초록불도 잡음. 현장 A/B용.
+  classifier: lab
 
 mission:
   route_mode: OUT

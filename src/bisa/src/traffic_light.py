@@ -16,6 +16,9 @@ over. Two scoring strategies are selectable via ``traffic_light.classifier``:
   only when it is bright (V >= ``row_lit_v_min``) and either matches the row
   color or is a near-white lamp core next to that color. Kept as a toggle for
   hardware where unlit lenses stay colored (no tape).
+* ``"lab"`` (:func:`classify_light_rows_lab`) — LAB a-channel: red = a high,
+  green = a low. ``a`` IS the green<->red axis, so one threshold per side
+  replaces the two-band red hue range and is steadier under changing light.
 
 The CLAHE -> saturation-boost -> brightness/contrast/gamma correction chain
 (:func:`apply_correction_chain` / :func:`preprocess_frame`) mirrors the
@@ -130,11 +133,12 @@ def clamp_i(value, low, high):
 
 
 def _light_bands(frame_bgr, bbox, config: AutonomousConfig):
-    """Crops a light box and returns ``(top_hsv, bottom_hsv, tl, rng)``.
+    """Crops a light box and returns ``(top_bgr, bottom_bgr, tl)``.
 
     The box is split into vertical thirds; the top third (red lamp) and bottom
-    third (green lamp) are kept, the middle (amber) third is dropped. Returns
-    ``None`` when the box is empty/degenerate.
+    third (green lamp) are kept as BGR crops (each classifier converts to its
+    own color space), the middle (amber) third is dropped. Returns ``None``
+    when the box is empty/degenerate.
     """
 
     if frame_bgr is None:
@@ -146,9 +150,9 @@ def _light_bands(frame_bgr, bbox, config: AutonomousConfig):
     y2 = int(clamp_i(bbox[3], 0, height))
     if x2 <= x1 or y2 <= y1:
         return None
-    hsv = cv2.cvtColor(frame_bgr[y1:y2, x1:x2], cv2.COLOR_BGR2HSV)
-    band_h = max(1, hsv.shape[0] // 3)
-    return hsv[:band_h], hsv[2 * band_h:], config.traffic_light, _hsv_ranges(config.traffic_light)
+    crop = frame_bgr[y1:y2, x1:x2]
+    band_h = max(1, crop.shape[0] // 3)
+    return crop[:band_h], crop[2 * band_h:], config.traffic_light
 
 
 def _decide(red_score: float, green_score: float, tl) -> str | None:
@@ -164,14 +168,18 @@ def classify_light(
 ) -> tuple[str | None, tuple[float, float]]:
     """Dispatches to the row classifier named by ``traffic_light.classifier``.
 
-    ``"color"`` (default) selects the reference pure-color algorithm; anything
-    else selects the brightness-gated one. One switch point so the driving
-    pipeline and the tuner stay in sync. Returns ``(mission_cls, (red_score,
-    green_score))``; ``mission_cls`` is ``traffic_red``/``traffic_green`` or None.
+    ``"color"`` (default) = reference pure-color HSV ratio; ``"lit"`` =
+    brightness-gated HSV; ``"lab"`` = LAB a-channel (red = a high, green = a
+    low). One switch point so the driving pipeline and the tuner stay in sync.
+    Returns ``(mission_cls, (red_score, green_score))``; ``mission_cls`` is
+    ``traffic_red``/``traffic_green`` or None.
     """
 
-    if str(getattr(config.traffic_light, "classifier", "color")).lower() == "lit":
+    mode = str(getattr(config.traffic_light, "classifier", "color")).lower()
+    if mode == "lit":
         return classify_light_rows(frame_bgr, bbox, config)
+    if mode == "lab":
+        return classify_light_rows_lab(frame_bgr, bbox, config)
     return classify_light_rows_color(frame_bgr, bbox, config)
 
 
@@ -190,13 +198,15 @@ def classify_light_rows_color(
     bands = _light_bands(frame_bgr, bbox, config)
     if bands is None:
         return None, (0.0, 0.0)
-    top, bottom, tl, rng = bands
+    top, bottom, tl = bands
+    rng = _hsv_ranges(tl)
 
-    def color_ratio(band, color):
-        if band.size == 0:
+    def color_ratio(band_bgr, color):
+        if band_bgr.size == 0:
             return 0.0
-        matched = _color_mask(band, color, rng) > 0
-        return float(np.count_nonzero(matched)) / float(band.shape[0] * band.shape[1])
+        hsv = cv2.cvtColor(band_bgr, cv2.COLOR_BGR2HSV)
+        matched = _color_mask(hsv, color, rng) > 0
+        return float(np.count_nonzero(matched)) / float(band_bgr.shape[0] * band_bgr.shape[1])
 
     red_score = color_ratio(top, "red")
     green_score = color_ratio(bottom, "green")
@@ -219,11 +229,13 @@ def classify_light_rows(
     bands = _light_bands(frame_bgr, bbox, config)
     if bands is None:
         return None, (0.0, 0.0)
-    top, bottom, tl, rng = bands
+    top, bottom, tl = bands
+    rng = _hsv_ranges(tl)
 
-    def lit_ratio(band, color):
-        if band.size == 0:
+    def lit_ratio(band_bgr, color):
+        if band_bgr.size == 0:
             return 0.0
+        band = cv2.cvtColor(band_bgr, cv2.COLOR_BGR2HSV)
         bright = band[:, :, 2] >= int(tl.row_lit_v_min)
         colored_lit = (bright & (_color_mask(band, color, rng) > 0)).astype(np.uint8)
         # The white core only counts within one dilation step of the bright
@@ -237,4 +249,40 @@ def classify_light_rows(
 
     red_score = lit_ratio(top, "red")
     green_score = lit_ratio(bottom, "green")
+    return _decide(red_score, green_score, tl), (red_score, green_score)
+
+
+def classify_light_rows_lab(
+    frame_bgr, bbox, config: AutonomousConfig
+) -> tuple[str | None, tuple[float, float]]:
+    """LAB a-channel classifier: red = a high, green = a low.
+
+    OpenCV 8-bit LAB centers the green<->red ``a`` channel at 128. The top
+    third scores the fraction of pixels with ``a >= lab_a_red_min`` (reddish),
+    the bottom third the fraction with ``a <= lab_a_green_max`` (greenish);
+    only pixels with ``L >= lab_l_min`` count, so dark background is ignored.
+    Because ``a`` IS the red-green axis, one threshold each side replaces the
+    two-band red hue range and is steadier under changing light. Selected by
+    ``classifier: lab``.
+    """
+
+    bands = _light_bands(frame_bgr, bbox, config)
+    if bands is None:
+        return None, (0.0, 0.0)
+    top, bottom, tl = bands
+
+    def lab_ratio(band_bgr, want):
+        if band_bgr.size == 0:
+            return 0.0
+        lab = cv2.cvtColor(band_bgr, cv2.COLOR_BGR2LAB)
+        bright = lab[:, :, 0] >= int(tl.lab_l_min)
+        a_ch = lab[:, :, 1]
+        if want == "red":
+            matched = bright & (a_ch >= int(tl.lab_a_red_min))
+        else:
+            matched = bright & (a_ch <= int(tl.lab_a_green_max))
+        return float(np.count_nonzero(matched)) / float(band_bgr.shape[0] * band_bgr.shape[1])
+
+    red_score = lab_ratio(top, "red")
+    green_score = lab_ratio(bottom, "green")
     return _decide(red_score, green_score, tl), (red_score, green_score)

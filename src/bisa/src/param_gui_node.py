@@ -85,6 +85,9 @@ SPEC = {
         ("row min ratio", "traffic_light.row_min_ratio", "f", 0.0, 0.5),
         ("row lit V min (lit only)", "traffic_light.row_lit_v_min", "i", 0, 255),
         ("row white S max (lit only)", "traffic_light.row_white_s_max", "i", 0, 255),
+        ("lab a red min (lab only)", "traffic_light.lab_a_red_min", "i", 128, 255),
+        ("lab a green max (lab only)", "traffic_light.lab_a_green_max", "i", 0, 128),
+        ("lab L min (lab only)", "traffic_light.lab_l_min", "i", 0, 255),
     ],
     "Detector conf": [
         ("imgsz (early detect)", "detector.imgsz", "i", 160, 960),

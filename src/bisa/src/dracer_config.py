@@ -235,6 +235,12 @@ class TrafficLightConfig:
     # bright colored pixels, so a bright background wall never scores.
     row_lit_v_min: int = 220
     row_white_s_max: int = 80
+    # Used only by the "lab" classifier. OpenCV 8-bit LAB centers the green<->red
+    # ``a`` channel at 128: a >= lab_a_red_min is red, a <= lab_a_green_max is
+    # green; only pixels with L >= lab_l_min count (drops dark background).
+    lab_a_red_min: int = 150
+    lab_a_green_max: int = 110
+    lab_l_min: int = 40
     # Which classifier the driving pipeline uses to read a light box:
     #   "color" - reference pure per-row color-pixel ratio (no brightness gate).
     #             DEFAULT: the competition light has its inactive lamps covered
@@ -245,7 +251,10 @@ class TrafficLightConfig:
     #   "lit"   - brightness-gated emitting detection (V>=row_lit_v_min +
     #             white-core-near-ring). Needed only when unlit lenses stay
     #             colored (no tape); adds a strict V>=220 gate that can miss a
-    #             dim lamp. Flip here for a venue A/B.
+    #             dim lamp.
+    #   "lab"   - LAB a-channel (red = a high, green = a low). No hue wraparound,
+    #             steadier under changing light, and catches a cyan-ish green
+    #             lamp the HSV green range can clip. Flip here for a venue A/B.
     classifier: str = "color"
 
 

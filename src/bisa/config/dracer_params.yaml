@@ -62,7 +62,7 @@ detector:
     traffic_green: 1
     sign_left: 2
     sign_right: 3
-  # 신호등 conf를 낮추면 멀리/작게 잡히는 불도 미리 감지. 색 검증(verify_min_ratio)
+  # 신호등 conf를 낮추면 멀리/작게 잡히는 불도 미리 감지. 행 분할 재분류(row_*)
   # + 상태 게이팅 + 연속 투표가 오탐을 걸러주므로 낮춰도 비교적 안전.
   conf:
     traffic_green: 0.40
@@ -126,10 +126,10 @@ aruco:
   target_id: 3
   detect_hz: 10.0
 
-# Frame preprocessing shared by the YOLO detector and the HSV traffic-light
-# analyzer. Off by default so the vehicle pays nothing; enable while tuning.
+# YOLO 검출 프레임 전처리(CLAHE→채도부스트→밝기/대비/감마). 레퍼런스처럼
+# 검출 전에 적용해 색을 또렷하게. enabled=true면 검출기·색분류가 보정본을 봄.
 color_correction:
-  enabled: false
+  enabled: true
   clahe_clip: 2.0
   clahe_tile: 8
   saturation_boost: 1.5
@@ -138,31 +138,32 @@ color_correction:
   saturation: 1.0
   gamma: 1.0
 
-# HSV traffic-light color analysis over roi.detector_light. Emits
-# traffic_green/traffic_red detections into the vote path when enabled.
+# YOLO가 검출한 신호등 박스의 red/green 색 판별. 박스를 세로 3등분해서
+# 윗칸(red)/아랫칸(green)만 점수내고 높은 쪽이 이김. 가운데(amber)는 무시
+# (미션은 red/green만, 대회 신호등은 가운데 불을 테이프로 가림).
 traffic_light:
-  enabled: false
   red_h1_hi: 10
   red_h2_lo: 170
   red_s_min: 120
   red_v_min: 100
-  yellow_h_lo: 15
-  yellow_h_hi: 32
-  yellow_s_min: 100
-  yellow_v_min: 100
   green_h_lo: 40
   green_h_hi: 90
   green_s_min: 50
   green_v_min: 50
-  min_on_ratio: 0.01
-  # 탐지 박스 크롭에서 해당 색 픽셀이 이 비율 이상이어야 detection 인정
-  # (enabled와 무관하게 항상 적용되는 모델+HSV 이중 확인)
-  verify_min_ratio: 0.05
-  hough_min_dist: 20
-  hough_param1: 50
-  hough_param2: 10
-  hough_min_radius: 2
-  hough_max_radius: 30
+  # 이긴 칸의 매칭(color)/점등(lit) 픽셀 비율이 이 값 이상이어야 인정, 아니면 drop.
+  row_min_ratio: 0.02
+  # lit 분류기 전용: 점등 픽셀 = V>=row_lit_v_min AND 색마스크, 또는 그 밝은 색
+  # 링 근처의 백열 픽셀(S<=row_white_s_max). color 분류기에선 미사용.
+  row_lit_v_min: 220
+  row_white_s_max: 80
+  # 주행 파이프라인이 쓸 분류기:
+  #   color = 레퍼런스 순수 색비율(밝기 무시). 기본값. 대회 신호등은 안 쓰는
+  #           불을 검은 테이프로 가려서 색이 있는 건 켜진 램프뿐 → 꺼진 렌즈에
+  #           속을 일이 없음. 엄격한 밝기 게이트가 없어 흐린/역광 램프도 덜 놓침.
+  #           야외 검증됨.
+  #   lit   = 발광 게이팅(V>=row_lit_v_min + 백열코어). 테이프 없이 꺼진 렌즈가
+  #           색을 유지할 때만 필요. V>=220 게이트가 흐린 램프를 놓칠 수 있음.
+  classifier: color
 
 mission:
   route_mode: OUT

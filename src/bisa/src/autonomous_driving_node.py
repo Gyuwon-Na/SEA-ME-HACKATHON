@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
@@ -95,7 +96,6 @@ class BisaAutonomousNode(Node):
         # frames of history; 90 frames = 3 s of headroom.
         self.det_buffer = DetectionBuffer(maxlen=90)
         self.detector = BestPthDetector(self.config, resolved_model, logger=self.get_logger())
-        self.light_analyzer = traffic_light.TrafficLightAnalyzer(self.config)
         self.aruco_detector = ArucoDetector(self.config)
         self.controller = LaneController(self.config)
         self.fsm = make_course_fsm(self.config, self.controller)
@@ -285,9 +285,6 @@ class BisaAutonomousNode(Node):
 
         if self.last_frame is None:
             return
-        light_roi = (
-            self.config.roi.detector_light if self.config.traffic_light.enabled else None
-        )
         # Detect View always shows the corrected frame so the CLAHE/saturation/
         # brightness sliders are visible live, regardless of whether the
         # detector is actually consuming the correction (cfg.enabled).
@@ -300,8 +297,7 @@ class BisaAutonomousNode(Node):
             self.last_cmd,
             self.fsm.state,
             target_id=self.config.aruco.target_id,
-            light_roi=light_roi,
-            light_states=self.light_analyzer.last_states,
+            light_roi=self.config.roi.detector_light,
             accepted_ids={id(d) for d in self.latest_detections},
             cc_active=bool(self.config.color_correction.enabled),
         )
@@ -341,29 +337,35 @@ class BisaAutonomousNode(Node):
         self.latest_markers = self.aruco_detector.detect(frame, now_sec)
 
     def _gate_traffic_detections(self, detections, frame) -> list:
-        """Keeps traffic-light detections only in their mission phase, color-verified.
+        """Keeps traffic-light detections only in their mission phase, row-classified.
 
+        The YOLO class of a light box is unreliable (an unlit red lens still
+        looks red), so the model only localizes: the box is split into three
+        rows and the LIT row decides the class (top=red, bottom=green),
+        overriding the YOLO label. Boxes with no clearly lit row are dropped.
         Green only matters while waiting to launch; red only after the finish
         window opened — outside those windows the classes are dropped outright,
         so mid-course false positives can never reach the vote buffer or the
-        detect_green/detect_red status topics. Surviving boxes must also pass
-        the HSV color check (model proposes, color confirms). Sign and other
-        classes pass through untouched. Reads FSM state from the inference
-        thread; a one-frame-stale value is harmless here.
+        detect_green/detect_red status topics. Sign and other classes pass
+        through untouched. Reads FSM state from the inference thread; a
+        one-frame-stale value is harmless here.
         """
 
         listen_green = self.fsm.state.endswith("WAIT_GREEN")
         listen_red = bool(self.fsm.finish_crossed)
         kept = []
         for det in detections:
-            if det.cls == "traffic_green" and not listen_green:
-                continue
-            if det.cls == "traffic_red" and not listen_red:
-                continue
-            if det.cls in ("traffic_green", "traffic_red") and not traffic_light.verify_light_color(
-                frame, det.bbox, det.cls, self.config
-            ):
-                continue
+            if det.cls in ("traffic_green", "traffic_red"):
+                row_cls, _scores = traffic_light.classify_light(
+                    frame, det.bbox, self.config
+                )
+                if row_cls is None:
+                    continue
+                det = replace(det, cls=row_cls)
+                if det.cls == "traffic_green" and not listen_green:
+                    continue
+                if det.cls == "traffic_red" and not listen_red:
+                    continue
             kept.append(det)
         return kept
 
@@ -385,8 +387,6 @@ class BisaAutonomousNode(Node):
             detections = self.detector.infer(proc, now_sec)
             if self.detector.last_infer_time != previous_infer_time:
                 # Inference actually ran; refresh buffer and status snapshot.
-                # Fold in HSV traffic-light detections so they share the vote path.
-                detections = detections + self.light_analyzer.detect(proc)
                 self.latest_detections_viz = detections
                 detections = self._gate_traffic_detections(detections, proc)
                 self.det_buffer.push(detections)

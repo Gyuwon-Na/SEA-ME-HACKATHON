@@ -1,23 +1,25 @@
-"""HSV traffic-light color analysis and shared frame preprocessing.
+"""Traffic-light color classification and shared frame preprocessing.
 
-Ports the ideas from the reference ``traffic_light_processor.py`` into the
-D-Racer pipeline:
+Pipeline: YOLO (``best.pt``) localizes the traffic-light box; its class label is
+discarded. :func:`classify_light` then splits the box into vertical thirds and
+decides the mission color from WHICH third is showing the lamp — top third =
+red, bottom third = green. The middle (amber) third is ignored: the mission
+only cares about red/green and the competition light has its amber lamp taped
+over. Two scoring strategies are selectable via ``traffic_light.classifier``:
 
-* a CLAHE -> saturation-boost -> brightness/contrast/saturation/gamma
-  correction stage (:func:`preprocess_frame`) that can run before detection, and
-* an HSV mask analyzer (:class:`TrafficLightAnalyzer`) that reports the lit color
-  inside the traffic-light ROI, using HoughCircles to confirm red/yellow.
+* ``"color"`` (:func:`classify_light_rows_color`, default) — the reference
+  ``traffic_light_processor.py`` algorithm: pure per-row color-pixel ratio, no
+  brightness gate. Robust when the inactive lamps are taped black (nothing else
+  is colored) and it never misses a dim / sun-washed lamp for lack of bright-
+  ness.
+* ``"lit"`` (:func:`classify_light_rows`) — brightness-gated: a pixel counts
+  only when it is bright (V >= ``row_lit_v_min``) and either matches the row
+  color or is a near-white lamp core next to that color. Kept as a toggle for
+  hardware where unlit lenses stay colored (no tape).
 
-The reference light is a 1x4 HORIZONTAL bar split into four vertical sections.
-THIS car's light is a 3x1 VERTICAL stack: top lamp = RED, middle = YELLOW,
-bottom = GREEN. So we split the light ROI into three HORIZONTAL bands and check
-each against only its expected color (top->red, middle->yellow, bottom->green),
-exactly mirroring the reference's per-section color mapping but re-oriented. A
-lamp lit in the top band means red; the bottom band means green.
-
-We have no per-light bounding box (the shipped best.pt is a whole-frame
-classifier), so the analysis runs over ``roi.detector_light`` -- keep that ROI
-tight around the traffic light for the section mapping to line up. Pure OpenCV /
+The CLAHE -> saturation-boost -> brightness/contrast/gamma correction chain
+(:func:`apply_correction_chain` / :func:`preprocess_frame`) mirrors the
+reference's pre-detection enhancement and can run before YOLO. Pure OpenCV /
 NumPy, no ROS, so it stays importable in the syntax tests.
 """
 
@@ -27,7 +29,6 @@ import cv2
 import numpy as np
 
 from .dracer_config import AutonomousConfig, ColorCorrectionConfig
-from .object_detector import Detection
 
 
 def apply_clahe(bgr: np.ndarray, clip: float = 2.0, tile: int = 8) -> np.ndarray:
@@ -99,15 +100,13 @@ def preprocess_frame(bgr: np.ndarray | None, cfg: ColorCorrectionConfig) -> np.n
 
 
 def _hsv_ranges(tl) -> dict:
-    """Builds the four (lower, upper) HSV bounds from scalar config fields."""
+    """Builds the red/green (lower, upper) HSV bounds from scalar config fields."""
 
     return {
         "red1": (np.array([0, tl.red_s_min, tl.red_v_min]),
                  np.array([tl.red_h1_hi, 255, 255])),
         "red2": (np.array([tl.red_h2_lo, tl.red_s_min, tl.red_v_min]),
                  np.array([180, 255, 255])),
-        "yellow": (np.array([tl.yellow_h_lo, tl.yellow_s_min, tl.yellow_v_min]),
-                   np.array([tl.yellow_h_hi, 255, 255])),
         "green": (np.array([tl.green_h_lo, tl.green_s_min, tl.green_v_min]),
                   np.array([tl.green_h_hi, 255, 255])),
     }
@@ -124,142 +123,118 @@ def _color_mask(hsv: np.ndarray, color: str, rng: dict) -> np.ndarray:
     return cv2.inRange(hsv, rng[color][0], rng[color][1])
 
 
-def verify_light_color(frame_bgr, bbox, mission_cls: str, config: AutonomousConfig) -> bool:
-    """Confirms a detector traffic-light box actually shows the claimed color.
-
-    Model proposes, color verifies: the box is cropped and the matching HSV
-    color mask must cover at least ``traffic_light.verify_min_ratio`` of the
-    crop, so a mislabeled box (e.g. a red lamp classified as green) is
-    rejected before it reaches the vote buffer. Uses the same HSV bounds as
-    the analyzer, so the Traffic Light GUI sliders tune this check too.
-    """
-
-    if frame_bgr is None:
-        return False
-    height, width = frame_bgr.shape[:2]
-    x1 = int(clamp_i(bbox[0], 0, width - 1))
-    y1 = int(clamp_i(bbox[1], 0, height - 1))
-    x2 = int(clamp_i(bbox[2], 0, width))
-    y2 = int(clamp_i(bbox[3], 0, height))
-    if x2 <= x1 or y2 <= y1:
-        return False
-    crop = frame_bgr[y1:y2, x1:x2]
-    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-    rng = _hsv_ranges(config.traffic_light)
-    color = "red" if mission_cls == "traffic_red" else "green"
-    mask = _color_mask(hsv, color, rng)
-    ratio = float(cv2.countNonZero(mask)) / float(mask.size)
-    return ratio >= float(config.traffic_light.verify_min_ratio)
-
-
 def clamp_i(value, low, high):
     """Clamps a numeric value into an inclusive integer-friendly range."""
 
     return max(low, min(high, value))
 
 
-class TrafficLightAnalyzer:
-    """Reports the lit traffic-light color from HSV masks inside the light ROI.
+def _light_bands(frame_bgr, bbox, config: AutonomousConfig):
+    """Crops a light box and returns ``(top_hsv, bottom_hsv, tl, rng)``.
 
-    Vertical 3x1 layout (top row index 0 -> bottom row index 2). Each entry is
-    (color_name, row_index, needs_hough_circle).
+    The box is split into vertical thirds; the top third (red lamp) and bottom
+    third (green lamp) are kept, the middle (amber) third is dropped. Returns
+    ``None`` when the box is empty/degenerate.
     """
 
-    # Top lamp = red, middle = yellow, bottom = green. Red/yellow are confirmed
-    # with HoughCircles (round lamp), green is accepted on area alone -- matching
-    # the reference, which only circle-checked the red/yellow lamps.
-    SECTION_LAYOUT = (
-        ("red", 0, True),
-        ("yellow", 1, True),
-        ("green", 2, False),
-    )
+    if frame_bgr is None:
+        return None
+    height, width = frame_bgr.shape[:2]
+    x1 = int(clamp_i(bbox[0], 0, width - 1))
+    y1 = int(clamp_i(bbox[1], 0, height - 1))
+    x2 = int(clamp_i(bbox[2], 0, width))
+    y2 = int(clamp_i(bbox[3], 0, height))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    hsv = cv2.cvtColor(frame_bgr[y1:y2, x1:x2], cv2.COLOR_BGR2HSV)
+    band_h = max(1, hsv.shape[0] // 3)
+    return hsv[:band_h], hsv[2 * band_h:], config.traffic_light, _hsv_ranges(config.traffic_light)
 
-    def __init__(self, config: AutonomousConfig):
-        """Keeps a config reference and the most recent color decision."""
 
-        self.config = config
-        self.last_states = {"red": False, "yellow": False, "green": False}
+def _decide(red_score: float, green_score: float, tl) -> str | None:
+    """Picks the higher-scoring lamp if it clears ``row_min_ratio``, else None."""
 
-    def _ranges(self) -> dict:
-        """Builds the four (lower, upper) HSV bounds from scalar config fields."""
+    if max(red_score, green_score) < float(tl.row_min_ratio):
+        return None
+    return "traffic_red" if red_score >= green_score else "traffic_green"
 
-        return _hsv_ranges(self.config.traffic_light)
 
-    def roi_rect(self, width: int, height: int) -> tuple[int, int, int, int]:
-        """Returns the pixel (x0, y0, x1, y1) of the traffic-light detection ROI."""
+def classify_light(
+    frame_bgr, bbox, config: AutonomousConfig
+) -> tuple[str | None, tuple[float, float]]:
+    """Dispatches to the row classifier named by ``traffic_light.classifier``.
 
-        x0, y0, x1, y1 = self.config.roi.detector_light
-        return (int(x0 * width), int(y0 * height), int(x1 * width), int(y1 * height))
+    ``"color"`` (default) selects the reference pure-color algorithm; anything
+    else selects the brightness-gated one. One switch point so the driving
+    pipeline and the tuner stay in sync. Returns ``(mission_cls, (red_score,
+    green_score))``; ``mission_cls`` is ``traffic_red``/``traffic_green`` or None.
+    """
 
-    def _color_mask(self, hsv: np.ndarray, color: str, rng: dict) -> np.ndarray:
-        """Builds the HSV mask for one color (red spans two hue bands)."""
+    if str(getattr(config.traffic_light, "classifier", "color")).lower() == "lit":
+        return classify_light_rows(frame_bgr, bbox, config)
+    return classify_light_rows_color(frame_bgr, bbox, config)
 
-        return _color_mask(hsv, color, rng)
 
-    def analyze(self, roi_bgr: np.ndarray) -> dict:
-        """Returns {red, yellow, green} booleans for one 3x1 vertical light crop.
+def classify_light_rows_color(
+    frame_bgr, bbox, config: AutonomousConfig
+) -> tuple[str | None, tuple[float, float]]:
+    """Reference algorithm: pure per-row COLOR pixel ratio, NO brightness gate.
 
-        Splits the crop into three horizontal bands and checks each band only
-        against its expected color, so a lit top band => red and a lit bottom
-        band => green (never confused for one another).
-        """
+    Ports ``traffic_light_processor.analyze_traffic_light``: the top third is
+    scored by its red-mask pixel fraction, the bottom third by its green-mask
+    fraction, and the higher wins if it clears ``row_min_ratio``. With the
+    competition light's inactive lamps taped black, the only colored region is
+    the active lamp, so pure color counting cannot be fooled by an unlit lens.
+    """
 
-        states = {"red": False, "yellow": False, "green": False}
-        if roi_bgr is None or roi_bgr.size == 0:
-            return states
-        hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
-        rng = self._ranges()
-        tl = self.config.traffic_light
-        hough = dict(
-            minDist=max(1, int(tl.hough_min_dist)),
-            param1=max(1, int(tl.hough_param1)),
-            param2=max(1, int(tl.hough_param2)),
-            minRadius=max(0, int(tl.hough_min_radius)),
-            maxRadius=max(0, int(tl.hough_max_radius)),
-        )
-        height = roi_bgr.shape[0]
-        band_h = max(1, height // 3)
-        for color, row, needs_circle in self.SECTION_LAYOUT:
-            y0 = row * band_h
-            y1 = (row + 1) * band_h if row < 2 else height
-            band = self._color_mask(hsv, color, rng)[y0:y1, :]
-            if band.size == 0:
-                continue
-            min_on = max(20, int(band.size * float(tl.min_on_ratio)))
-            if cv2.countNonZero(band) <= min_on:
-                continue
-            if needs_circle:
-                circles = cv2.HoughCircles(band, cv2.HOUGH_GRADIENT, 1, **hough)
-                states[color] = circles is not None
-            else:
-                states[color] = True
-        return states
+    bands = _light_bands(frame_bgr, bbox, config)
+    if bands is None:
+        return None, (0.0, 0.0)
+    top, bottom, tl, rng = bands
 
-    def detect(self, frame_bgr: np.ndarray | None) -> list[Detection]:
-        """Analyzes the light ROI and returns mission Detection objects.
+    def color_ratio(band, color):
+        if band.size == 0:
+            return 0.0
+        matched = _color_mask(band, color, rng) > 0
+        return float(np.count_nonzero(matched)) / float(band.shape[0] * band.shape[1])
 
-        Emits at most one ``traffic_green`` and one ``traffic_red`` so the result
-        drops straight into the existing DetectionBuffer vote pipeline. Returns an
-        empty list (and touches nothing) when the analyzer is disabled.
-        """
+    red_score = color_ratio(top, "red")
+    green_score = color_ratio(bottom, "green")
+    return _decide(red_score, green_score, tl), (red_score, green_score)
 
-        if frame_bgr is None or not self.config.traffic_light.enabled:
-            return []
-        height, width = frame_bgr.shape[:2]
-        x0, y0, x1, y1 = self.roi_rect(width, height)
-        x0c, y0c = max(0, x0), max(0, y0)
-        x1c, y1c = min(width, x1), min(height, y1)
-        roi = frame_bgr[y0c:y1c, x0c:x1c]
-        states = self.analyze(roi)
-        self.last_states = states
 
-        detections: list[Detection] = []
-        cx = (x0 + x1) / 2.0
-        cy = (y0 + y1) / 2.0
-        bbox = (float(x0), float(y0), float(x1), float(y1))
-        for color, cls in (("green", "traffic_green"), ("red", "traffic_red")):
-            if states.get(color):
-                detections.append(
-                    Detection(cls=cls, conf=1.0, bbox=bbox, cx=cx, cy=cy)
-                )
-        return detections
+def classify_light_rows(
+    frame_bgr, bbox, config: AutonomousConfig
+) -> tuple[str | None, tuple[float, float]]:
+    """Brightness-gated classifier: only LIT (emitting) pixels score.
+
+    Same top=red / bottom=green split as the color classifier, but a pixel
+    counts only when bright (V >= ``row_lit_v_min``) and either matches the row
+    color or is a near-white lamp core (S <= ``row_white_s_max``) NEXT TO such
+    bright colored pixels. Rejects an unlit-but-colored lens and a bright
+    background wall leaking into the box. Selected by ``classifier: lit`` for
+    hardware whose inactive lenses are not taped over.
+    """
+
+    bands = _light_bands(frame_bgr, bbox, config)
+    if bands is None:
+        return None, (0.0, 0.0)
+    top, bottom, tl, rng = bands
+
+    def lit_ratio(band, color):
+        if band.size == 0:
+            return 0.0
+        bright = band[:, :, 2] >= int(tl.row_lit_v_min)
+        colored_lit = (bright & (_color_mask(band, color, rng) > 0)).astype(np.uint8)
+        # The white core only counts within one dilation step of the bright
+        # colored ring, so a bright background wall (white, no color ring)
+        # never scores as a lit lamp.
+        kernel = max(3, band.shape[0] // 3)
+        near_ring = cv2.dilate(colored_lit, np.ones((kernel, kernel), np.uint8)) > 0
+        whitish = bright & (band[:, :, 1] <= int(tl.row_white_s_max))
+        lit = (colored_lit > 0) | (whitish & near_ring)
+        return float(np.count_nonzero(lit)) / float(lit.shape[0] * lit.shape[1])
+
+    red_score = lit_ratio(top, "red")
+    green_score = lit_ratio(bottom, "green")
+    return _decide(red_score, green_score, tl), (red_score, green_score)

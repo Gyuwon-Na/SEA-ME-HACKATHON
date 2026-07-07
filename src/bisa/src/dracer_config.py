@@ -210,41 +210,43 @@ class ColorCorrectionConfig:
 
 @dataclass
 class TrafficLightConfig:
-    """HSV color analysis of the traffic-light ROI (traffic_light_processor.py parity).
+    """Red/green color classification of a YOLO-detected traffic-light box.
 
-    Off by default. When ``enabled`` the analyzer runs the same red/yellow/green
-    HSV masks (with HoughCircles confirmation for red/yellow) as the reference,
-    over the ``roi.detector_light`` region, and emits traffic_green/traffic_red
-    detections that feed the existing vote/FSM path. HSV bounds are stored as
-    scalars so each maps to one tuning slider.
+    The YOLO box is split into vertical thirds; the top (red) and bottom (green)
+    thirds are scored and the higher wins. The amber middle third is ignored
+    (mission is red/green only; the competition light tapes it over). HSV bounds
+    are scalars so each maps to one tuning slider.
     """
 
-    enabled: bool = False
     red_h1_hi: int = 10        # upper hue of the low-red band [0, red_h1_hi]
     red_h2_lo: int = 170       # lower hue of the high-red band [red_h2_lo, 180]
     red_s_min: int = 120
     red_v_min: int = 100
-    yellow_h_lo: int = 15
-    yellow_h_hi: int = 32
-    yellow_s_min: int = 100
-    yellow_v_min: int = 100
     green_h_lo: int = 40
     green_h_hi: int = 90
     green_s_min: int = 50
     green_v_min: int = 50
-    # Fraction of one vertical band (1/3 of the light ROI) that must match its
-    # color to count that lamp lit. Slider-tunable live.
-    min_on_ratio: float = 0.01
-    # Fraction of a DETECTOR traffic-light box that must match the claimed
-    # color for the detection to be accepted (model proposes, color confirms).
-    # Applies regardless of ``enabled`` above, which only controls the
-    # fixed-ROI analyzer.
-    verify_min_ratio: float = 0.05
-    hough_min_dist: int = 20
-    hough_param1: int = 50
-    hough_param2: int = 10
-    hough_min_radius: int = 2
-    hough_max_radius: int = 30
+    # Winning third must have at least this fraction of its pixels match (color
+    # classifier) or lit (lit classifier), else the box is dropped.
+    row_min_ratio: float = 0.02
+    # Used only by the "lit" classifier: a pixel counts as lit when it is bright
+    # (V >= row_lit_v_min) AND inside the row color mask, or near-white
+    # (S <= row_white_s_max — an emitting lamp's blown-out core) next to such
+    # bright colored pixels, so a bright background wall never scores.
+    row_lit_v_min: int = 220
+    row_white_s_max: int = 80
+    # Which classifier the driving pipeline uses to read a light box:
+    #   "color" - reference pure per-row color-pixel ratio (no brightness gate).
+    #             DEFAULT: the competition light has its inactive lamps covered
+    #             with black tape, so the only colored region is the active lamp
+    #             and pure-color counting cannot be fooled by an unlit lens.
+    #             No strict brightness gate, so it also misses a dim / sun-washed
+    #             lamp less often. Field-proven outdoors.
+    #   "lit"   - brightness-gated emitting detection (V>=row_lit_v_min +
+    #             white-core-near-ring). Needed only when unlit lenses stay
+    #             colored (no tape); adds a strict V>=220 gate that can miss a
+    #             dim lamp. Flip here for a venue A/B.
+    classifier: str = "color"
 
 
 @dataclass

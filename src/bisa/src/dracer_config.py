@@ -21,7 +21,6 @@ class RoiConfig:
     mid_y1: float = 0.75
     far_y0: float = 0.32
     far_y1: float = 0.58
-    optional_birdeye_y0: float = 0.35
     detector_light: list[float] = field(default_factory=lambda: [0.20, 0.00, 0.80, 0.55])
     detector_sign: list[float] = field(default_factory=lambda: [0.10, 0.05, 0.90, 0.70])
     detector_dynamic: list[float] = field(default_factory=lambda: [0.00, 0.35, 1.00, 1.00])
@@ -52,14 +51,24 @@ class LaneRoiConfig:
 class LaneVisionConfig:
     """Stores tunable parameters for road mask and Hough fallback lane detection."""
 
-    black_hsv_lower: list[int] = field(default_factory=lambda: [0, 0, 0])
-    black_hsv_upper: list[int] = field(default_factory=lambda: [180, 90, 90])
+    # LAB road mask: the mask comes from cv2.inRange over the CLAHE-equalized
+    # LAB image using these per-channel min/max bounds. Tune them live from the
+    # "Lane ROI Mask" debug window; OpenCV 8-bit LAB ranges are L 0..255 and
+    # a/b 0..255 with 128 as the neutral (gray) point.
+    lab_l_min: int = 0
+    lab_l_max: int = 90
+    lab_a_min: int = 105
+    lab_a_max: int = 150
+    lab_b_min: int = 105
+    lab_b_max: int = 150
+    # CLAHE applied to the L channel before LAB thresholding AND before the
+    # Canny/Hough lane-line pass (previously hardcoded clip=2.0 tile=8).
+    lab_clahe_clip: float = 2.0
+    lab_clahe_tile: int = 8
     morph_open_kernel: int = 3
     morph_close_kernel: int = 5
     min_component_area_ratio: float = 0.006
     fork_area_ratio: float = 0.035
-    rotary_area_ratio: float = 0.08
-    rotary_circularity_min: float = 0.18
     hough_roi_top_ratio: float = 0.58
     hough_canny_low: int = 50
     hough_canny_high: int = 150
@@ -77,36 +86,38 @@ class DetectorConfig:
 
     model_path: str = "checkpoints/best.pth"
     enabled: bool = True
-    imgsz: int = 320
-    inference_hz: float = 10.0
+    imgsz: int = 640
+    inference_hz: float = 30.0
     # Inference device: 'auto' uses CUDA when available (PC GPU) else CPU. The
     # heavy detector runs on the operator PC, so a GPU there offloads the weak
     # vehicle board entirely. Set 'cpu'/'cuda' to force one.
     device: str = "auto"
+    # Fallback only: class names normally come from the model's own metadata
+    # (BestPthDetector.NAME_ALIASES). Matches the 2026-07-07 detect model:
+    # 0=light_red, 1=light_green, 2=sign_left, 3=sign_right.
     class_map: dict[str, int] = field(default_factory=lambda: {
-        "traffic_green": 0,
-        "traffic_red": 1,
+        "traffic_red": 0,
+        "traffic_green": 1,
         "sign_left": 2,
         "sign_right": 3,
-        "dynamic_marker": 4,
-        "finish_line": 5,
     })
     conf: dict[str, float] = field(default_factory=lambda: {
-        "traffic_green": 0.60,
-        "traffic_red": 0.60,
+        "traffic_green": 0.40,
+        "traffic_red": 0.40,
         "sign_left": 0.65,
         "sign_right": 0.65,
-        "dynamic_marker": 0.60,
-        "finish_line": 0.55,
     })
-    green_consecutive: int = 3
-    green_vote_k: int = 3
-    green_vote_n: int = 6
-    sign_vote_k: int = 3
-    sign_vote_n: int = 5
-    dynamic_detect_consecutive: int = 2
-    dynamic_clear_consecutive: int = 12
-    red_consecutive_after_finish: int = 3
+    # Scaled for 30 Hz inference (x3 vs the old 10 Hz), so each frame-count
+    # window keeps the same span in time. green_vote_n=18 => 0.6 s window.
+    green_vote_k: int = 9
+    green_vote_n: int = 18
+    sign_vote_k: int = 9
+    sign_vote_n: int = 15
+    dynamic_detect_consecutive: int = 6
+    dynamic_clear_consecutive: int = 36
+    # Red stop: 6 consecutive frames = 0.2 s (faster than the old 0.3 s while
+    # using twice the samples).
+    red_consecutive_after_finish: int = 6
 
 
 @dataclass
@@ -128,8 +139,6 @@ class ThrottleConfig:
     fork_commit_cap: float = 0.25
     post_fork_cap: float = 0.30
     post_fork_min: float = 0.25
-    rotary_approach_cap: float = 0.20
-    rotary_inside_cap: float = 0.18
     dynamic_approach_cap: float = 0.18
     resume_cap: float = 0.30
     finish_cap: float = 0.34
@@ -140,13 +149,23 @@ class ThrottleConfig:
 
 @dataclass
 class SteeringConfig:
-    """Stores normalized steering gains, sign, and per-state clamp values."""
+    """Stores pure-pursuit steering geometry, sign, and per-state clamp values.
+
+    Steering is computed with pure pursuit: the normalized lane center error is
+    mapped to a lateral offset of ``lateral_scale_m`` meters (at error 1.0) at a
+    target point ``lookahead_m`` ahead, then the bicycle-model steering angle
+    ``atan2(2 * wheelbase_m * sin(alpha), lookahead_m)`` is normalized into the
+    [-1, 1] command range by ``max_steer_deg``. ``curve_blend`` shifts the aim
+    point along the road's bend using the signed curvature cue.
+    """
 
     steer_sign: int = 1
-    kp: float = 1.20
-    ki: float = 0.0
-    kd: float = 0.24
-    kcurv: float = 0.30
+    lookahead_m: float = 0.60
+    wheelbase_m: float = 0.16
+    lateral_scale_m: float = 0.30
+    max_steer_deg: float = 30.0
+    pp_gain: float = 1.0
+    curve_blend: float = 1.0
     rate_limit_per_cmd: float = 0.10
     straight_limit: float = 0.45
     s_curve_limit: float = 0.80
@@ -154,23 +173,9 @@ class SteeringConfig:
     fork_limit: float = 0.85
     post_fork_limit: float = 0.65
     dynamic_limit: float = 0.45
-    rotary_limit: float = 0.85
     resume_limit: float = 0.60
     finish_limit: float = 0.55
     lost_decay: float = 0.70
-
-
-@dataclass
-class RotaryConfig:
-    """Stores shortcut-course rotary progress and exit timing parameters."""
-
-    direction: str = "CCW"
-    min_rotation_time_sec: float = 4.5
-    progress_threshold: float = 0.22
-    exit_stable_frames: int = 3
-    enter_ff: float = 0.35
-    circulate_ff: float = 0.45
-    exit_bias: float = -0.18
 
 
 @dataclass
@@ -221,15 +226,20 @@ class TrafficLightConfig:
     red_v_min: int = 100
     yellow_h_lo: int = 15
     yellow_h_hi: int = 32
-    yellow_s_min: int = 30
-    yellow_v_min: int = 30
+    yellow_s_min: int = 100
+    yellow_v_min: int = 100
     green_h_lo: int = 40
     green_h_hi: int = 90
-    green_s_min: int = 40
-    green_v_min: int = 40
+    green_s_min: int = 50
+    green_v_min: int = 50
     # Fraction of one vertical band (1/3 of the light ROI) that must match its
     # color to count that lamp lit. Slider-tunable live.
     min_on_ratio: float = 0.01
+    # Fraction of a DETECTOR traffic-light box that must match the claimed
+    # color for the detection to be accepted (model proposes, color confirms).
+    # Applies regardless of ``enabled`` above, which only controls the
+    # fixed-ROI analyzer.
+    verify_min_ratio: float = 0.05
     hough_min_dist: int = 20
     hough_param1: int = 50
     hough_param2: int = 10
@@ -263,7 +273,6 @@ class AutonomousConfig:
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     throttle: ThrottleConfig = field(default_factory=ThrottleConfig)
     steering: SteeringConfig = field(default_factory=SteeringConfig)
-    rotary: RotaryConfig = field(default_factory=RotaryConfig)
     aruco: ArucoConfig = field(default_factory=ArucoConfig)
     color_correction: ColorCorrectionConfig = field(default_factory=ColorCorrectionConfig)
     traffic_light: TrafficLightConfig = field(default_factory=TrafficLightConfig)

@@ -22,7 +22,6 @@ class Detection:
     bbox: tuple[float, float, float, float]
     cx: float
     cy: float
-    area: float
 
 
 class DetectionBuffer:
@@ -73,26 +72,19 @@ class DetectionBuffer:
         recent = list(self.frames)[-frames:]
         return all(not any(det.cls == cls for det in frame) for frame in recent)
 
-    def best(self, cls: str) -> Detection | None:
-        """Returns the highest-confidence latest detection for the requested class."""
-
-        if not self.frames:
-            return None
-        candidates = [det for det in self.frames[-1] if det.cls == cls]
-        if not candidates:
-            return None
-        return max(candidates, key=lambda item: item.conf)
-
 
 class BestPthDetector:
     """Runs the fine-tuned best.pt model when ultralytics is available."""
 
-    # The shipped best.pt is a 4-class image classifier whose label names differ
-    # from the mission class names the FSM expects. Translate them here so a
-    # classification checkpoint drops straight into the detection/vote pipeline.
-    CLASSIFY_NAME_ALIASES = {
+    # Checkpoint label names differ from the mission class names the FSM
+    # expects (and differ between retrained models). Mapping by NAME through
+    # this table — instead of by class index — means a retrained model with a
+    # different index order can never silently swap red and green.
+    NAME_ALIASES = {
         "green_light": "traffic_green",
         "red_light": "traffic_red",
+        "light_green": "traffic_green",
+        "light_red": "traffic_red",
         "left_turn": "sign_left",
         "right_turn": "sign_right",
     }
@@ -107,7 +99,6 @@ class BestPthDetector:
         self.task = "detect"
         self.device = "cpu"
         self.last_infer_time = 0.0
-        self.load_error: Exception | None = None
 
     def _resolve_device(self) -> str:
         """Picks the inference device, auto-detecting a CUDA GPU on the PC."""
@@ -159,7 +150,6 @@ class BestPthDetector:
                 )
             return True
         except Exception as exc:  # pragma: no cover - depends on target vehicle env.
-            self.load_error = exc
             self._log_warn(f"Failed to load detector model: {exc}")
             return False
 
@@ -212,7 +202,6 @@ class BestPthDetector:
                     bbox=(x1, y1, x2, y2),
                     cx=(x1 + x2) / 2.0,
                     cy=(y1 + y2) / 2.0,
-                    area=max(0.0, (x2 - x1) * (y2 - y1)),
                 )
                 if self.in_expected_roi(det, frame_bgr.shape[1], frame_bgr.shape[0]):
                     detections.append(det)
@@ -228,7 +217,7 @@ class BestPthDetector:
         conf = float(probs.top1conf)
         model_names = getattr(self.model, "names", {}) or {}
         raw_name = str(model_names.get(top1, top1))
-        cls_name = self.CLASSIFY_NAME_ALIASES.get(raw_name, raw_name)
+        cls_name = self.NAME_ALIASES.get(raw_name, raw_name)
         if conf < self.config.detector.conf.get(cls_name, 0.55):
             return []
         return [
@@ -238,13 +227,21 @@ class BestPthDetector:
                 bbox=(0.0, 0.0, float(width), float(height)),
                 cx=width / 2.0,
                 cy=height / 2.0,
-                area=float(width * height),
             )
         ]
 
     def _class_name_from_index(self, cls_index: int) -> str:
-        """Maps model class IDs to mission class names via CLASS_MAP."""
+        """Maps model class IDs to mission class names via model names + aliases.
 
+        The model's own ``names`` metadata is authoritative; the config
+        ``class_map`` is only a fallback for checkpoints that lack names.
+        """
+
+        model_names = getattr(self.model, "names", {}) or {}
+        raw_name = model_names.get(cls_index)
+        if raw_name is not None:
+            raw_name = str(raw_name)
+            return self.NAME_ALIASES.get(raw_name, raw_name)
         for name, index in self.config.detector.class_map.items():
             if int(index) == cls_index:
                 return name

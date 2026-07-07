@@ -74,15 +74,88 @@ def apply_color_correction(
     return out
 
 
-def preprocess_frame(bgr: np.ndarray | None, cfg: ColorCorrectionConfig) -> np.ndarray | None:
-    """Runs the full correction chain when enabled; returns the input otherwise."""
+def apply_correction_chain(bgr: np.ndarray | None, cfg: ColorCorrectionConfig) -> np.ndarray | None:
+    """Runs the CLAHE -> saturation -> brightness/contrast/gamma chain unconditionally.
 
-    if bgr is None or not getattr(cfg, "enabled", False):
+    Ignores ``cfg.enabled`` so the PC Detect View can always show the current
+    slider settings for live tuning, even when the detector itself is fed the
+    raw frame.
+    """
+
+    if bgr is None:
         return bgr
     out = apply_clahe(bgr, cfg.clahe_clip, cfg.clahe_tile)
     out = adjust_saturation(out, cfg.saturation_boost)
     out = apply_color_correction(out, cfg.brightness, cfg.contrast, cfg.saturation, cfg.gamma)
     return out
+
+
+def preprocess_frame(bgr: np.ndarray | None, cfg: ColorCorrectionConfig) -> np.ndarray | None:
+    """Runs the correction chain for the DETECTOR path when enabled; input otherwise."""
+
+    if bgr is None or not getattr(cfg, "enabled", False):
+        return bgr
+    return apply_correction_chain(bgr, cfg)
+
+
+def _hsv_ranges(tl) -> dict:
+    """Builds the four (lower, upper) HSV bounds from scalar config fields."""
+
+    return {
+        "red1": (np.array([0, tl.red_s_min, tl.red_v_min]),
+                 np.array([tl.red_h1_hi, 255, 255])),
+        "red2": (np.array([tl.red_h2_lo, tl.red_s_min, tl.red_v_min]),
+                 np.array([180, 255, 255])),
+        "yellow": (np.array([tl.yellow_h_lo, tl.yellow_s_min, tl.yellow_v_min]),
+                   np.array([tl.yellow_h_hi, 255, 255])),
+        "green": (np.array([tl.green_h_lo, tl.green_s_min, tl.green_v_min]),
+                  np.array([tl.green_h_hi, 255, 255])),
+    }
+
+
+def _color_mask(hsv: np.ndarray, color: str, rng: dict) -> np.ndarray:
+    """Builds the HSV mask for one color (red spans two hue bands)."""
+
+    if color == "red":
+        return cv2.bitwise_or(
+            cv2.inRange(hsv, rng["red1"][0], rng["red1"][1]),
+            cv2.inRange(hsv, rng["red2"][0], rng["red2"][1]),
+        )
+    return cv2.inRange(hsv, rng[color][0], rng[color][1])
+
+
+def verify_light_color(frame_bgr, bbox, mission_cls: str, config: AutonomousConfig) -> bool:
+    """Confirms a detector traffic-light box actually shows the claimed color.
+
+    Model proposes, color verifies: the box is cropped and the matching HSV
+    color mask must cover at least ``traffic_light.verify_min_ratio`` of the
+    crop, so a mislabeled box (e.g. a red lamp classified as green) is
+    rejected before it reaches the vote buffer. Uses the same HSV bounds as
+    the analyzer, so the Traffic Light GUI sliders tune this check too.
+    """
+
+    if frame_bgr is None:
+        return False
+    height, width = frame_bgr.shape[:2]
+    x1 = int(clamp_i(bbox[0], 0, width - 1))
+    y1 = int(clamp_i(bbox[1], 0, height - 1))
+    x2 = int(clamp_i(bbox[2], 0, width))
+    y2 = int(clamp_i(bbox[3], 0, height))
+    if x2 <= x1 or y2 <= y1:
+        return False
+    crop = frame_bgr[y1:y2, x1:x2]
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    rng = _hsv_ranges(config.traffic_light)
+    color = "red" if mission_cls == "traffic_red" else "green"
+    mask = _color_mask(hsv, color, rng)
+    ratio = float(cv2.countNonZero(mask)) / float(mask.size)
+    return ratio >= float(config.traffic_light.verify_min_ratio)
+
+
+def clamp_i(value, low, high):
+    """Clamps a numeric value into an inclusive integer-friendly range."""
+
+    return max(low, min(high, value))
 
 
 class TrafficLightAnalyzer:
@@ -110,17 +183,7 @@ class TrafficLightAnalyzer:
     def _ranges(self) -> dict:
         """Builds the four (lower, upper) HSV bounds from scalar config fields."""
 
-        tl = self.config.traffic_light
-        return {
-            "red1": (np.array([0, tl.red_s_min, tl.red_v_min]),
-                     np.array([tl.red_h1_hi, 255, 255])),
-            "red2": (np.array([tl.red_h2_lo, tl.red_s_min, tl.red_v_min]),
-                     np.array([180, 255, 255])),
-            "yellow": (np.array([tl.yellow_h_lo, tl.yellow_s_min, tl.yellow_v_min]),
-                       np.array([tl.yellow_h_hi, 255, 255])),
-            "green": (np.array([tl.green_h_lo, tl.green_s_min, tl.green_v_min]),
-                      np.array([tl.green_h_hi, 255, 255])),
-        }
+        return _hsv_ranges(self.config.traffic_light)
 
     def roi_rect(self, width: int, height: int) -> tuple[int, int, int, int]:
         """Returns the pixel (x0, y0, x1, y1) of the traffic-light detection ROI."""
@@ -131,12 +194,7 @@ class TrafficLightAnalyzer:
     def _color_mask(self, hsv: np.ndarray, color: str, rng: dict) -> np.ndarray:
         """Builds the HSV mask for one color (red spans two hue bands)."""
 
-        if color == "red":
-            return cv2.bitwise_or(
-                cv2.inRange(hsv, rng["red1"][0], rng["red1"][1]),
-                cv2.inRange(hsv, rng["red2"][0], rng["red2"][1]),
-            )
-        return cv2.inRange(hsv, rng[color][0], rng[color][1])
+        return _color_mask(hsv, color, rng)
 
     def analyze(self, roi_bgr: np.ndarray) -> dict:
         """Returns {red, yellow, green} booleans for one 3x1 vertical light crop.
@@ -199,10 +257,9 @@ class TrafficLightAnalyzer:
         cx = (x0 + x1) / 2.0
         cy = (y0 + y1) / 2.0
         bbox = (float(x0), float(y0), float(x1), float(y1))
-        area = max(0.0, (x1 - x0) * (y1 - y0))
         for color, cls in (("green", "traffic_green"), ("red", "traffic_red")):
             if states.get(color):
                 detections.append(
-                    Detection(cls=cls, conf=1.0, bbox=bbox, cx=cx, cy=cy, area=area)
+                    Detection(cls=cls, conf=1.0, bbox=bbox, cx=cx, cy=cy)
                 )
         return detections

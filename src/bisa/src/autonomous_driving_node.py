@@ -71,6 +71,7 @@ class BisaAutonomousNode(Node):
         self.declare_parameter("debug_log", True)
         self.declare_parameter("publish_debug_image", True)
         self.declare_parameter("debug_image_topic", "/bisa/debug/image/compressed")
+        self.declare_parameter("lane_mask_topic", "/bisa/debug/lane_mask/compressed")
 
         config_file = str(self.get_parameter("config_file").value)
         route_mode = str(self.get_parameter("route_mode").value).strip()
@@ -80,6 +81,7 @@ class BisaAutonomousNode(Node):
         self.debug_log = as_bool(self.get_parameter("debug_log").value)
         self.publish_debug_image = as_bool(self.get_parameter("publish_debug_image").value)
         self.debug_image_topic = str(self.get_parameter("debug_image_topic").value)
+        self.lane_mask_topic = str(self.get_parameter("lane_mask_topic").value)
 
         self.config = load_config(config_file)
         if route_mode:
@@ -89,14 +91,21 @@ class BisaAutonomousNode(Node):
         resolved_model = resolve_package_relative_path(__file__, self.config.detector.model_path)
 
         self.lane_perception = LanePerception(self.config)
-        self.det_buffer = DetectionBuffer(maxlen=40)
+        # 30 Hz inference with up to 36-frame consecutive windows needs >36
+        # frames of history; 90 frames = 3 s of headroom.
+        self.det_buffer = DetectionBuffer(maxlen=90)
         self.detector = BestPthDetector(self.config, resolved_model, logger=self.get_logger())
         self.light_analyzer = traffic_light.TrafficLightAnalyzer(self.config)
         self.aruco_detector = ArucoDetector(self.config)
         self.controller = LaneController(self.config)
         self.fsm = make_course_fsm(self.config, self.controller)
-        self.latest_lane = LaneObs(valid=False, lost_reason="no_frame")
+        self.latest_lane = LaneObs(valid=False)
         self.latest_detections = []
+        # Pre-gate snapshot for the Detect View only: shows every model
+        # detection (incl. traffic lights the FSM is currently ignoring) so
+        # the model's raw behavior stays visible while tuning. Never feeds
+        # the vote buffer or the status topics.
+        self.latest_detections_viz = []
         self.latest_markers = []
         self.last_cmd = ControlCmd(0.0, 0.0)
         self.last_frame = None
@@ -135,6 +144,11 @@ class BisaAutonomousNode(Node):
         # caused WiFi head-of-line blocking against the viz/monitor subscribers.
         self.debug_image_pub = self.create_publisher(
             CompressedImage, self.debug_image_topic, image_qos
+        )
+        # Second debug stream: the ROI-sized binarized lane mask with lane
+        # overlays, for threshold/ROI tuning in its own window on the PC.
+        self.lane_mask_pub = self.create_publisher(
+            CompressedImage, self.lane_mask_topic, image_qos
         )
 
         # Expose tunable config as flat dotted ROS parameters and apply live edits.
@@ -248,33 +262,56 @@ class BisaAutonomousNode(Node):
         ids = sorted({m.id for m in self.latest_markers})
         self.detect_aruco_pub.publish(String(data=f"ids={ids}" if ids else "none"))
 
-    def publish_debug_overlay(self) -> None:
-        """Draws the overlay on the latest frame and publishes it as JPEG."""
+    def _publish_jpeg(self, publisher, image) -> None:
+        """Encodes one BGR image as JPEG and publishes it on the given topic."""
 
-        if self.last_frame is None:
-            return
-        light_roi = (
-            self.config.roi.detector_light if self.config.traffic_light.enabled else None
-        )
-        overlay = visualization.draw_overlay(
-            self.last_frame,
-            self.lane_perception.last_viz,
-            self.latest_detections,
-            self.latest_markers,
-            self.last_cmd,
-            self.fsm.state,
-            target_id=self.config.aruco.target_id,
-            light_roi=light_roi,
-            light_states=self.light_analyzer.last_states,
-        )
-        ok, encoded = cv2.imencode(".jpg", overlay)
+        ok, encoded = cv2.imencode(".jpg", image)
         if not ok:
             return
         msg = CompressedImage()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.format = "jpeg"
         msg.data = encoded.tobytes()
-        self.debug_image_pub.publish(msg)
+        publisher.publish(msg)
+
+    def publish_debug_overlay(self) -> None:
+        """Publishes the full-frame detect view and the ROI lane-mask view.
+
+        The detect view is drawn on the color-corrected frame (the same
+        preprocessing the detector sees), so the CLAHE/saturation/brightness
+        sliders change the picture live. The lane-mask view shows the binarized
+        ROI the lane pipeline works on, for threshold and ROI-size tuning.
+        """
+
+        if self.last_frame is None:
+            return
+        light_roi = (
+            self.config.roi.detector_light if self.config.traffic_light.enabled else None
+        )
+        # Detect View always shows the corrected frame so the CLAHE/saturation/
+        # brightness sliders are visible live, regardless of whether the
+        # detector is actually consuming the correction (cfg.enabled).
+        frame = traffic_light.apply_correction_chain(self.last_frame, self.config.color_correction)
+        overlay = visualization.draw_overlay(
+            frame,
+            self.lane_perception.last_viz,
+            self.latest_detections_viz,
+            self.latest_markers,
+            self.last_cmd,
+            self.fsm.state,
+            target_id=self.config.aruco.target_id,
+            light_roi=light_roi,
+            light_states=self.light_analyzer.last_states,
+            accepted_ids={id(d) for d in self.latest_detections},
+            cc_active=bool(self.config.color_correction.enabled),
+        )
+        self._publish_jpeg(self.debug_image_pub, overlay)
+
+        mask_view = visualization.draw_lane_mask_view(
+            self.lane_perception.last_viz, self.last_cmd
+        )
+        if mask_view is not None:
+            self._publish_jpeg(self.lane_mask_pub, mask_view)
 
     def decode_image(self, msg: CompressedImage) -> np.ndarray | None:
         """Decodes a ROS CompressedImage into a BGR OpenCV frame."""
@@ -303,6 +340,33 @@ class BisaAutonomousNode(Node):
         now_sec = self.get_clock().now().nanoseconds / 1e9
         self.latest_markers = self.aruco_detector.detect(frame, now_sec)
 
+    def _gate_traffic_detections(self, detections, frame) -> list:
+        """Keeps traffic-light detections only in their mission phase, color-verified.
+
+        Green only matters while waiting to launch; red only after the finish
+        window opened — outside those windows the classes are dropped outright,
+        so mid-course false positives can never reach the vote buffer or the
+        detect_green/detect_red status topics. Surviving boxes must also pass
+        the HSV color check (model proposes, color confirms). Sign and other
+        classes pass through untouched. Reads FSM state from the inference
+        thread; a one-frame-stale value is harmless here.
+        """
+
+        listen_green = self.fsm.state.endswith("WAIT_GREEN")
+        listen_red = bool(self.fsm.finish_crossed)
+        kept = []
+        for det in detections:
+            if det.cls == "traffic_green" and not listen_green:
+                continue
+            if det.cls == "traffic_red" and not listen_red:
+                continue
+            if det.cls in ("traffic_green", "traffic_red") and not traffic_light.verify_light_color(
+                frame, det.bbox, det.cls, self.config
+            ):
+                continue
+            kept.append(det)
+        return kept
+
     def _inference_worker(self) -> None:
         """Runs YOLO off the executor thread so camera/control stay responsive."""
 
@@ -323,6 +387,8 @@ class BisaAutonomousNode(Node):
                 # Inference actually ran; refresh buffer and status snapshot.
                 # Fold in HSV traffic-light detections so they share the vote path.
                 detections = detections + self.light_analyzer.detect(proc)
+                self.latest_detections_viz = detections
+                detections = self._gate_traffic_detections(detections, proc)
                 self.det_buffer.push(detections)
                 self.latest_detections = detections
 
@@ -376,11 +442,11 @@ class BisaAutonomousNode(Node):
             return
         self.last_log_time = now_sec
         lane = self.latest_lane
-        self.get_logger().info(
-            f"state={self.fsm.state} throttle={cmd.throttle:.2f} steering={cmd.steering:.2f} "
-            f"lane_valid={lane.valid} err={lane.center_error:.2f} curv={lane.curvature:.2f} "
-            f"fork={lane.fork_seen} rotary={lane.rotary_seen}/{lane.rotary_exit_seen}"
-        )
+        # self.get_logger().info(
+        #     f"state={self.fsm.state} throttle={cmd.throttle:.2f} steering={cmd.steering:.2f} "
+        #     f"lane_valid={lane.valid} err={lane.center_error:.2f} curv={lane.curvature:.2f} "
+        #     f"fork={lane.fork_seen}"
+        # )
 
 
 def main(args=None) -> None:

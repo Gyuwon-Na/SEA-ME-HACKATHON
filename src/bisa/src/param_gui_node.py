@@ -21,11 +21,10 @@ except ModuleNotFoundError:
     yaml = None
 
 # Curated tuning subset, grouped per algorithm (one Notebook tab per key).
-# kind: 'f' float, 'i' int, 'b' bool (0/1), 'hsv_v' V of black_hsv_upper.
+# kind: 'f' float, 'i' int, 'b' bool (0/1).
 # (label, dotted_name, kind, lo, hi)
 SPEC = {
     "Lane": [
-        ("black V max", "lane.black_hsv_upper", "hsv_v", 0, 255),
         ("canny low", "lane.hough_canny_low", "i", 0, 255),
         ("canny high", "lane.hough_canny_high", "i", 0, 255),
         ("hough thresh", "lane.hough_threshold", "i", 1, 200),
@@ -34,17 +33,30 @@ SPEC = {
         ("slope min abs", "lane.hough_slope_min_abs", "f", 0.0, 2.0),
         ("min comp area", "lane.min_component_area_ratio", "f", 0.0, 0.1),
         ("fork area", "lane.fork_area_ratio", "f", 0.0, 0.2),
-        ("rotary area", "lane.rotary_area_ratio", "f", 0.0, 0.3),
     ],
-    "Steering (PID)": [
-        ("PID Kp", "steering.kp", "f", 0.0, 4.0),
-        ("PID Ki", "steering.ki", "f", 0.0, 1.0),
-        ("PID Kd", "steering.kd", "f", 0.0, 2.0),
-        ("kcurv", "steering.kcurv", "f", 0.0, 2.0),
+    "Steering (PP)": [
+        ("lookahead (m)", "steering.lookahead_m", "f", 0.1, 2.0),
+        ("wheelbase (m)", "steering.wheelbase_m", "f", 0.05, 0.5),
+        ("lateral scale (m)", "steering.lateral_scale_m", "f", 0.05, 1.0),
+        ("max steer (deg)", "steering.max_steer_deg", "f", 5.0, 60.0),
+        ("pp gain", "steering.pp_gain", "f", 0.0, 3.0),
+        ("curve blend", "steering.curve_blend", "f", 0.0, 3.0),
         ("straight limit", "steering.straight_limit", "f", 0.0, 1.0),
         ("s-curve limit", "steering.s_curve_limit", "f", 0.0, 1.0),
         ("rate limit", "steering.rate_limit_per_cmd", "f", 0.0, 0.5),
         ("steer sign", "steering.steer_sign", "i", -1, 1),
+    ],
+    "LAB Mask": [
+        ("L min", "lane.lab_l_min", "i", 0, 255),
+        ("L max", "lane.lab_l_max", "i", 0, 255),
+        ("A min", "lane.lab_a_min", "i", 0, 255),
+        ("A max", "lane.lab_a_max", "i", 0, 255),
+        ("B min", "lane.lab_b_min", "i", 0, 255),
+        ("B max", "lane.lab_b_max", "i", 0, 255),
+        ("clahe clip", "lane.lab_clahe_clip", "f", 0.0, 8.0),
+        ("clahe tile", "lane.lab_clahe_tile", "i", 1, 16),
+        ("morph open", "lane.morph_open_kernel", "i", 1, 15),
+        ("morph close", "lane.morph_close_kernel", "i", 1, 15),
     ],
     "Throttle": [
         ("min speed", "throttle.speed_min", "f", 0.0, 1.0),
@@ -74,11 +86,13 @@ SPEC = {
         ("yellow H lo", "traffic_light.yellow_h_lo", "i", 0, 180),
         ("yellow H hi", "traffic_light.yellow_h_hi", "i", 0, 180),
         ("min on ratio", "traffic_light.min_on_ratio", "f", 0.0, 0.5),
+        ("verify ratio", "traffic_light.verify_min_ratio", "f", 0.0, 0.5),
         ("hough param2", "traffic_light.hough_param2", "i", 1, 100),
         ("hough minR", "traffic_light.hough_min_radius", "i", 0, 50),
         ("hough maxR", "traffic_light.hough_max_radius", "i", 0, 100),
     ],
     "Detector conf": [
+        ("imgsz (early detect)", "detector.imgsz", "i", 160, 960),
         ("green", "detector.conf.traffic_green", "f", 0.0, 1.0),
         ("red", "detector.conf.traffic_red", "f", 0.0, 1.0),
         ("sign left", "detector.conf.sign_left", "f", 0.0, 1.0),
@@ -159,16 +173,13 @@ class ParamGuiNode(Node):
         self.client.call_async(request)
 
 
-def build_param(name: str, kind: str, value, hsv_base) -> Parameter:
+def build_param(name: str, kind: str, value) -> Parameter:
     """Builds an rclpy Parameter for one control's current value."""
 
     if kind == "b":
         return Parameter(name, Parameter.Type.BOOL, bool(round(value)))
     if kind == "i":
         return Parameter(name, Parameter.Type.INTEGER, int(round(value)))
-    if kind == "hsv_v":
-        h, s = int(hsv_base[0]), int(hsv_base[1])
-        return Parameter(name, Parameter.Type.INTEGER_ARRAY, [h, s, int(round(value))])
     return Parameter(name, Parameter.Type.DOUBLE, float(value))
 
 
@@ -185,7 +196,6 @@ def main(args=None) -> None:
     rclpy.init(args=args)
     node = ParamGuiNode()
     data = node.load_yaml()
-    hsv_base = get_nested(data, "lane.black_hsv_upper", [180, 90, 90])
 
     root = tk.Tk()
     root.title(f"D-Racer params -> {node.target_node}")
@@ -193,7 +203,7 @@ def main(args=None) -> None:
     def make_sender(name, kind):
         def _send(_event=None, n=name, k=kind):
             value = scales[n].get()
-            node.send([build_param(n, k, value, hsv_base)])
+            node.send([build_param(n, k, value)])
         return _send
 
     # One Notebook tab per algorithm group so the active values are easy to scan.
@@ -208,10 +218,7 @@ def main(args=None) -> None:
         notebook.add(tab, text=section)
         for row, (label, name, kind, lo, hi) in enumerate(items):
             ttk.Label(tab, text=label).grid(row=row, column=0, sticky="w", padx=4)
-            if kind == "hsv_v":
-                init = float(hsv_base[2]) if len(hsv_base) > 2 else 90.0
-                resolution = 1.0
-            elif kind == "b":
+            if kind == "b":
                 init = 1.0 if bool(get_nested(data, name, False)) else 0.0
                 resolution = 1.0
             elif kind == "i":

@@ -36,6 +36,7 @@ def generate_launch_description():
     image_topic = LaunchConfiguration("image_topic")
     control_topic = LaunchConfiguration("control_topic")
     debug_image_topic = LaunchConfiguration("debug_image_topic")
+    lane_mask_topic = LaunchConfiguration("lane_mask_topic")
     enable_gui = LaunchConfiguration("enable_gui")
     enable_viz = LaunchConfiguration("enable_viz")
 
@@ -44,12 +45,13 @@ def generate_launch_description():
     # I2C bus, so control_node/joystick_node cannot run here. Plug the wireless
     # pad's USB dongle into the car; the wireless pad stays in the operator's hand.
     return LaunchDescription([
-        DeclareLaunchArgument("route_mode", default_value="IN"),
+        DeclareLaunchArgument("route_mode", default_value="LANE"),
         DeclareLaunchArgument("config_file", default_value=default_config_path()),
         DeclareLaunchArgument("model_path", default_value=default_model_path()),
         DeclareLaunchArgument("image_topic", default_value="/camera/image/compressed"),
         DeclareLaunchArgument("control_topic", default_value="/control"),
         DeclareLaunchArgument("debug_image_topic", default_value="/bisa/debug/image/compressed"),
+        DeclareLaunchArgument("lane_mask_topic", default_value="/bisa/debug/lane_mask/compressed"),
         DeclareLaunchArgument("enable_gui", default_value="true"),
         DeclareLaunchArgument("enable_viz", default_value="true"),
         Node(
@@ -64,6 +66,7 @@ def generate_launch_description():
                 "image_topic": image_topic,
                 "control_topic": control_topic,
                 "debug_image_topic": debug_image_topic,
+                "lane_mask_topic": lane_mask_topic,
                 "publish_debug_image": True,
                 "debug_log": True,
             }],
@@ -74,7 +77,10 @@ def generate_launch_description():
             name="bisa_viz_node",
             output="screen",
             condition=IfCondition(enable_viz),
-            parameters=[{"debug_image_topic": debug_image_topic}],
+            parameters=[{
+                "debug_image_topic": debug_image_topic,
+                "lane_mask_topic": lane_mask_topic,
+            }],
         ),
         Node(
             package="bisa",

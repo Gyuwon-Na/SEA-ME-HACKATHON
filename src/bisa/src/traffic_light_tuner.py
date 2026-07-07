@@ -6,15 +6,15 @@ runs the exact pipeline path — `preprocess_frame` -> `BestPthDetector` ->
 in here maps 1:1 onto ``dracer_params.yaml``.
 
 One window:
-  * "Detect" - the frame the detector sees (color-corrected when cc_enabled),
-               with each YOLO light box drawn as a bbox colored by the
-               classifier's verdict and a GREEN / RED (or "none") label.
+  * "Detect" - the color-corrected frame the detector sees, with each YOLO light
+               box drawn as a bbox colored by the classifier's verdict and a
+               GREEN / RED (or "none") label.
 
 Controls window "TL Controls": the color-correction chain (CLAHE / saturation /
 brightness / ... — boosting these makes the lit lamp pop and detect better, and
-the Detect window shows the corrected frame so the effect is live), the green/
-red HSV bounds the classifier uses, its row_min_ratio, and the YOLO conf/imgsz.
-Keys: 's' prints a copy-paste YAML block of the current values, 'q' quits.
+the Detect window always shows the corrected frame so the effect is live), the
+green/red HSV bounds the classifier uses, its row_min_ratio, and the YOLO
+conf/imgsz. Keys: 's' prints a copy-paste YAML block, 'q' quits.
 
 Run:  ros2 run bisa traffic_light_tuner
       ros2 run bisa traffic_light_tuner --ros-args -p video_path:=/path/to/clip.mp4
@@ -41,12 +41,11 @@ WIN_DETECT = "Detect"
 # (trackbar label, config path, kind, lo, hi)
 #   kind 'x10'/'x100' store value*10 or *100; 'boff' stores value+50 (bipolar);
 #   'imgsz32' stores imgsz/32; 'raw' stores the integer directly.
-# Color correction runs before the detector (enabled by default) so boosting
-# saturation / CLAHE here makes the lit lamp pop and detect better — the Detect
-# window shows the corrected frame, so the effect is visible live. Below that,
-# the green/red HSV bounds the classifier uses, its ratio, and YOLO conf/imgsz.
+# Color correction runs before the detector so boosting saturation / CLAHE here
+# makes the lit lamp pop and detect better — the Detect window ALWAYS shows the
+# corrected frame, so the effect is visible live. Below that, the green/red HSV
+# bounds the classifier uses, its ratio, and YOLO conf/imgsz.
 SLIDERS = [
-    ("cc_enabled(->detector)", "color_correction.enabled", "raw", 0, 1),
     ("clahe_clip x10", "color_correction.clahe_clip", "x10", 0, 80),
     ("clahe_tile", "color_correction.clahe_tile", "raw", 1, 16),
     ("sat_boost x10", "color_correction.saturation_boost", "x10", 0, 30),
@@ -224,9 +223,6 @@ class TlTunerNode(Node):
             self.config.detector.conf["traffic_green"] = float(value)
             self.config.detector.conf["traffic_red"] = float(value)
             return
-        if path == "color_correction.enabled":
-            self.config.color_correction.enabled = bool(value)
-            return
         parts = path.split(".")
         obj = self.config
         for part in parts[:-1]:
@@ -270,9 +266,9 @@ class TlTunerNode(Node):
         """
 
         self._read_sliders()
-        # The detector sees exactly what the pipeline feeds it: the corrected
-        # frame when color_correction.enabled, the raw frame otherwise.
-        detect_input = traffic_light.preprocess_frame(frame, self.config.color_correction)
+        # Always show the corrected frame so the color-correction sliders have a
+        # visible effect; the pipeline applies the same chain (enabled by default).
+        detect_input = traffic_light.apply_correction_chain(frame, self.config.color_correction)
 
         detect_view = detect_input.copy()
         n_on = 0
@@ -287,9 +283,8 @@ class TlTunerNode(Node):
             cv2.putText(detect_view, self._verdict_text(verdict),
                         (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
 
-        cc = "on" if self.config.color_correction.enabled else "off"
         self._hud(detect_view, [
-            f"classifier={self.config.traffic_light.classifier}  cc={cc}  lights={n_on}",
+            f"classifier={self.config.traffic_light.classifier}  lights={n_on}",
             "s=dump params  q=quit",
         ])
 

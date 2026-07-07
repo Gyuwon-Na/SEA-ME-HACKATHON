@@ -106,6 +106,10 @@ class BisaAutonomousNode(Node):
         # the model's raw behavior stays visible while tuning. Never feeds
         # the vote buffer or the status topics.
         self.latest_detections_viz = []
+        # Raw classify_light verdict ("green"/"red"/None) on the latest frame's
+        # light boxes, ignoring mission phase — drives the /detect_green and
+        # /detect_red monitor topics exactly as the tuner reports it.
+        self.light_verdict = None
         self.latest_markers = []
         self.last_cmd = ControlCmd(0.0, 0.0)
         self.last_frame = None
@@ -253,9 +257,13 @@ class BisaAutonomousNode(Node):
     def publish_detection_status(self) -> None:
         """Publishes compact detection flags for PC-side echo monitoring."""
 
+        # Traffic light: the raw classify_light verdict, mutually exclusive —
+        # GREEN -> green=True/red=False, RED -> green=False/red=True, else both
+        # False. Independent of the mission-phase gating used for driving.
+        verdict = self.light_verdict
+        self.detect_green_pub.publish(Bool(data=(verdict == "green")))
+        self.detect_red_pub.publish(Bool(data=(verdict == "red")))
         classes = {det.cls for det in self.latest_detections}
-        self.detect_green_pub.publish(Bool(data="traffic_green" in classes))
-        self.detect_red_pub.publish(Bool(data="traffic_red" in classes))
         left = int("sign_left" in classes)
         right = int("sign_right" in classes)
         self.detect_sign_pub.publish(String(data=f"left={left} right={right}"))
@@ -289,6 +297,13 @@ class BisaAutonomousNode(Node):
         # brightness sliders are visible live, regardless of whether the
         # detector is actually consuming the correction (cfg.enabled).
         frame = traffic_light.apply_correction_chain(self.last_frame, self.config.color_correction)
+        # Per-box classify_light verdict so the overlay colors traffic-light
+        # boxes exactly like the tuner (by verdict, not the raw YOLO class).
+        light_verdicts = {
+            id(det): traffic_light.classify_light(frame, det.bbox, self.config)[0]
+            for det in self.latest_detections_viz
+            if det.cls in ("traffic_green", "traffic_red")
+        }
         overlay = visualization.draw_overlay(
             frame,
             self.lane_perception.last_viz,
@@ -298,9 +313,19 @@ class BisaAutonomousNode(Node):
             self.fsm.state,
             target_id=self.config.aruco.target_id,
             light_roi=self.config.roi.detector_light,
+            light_verdicts=light_verdicts,
             accepted_ids={id(d) for d in self.latest_detections},
             cc_active=bool(self.config.color_correction.enabled),
         )
+        # The live traffic-light verdict driving /detect_green|/detect_red, so
+        # the operator can see exactly what the mission is reacting to.
+        verdict = self.light_verdict
+        vtxt = {"green": "GREEN", "red": "RED"}.get(verdict, "none")
+        vcolor = {"green": (0, 255, 0), "red": (0, 0, 255)}.get(verdict, (170, 170, 170))
+        cv2.putText(overlay, f"light: {vtxt}", (8, overlay.shape[0] - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(overlay, f"light: {vtxt}", (8, overlay.shape[0] - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, vcolor, 2, cv2.LINE_AA)
         self._publish_jpeg(self.debug_image_pub, overlay)
 
         mask_view = visualization.draw_lane_mask_view(
@@ -345,10 +370,11 @@ class BisaAutonomousNode(Node):
         overriding the YOLO label. Boxes with no clearly lit row are dropped.
         Green only matters while waiting to launch; red only after the finish
         window opened — outside those windows the classes are dropped outright,
-        so mid-course false positives can never reach the vote buffer or the
-        detect_green/detect_red status topics. Sign and other classes pass
-        through untouched. Reads FSM state from the inference thread; a
-        one-frame-stale value is harmless here.
+        so mid-course false positives can never reach the vote buffer that
+        drives the FSM. (The /detect_green and /detect_red monitor topics are
+        published separately from the raw verdict — see :meth:`_light_verdict`.)
+        Sign and other classes pass through untouched. Reads FSM state from the
+        inference thread; a one-frame-stale value is harmless here.
         """
 
         listen_green = self.fsm.state.endswith("WAIT_GREEN")
@@ -369,6 +395,30 @@ class BisaAutonomousNode(Node):
             kept.append(det)
         return kept
 
+    def _light_verdict(self, detections, frame):
+        """Raw classify_light verdict on the light boxes, ignoring mission phase.
+
+        This is exactly what the tuner reports: each YOLO light box is run
+        through ``classify_light`` and the result drives the /detect_green and
+        /detect_red monitor topics — green -> "green", red -> "red", nothing ->
+        None. Red wins if both somehow appear (fail-safe toward "stop"). Unlike
+        :meth:`_gate_traffic_detections`, no mission-phase or vote filtering is
+        applied, so the topics mirror the live verdict.
+        """
+
+        seen_green = seen_red = False
+        for det in detections:
+            if det.cls not in ("traffic_green", "traffic_red"):
+                continue
+            verdict, _scores = traffic_light.classify_light(frame, det.bbox, self.config)
+            seen_green = seen_green or verdict == "traffic_green"
+            seen_red = seen_red or verdict == "traffic_red"
+        if seen_red:
+            return "red"
+        if seen_green:
+            return "green"
+        return None
+
     def _inference_worker(self) -> None:
         """Runs YOLO off the executor thread so camera/control stay responsive."""
 
@@ -388,6 +438,8 @@ class BisaAutonomousNode(Node):
             if self.detector.last_infer_time != previous_infer_time:
                 # Inference actually ran; refresh buffer and status snapshot.
                 self.latest_detections_viz = detections
+                # Raw verdict for the monitor topics, taken before phase gating.
+                self.light_verdict = self._light_verdict(detections, proc)
                 detections = self._gate_traffic_detections(detections, proc)
                 self.det_buffer.push(detections)
                 self.latest_detections = detections
@@ -419,7 +471,8 @@ class BisaAutonomousNode(Node):
             self.controller.prev_throttle = 0.0
             cmd = ControlCmd(0.0, self.last_cmd.steering)
         else:
-            cmd = self.fsm.step(self.latest_lane, self.det_buffer, now_sec)
+            cmd = self.fsm.step(self.latest_lane, self.det_buffer, now_sec,
+                                 light_verdict=self.light_verdict)
         self.last_cmd = cmd
         self.publish_control(cmd)
         # Status flags and the debug overlay are published here at control_hz,
@@ -442,11 +495,20 @@ class BisaAutonomousNode(Node):
             return
         self.last_log_time = now_sec
         lane = self.latest_lane
-        # self.get_logger().info(
-        #     f"state={self.fsm.state} throttle={cmd.throttle:.2f} steering={cmd.steering:.2f} "
-        #     f"lane_valid={lane.valid} err={lane.center_error:.2f} curv={lane.curvature:.2f} "
-        #     f"fork={lane.fork_seen}"
-        # )
+        # Raw (ROI-gated) traffic-light boxes the detector currently sees, so it
+        # is obvious whether a missing verdict is "no detection" vs "wrong color".
+        n_light = sum(
+            1 for d in self.latest_detections_viz
+            if d.cls in ("traffic_green", "traffic_red")
+        )
+        green_streak = getattr(self.fsm, "_green_streak", 0)
+        red_streak = getattr(self.fsm, "_red_streak", 0)
+        self.get_logger().info(
+            f"state={self.fsm.state} verdict={self.light_verdict} "
+            f"lights={n_light} g_streak={green_streak} r_streak={red_streak} "
+            f"throttle={cmd.throttle:.2f} steering={cmd.steering:.2f} "
+            f"lane_valid={lane.valid} err={lane.center_error:.2f}"
+        )
 
 
 def main(args=None) -> None:

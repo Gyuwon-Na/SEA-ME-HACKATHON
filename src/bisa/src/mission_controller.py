@@ -123,6 +123,31 @@ class BaseCourseFSM:
         self.enter_t = 0.0
         self.start_t = 0.0
         self.finish_crossed = False
+        # Consecutive control ticks the traffic-light verdict has held green/red.
+        self._green_streak = 0
+        self._red_streak = 0
+
+    def update_light(self, light_verdict) -> None:
+        """Accumulates how long the classify_light verdict has held green/red.
+
+        Called once per FSM tick with the latest verdict ("green"/"red"/None).
+        :meth:`green_confirmed` / :meth:`red_confirmed` then gate on
+        ``detector.light_confirm_frames`` consecutive ticks, so a single glitch
+        frame never launches or stops the car.
+        """
+
+        self._green_streak = self._green_streak + 1 if light_verdict == "green" else 0
+        self._red_streak = self._red_streak + 1 if light_verdict == "red" else 0
+
+    def green_confirmed(self) -> bool:
+        """True once green has held for ``light_confirm_frames`` ticks."""
+
+        return self._green_streak >= self.config.detector.light_confirm_frames
+
+    def red_confirmed(self) -> bool:
+        """True once red has held for ``light_confirm_frames`` ticks."""
+
+        return self._red_streak >= self.config.detector.light_confirm_frames
 
     def transition(self, next_state: str, now: float) -> None:
         """Moves to a new state and stores entry time."""
@@ -208,35 +233,31 @@ class OutCourseFSM(BaseCourseFSM):
         )
         return ControlCmd(throttle, steer)
 
-    def step(self, lane: LaneObs, detector: DetectionBuffer, now: float) -> ControlCmd:
+    def step(self, lane: LaneObs, detector: DetectionBuffer, now: float,
+             light_verdict=None) -> ControlCmd:
         """Runs one OUT-course FSM tick and returns the desired control command."""
 
         if self.start_t <= 0.0:
             self.start_t = now
             self.enter_t = now
+        self.update_light(light_verdict)
 
         # Arrival red-stop, independent of the intermediate state chain: once
-        # the finish window is open (finish line seen or enough time since
-        # launch), a stable red light stops the car from ANY driving state.
-        # The current detect model has no dynamic_marker/finish_line classes,
-        # so states like OUT_POST_FORK can never advance on detections alone;
-        # this gate keeps the red stop from depending on that progression.
+        # the finish window is open (enough time since launch, so the start
+        # light is out of view), a confirmed red verdict stops the car from ANY
+        # driving state. The detect model has no dynamic_marker/finish_line
+        # classes, so states like OUT_POST_FORK can never advance on detections
+        # alone; this gate keeps the red stop from depending on that progression.
         if (
             self.state not in ("OUT_WAIT_GREEN", "OUT_FINISH_STOP")
             and self.finish_line_crossed(detector, now)
-            and detector.stable_consecutive(
-                "traffic_red", self.config.detector.red_consecutive_after_finish
-            )
+            and self.red_confirmed()
         ):
             self.transition("OUT_FINISH_STOP", now)
 
         if self.state == "OUT_WAIT_GREEN":
             cmd = ControlCmd(0.0, 0.0)
-            if detector.stable_seen(
-                "traffic_green",
-                self.config.detector.green_vote_k,
-                self.config.detector.green_vote_n,
-            ):
+            if self.green_confirmed():
                 # Mission clock starts at launch, not at node startup, so the
                 # finish/dynamic-zone timers are unaffected by how long the
                 # car waited at the start light.
@@ -334,8 +355,9 @@ class LaneTestFSM(BaseCourseFSM):
         super().__init__(config, controller)
         self.state = "LANE_TEST"
 
-    def step(self, lane: LaneObs, detector: DetectionBuffer, now: float) -> ControlCmd:
-        """Follows the lane every tick, capped by the speed band."""
+    def step(self, lane: LaneObs, detector: DetectionBuffer, now: float,
+             light_verdict=None) -> ControlCmd:
+        """Follows the lane every tick, capped by the speed band (ignores lights)."""
 
         if self.start_t <= 0.0:
             self.start_t = now

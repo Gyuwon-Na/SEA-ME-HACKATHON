@@ -107,17 +107,15 @@ class DetectorConfig:
         "sign_left": 0.65,
         "sign_right": 0.65,
     })
-    # Scaled for 30 Hz inference (x3 vs the old 10 Hz), so each frame-count
-    # window keeps the same span in time. green_vote_n=18 => 0.6 s window.
-    green_vote_k: int = 9
-    green_vote_n: int = 18
     sign_vote_k: int = 9
     sign_vote_n: int = 15
     dynamic_detect_consecutive: int = 6
     dynamic_clear_consecutive: int = 36
-    # Red stop: 6 consecutive frames = 0.2 s (faster than the old 0.3 s while
-    # using twice the samples).
-    red_consecutive_after_finish: int = 6
+    # Traffic light: the mission launches on green and stops on red directly from
+    # the classify_light verdict (the value the tuner shows). To reject a single
+    # glitch frame, the same verdict must hold for this many consecutive control
+    # ticks before it acts (control_hz=10 => 3 ticks = 0.3 s).
+    light_confirm_frames: int = 3
 
 
 @dataclass

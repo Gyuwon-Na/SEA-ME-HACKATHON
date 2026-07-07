@@ -96,8 +96,8 @@ def draw_lanes(frame, lane_viz) -> None:
             cv2.circle(frame, (_ipt(near_center) + ox, y_marker), 8, COLOR_LANE_CENTER, -1)
 
 
-def draw_light_roi(frame, light_roi, light_states=None) -> None:
-    """Draws the traffic-light HSV ROI box and its detected color state."""
+def draw_light_roi(frame, light_roi) -> None:
+    """Draws the traffic-light detection ROI box (where light boxes are kept)."""
 
     if not light_roi:
         return
@@ -106,9 +106,7 @@ def draw_light_roi(frame, light_roi, light_states=None) -> None:
     p0 = (_ipt(x0 * width), _ipt(y0 * height))
     p1 = (_ipt(x1 * width), _ipt(y1 * height))
     cv2.rectangle(frame, p0, p1, COLOR_LIGHT_ROI, 2)
-    active = [name.upper() for name, on in (light_states or {}).items() if on]
-    label = "light: " + (", ".join(active) if active else "-")
-    cv2.putText(frame, label, (p0[0] + 4, max(14, p0[1] + 18)),
+    cv2.putText(frame, "light ROI", (p0[0] + 4, max(14, p0[1] + 18)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_LIGHT_ROI, 1, cv2.LINE_AA)
 
 
@@ -129,22 +127,31 @@ def draw_center_and_steering(frame, steering: float) -> None:
     cv2.arrowedLine(frame, (cx, height - 1), tip, COLOR_STEER, 3, tipLength=0.15)
 
 
-def draw_detections(frame, detections, accepted_ids=None) -> None:
+def draw_detections(frame, detections, accepted_ids=None, light_verdicts=None) -> None:
     """Draws best.pt detection bounding boxes with class labels.
 
-    Colors follow the detected class (traffic_green => green box,
-    traffic_red => red box). When ``accepted_ids`` is given, detections not in
-    it — dropped by the mission gate or the HSV color check — are drawn thin
-    with a "(gated)" suffix so the model's raw output stays visible without
-    implying the FSM is acting on it.
+    Traffic-light boxes follow the SAME visualization as the tuner: colored by
+    the classify_light verdict in ``light_verdicts`` (id(det) -> "traffic_green"
+    / "traffic_red" / None) and labeled GREEN / RED / none, never by the
+    unreliable raw YOLO class. Signs and other classes color by their detected
+    class; when ``accepted_ids`` is given, non-accepted ones are drawn thin with
+    a "(gated)" suffix so the model's raw output stays visible.
     """
 
+    light_verdicts = light_verdicts or {}
     for det in detections or []:
         x1, y1, x2, y2 = (int(v) for v in det.bbox)
-        color = DET_COLORS.get(det.cls, (200, 200, 200))
-        accepted = accepted_ids is None or id(det) in accepted_ids
-        thickness = 2 if accepted else 1
-        label = f"{det.cls} {det.conf:.2f}" + ("" if accepted else " (gated)")
+        if det.cls in ("traffic_green", "traffic_red"):
+            verdict = light_verdicts.get(id(det))
+            color = {"traffic_green": (0, 255, 0), "traffic_red": (0, 0, 255)}.get(
+                verdict, (170, 170, 170))
+            label = {"traffic_green": "GREEN", "traffic_red": "RED"}.get(verdict, "none")
+            thickness = 2 if verdict else 1
+        else:
+            color = DET_COLORS.get(det.cls, (200, 200, 200))
+            accepted = accepted_ids is None or id(det) in accepted_ids
+            thickness = 2 if accepted else 1
+            label = f"{det.cls} {det.conf:.2f}" + ("" if accepted else " (gated)")
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
         cv2.putText(frame, label, (x1, max(12, y1 - 5)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
@@ -257,15 +264,15 @@ def draw_lane_mask_view(lane_viz, cmd):
 
 
 def draw_overlay(frame, lane_viz, detections, markers, cmd, state, target_id=3,
-                 light_roi=None, light_states=None, accepted_ids=None, cc_active=None):
+                 light_roi=None, light_verdicts=None, accepted_ids=None, cc_active=None):
     """Draws the full debug overlay on a copy of the frame and returns it."""
 
     out = frame.copy()
     draw_lane_roi(out, lane_viz)
     draw_lanes(out, lane_viz)
     draw_center_and_steering(out, float(getattr(cmd, "steering", 0.0)))
-    draw_detections(out, detections, accepted_ids)
-    draw_light_roi(out, light_roi, light_states)
+    draw_detections(out, detections, accepted_ids, light_verdicts)
+    draw_light_roi(out, light_roi)
     draw_aruco(out, markers, target_id)
 
     det_classes = sorted({det.cls for det in (detections or [])})

@@ -45,7 +45,7 @@ def generate_launch_description():
     # I2C bus, so control_node/joystick_node cannot run here. Plug the wireless
     # pad's USB dongle into the car; the wireless pad stays in the operator's hand.
     return LaunchDescription([
-        DeclareLaunchArgument("route_mode", default_value="LANE"),
+        DeclareLaunchArgument("route_mode", default_value="OUT"),
         DeclareLaunchArgument("config_file", default_value=default_config_path()),
         DeclareLaunchArgument("model_path", default_value=default_model_path()),
         DeclareLaunchArgument("image_topic", default_value="/camera/image/compressed"),

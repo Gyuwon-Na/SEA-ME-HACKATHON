@@ -1,18 +1,20 @@
 """Standalone traffic-light tuning tool (PC only, NOT part of driving.launch).
 
-Purpose: verify red/green detection live and tune the green/red HSV bounds. It
+Purpose: verify red/green detection live and tune the values that affect it. It
 runs the exact pipeline path — `preprocess_frame` -> `BestPthDetector` ->
 `classify_light` (honoring ``traffic_light.classifier``) — so every value dialed
 in here maps 1:1 onto ``dracer_params.yaml``.
 
 One window:
-  * "Detect" - each YOLO light box drawn as a bbox colored by the classifier's
-               verdict with a GREEN / RED (or "none") label. Nothing else.
+  * "Detect" - the frame the detector sees (color-corrected when cc_enabled),
+               with each YOLO light box drawn as a bbox colored by the
+               classifier's verdict and a GREEN / RED (or "none") label.
 
-Controls window "TL Controls" holds only the green/red HSV bounds the color
-classifier uses, plus its row_min_ratio and the YOLO conf/imgsz. Tune color
-correction and the lit-only fields via ``param_gui_node`` or the yaml. Keys:
-'s' prints a copy-paste YAML block of the current values, 'q' quits.
+Controls window "TL Controls": the color-correction chain (CLAHE / saturation /
+brightness / ... — boosting these makes the lit lamp pop and detect better, and
+the Detect window shows the corrected frame so the effect is live), the green/
+red HSV bounds the classifier uses, its row_min_ratio, and the YOLO conf/imgsz.
+Keys: 's' prints a copy-paste YAML block of the current values, 'q' quits.
 
 Run:  ros2 run bisa traffic_light_tuner
       ros2 run bisa traffic_light_tuner --ros-args -p video_path:=/path/to/clip.mp4
@@ -37,11 +39,21 @@ CONTROLS = "TL Controls"
 WIN_DETECT = "Detect"
 
 # (trackbar label, config path, kind, lo, hi)
-#   kind 'x100' stores value*100; 'imgsz32' stores imgsz/32; 'raw' stores the
-#   integer directly. Only the green/red HSV bounds the color classifier uses,
-#   plus its ratio threshold and the YOLO conf/imgsz, are exposed here. Tune
-#   color-correction and the lit-only fields via param_gui_node / the yaml.
+#   kind 'x10'/'x100' store value*10 or *100; 'boff' stores value+50 (bipolar);
+#   'imgsz32' stores imgsz/32; 'raw' stores the integer directly.
+# Color correction runs before the detector (enabled by default) so boosting
+# saturation / CLAHE here makes the lit lamp pop and detect better — the Detect
+# window shows the corrected frame, so the effect is visible live. Below that,
+# the green/red HSV bounds the classifier uses, its ratio, and YOLO conf/imgsz.
 SLIDERS = [
+    ("cc_enabled(->detector)", "color_correction.enabled", "raw", 0, 1),
+    ("clahe_clip x10", "color_correction.clahe_clip", "x10", 0, 80),
+    ("clahe_tile", "color_correction.clahe_tile", "raw", 1, 16),
+    ("sat_boost x10", "color_correction.saturation_boost", "x10", 0, 30),
+    ("brightness +50", "color_correction.brightness", "boff", 0, 100),
+    ("contrast x10", "color_correction.contrast", "x10", 0, 30),
+    ("saturation x10", "color_correction.saturation", "x10", 0, 30),
+    ("gamma x10", "color_correction.gamma", "x10", 1, 30),
     ("green H lo", "traffic_light.green_h_lo", "raw", 0, 180),
     ("green H hi", "traffic_light.green_h_hi", "raw", 0, 180),
     ("green S min", "traffic_light.green_s_min", "raw", 0, 255),
@@ -149,7 +161,7 @@ class TlTunerNode(Node):
         cv2.namedWindow(WIN_DETECT, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(WIN_DETECT, 640, 480)
         cv2.namedWindow(CONTROLS, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(CONTROLS, 460, 420)
+        cv2.resizeWindow(CONTROLS, 460, 720)
         # Spread the windows so WSLg does not stack them on top of each other
         # (a common "the window opened but I can't see it" cause).
         cv2.moveWindow(WIN_DETECT, 20, 20)
@@ -212,6 +224,9 @@ class TlTunerNode(Node):
             self.config.detector.conf["traffic_green"] = float(value)
             self.config.detector.conf["traffic_red"] = float(value)
             return
+        if path == "color_correction.enabled":
+            self.config.color_correction.enabled = bool(value)
+            return
         parts = path.split(".")
         obj = self.config
         for part in parts[:-1]:
@@ -272,8 +287,9 @@ class TlTunerNode(Node):
             cv2.putText(detect_view, self._verdict_text(verdict),
                         (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
 
+        cc = "on" if self.config.color_correction.enabled else "off"
         self._hud(detect_view, [
-            f"classifier={self.config.traffic_light.classifier}  lights={n_on}",
+            f"classifier={self.config.traffic_light.classifier}  cc={cc}  lights={n_on}",
             "s=dump params  q=quit",
         ])
 
@@ -304,8 +320,13 @@ class TlTunerNode(Node):
     def _dump_yaml(self) -> None:
         """Prints a copy-paste-ready YAML block of the tuned values."""
 
-        tl, det = self.config.traffic_light, self.config.detector
+        cc, tl, det = self.config.color_correction, self.config.traffic_light, self.config.detector
         print("\n# ---- paste into dracer_params.yaml ----")
+        print("color_correction:")
+        print(f"  enabled: {str(cc.enabled).lower()}")
+        for f in ("clahe_clip", "clahe_tile", "saturation_boost", "brightness",
+                  "contrast", "saturation", "gamma"):
+            print(f"  {f}: {getattr(cc, f)}")
         print("traffic_light:")
         for f in ("green_h_lo", "green_h_hi", "green_s_min", "green_v_min",
                   "red_h1_hi", "red_h2_lo", "red_s_min", "red_v_min", "row_min_ratio"):

@@ -20,6 +20,7 @@ display); it is a pure subscriber and never commands the vehicle.
 
 from __future__ import annotations
 
+import signal
 import time
 from collections import deque
 
@@ -529,7 +530,23 @@ def main(args=None):
 
         draw_plot()
 
+    # Ctrl+C: rclpy.init installs a SIGINT handler that only flips an internal
+    # flag, but tkinter's mainloop never checks it, so Ctrl+C otherwise leaves
+    # the window hanging. Flag a stop from the signal (the only reentrant-safe
+    # thing to do — Tk calls aren't) and let the pump close the window from the
+    # main thread.
+    stop_requested = {"flag": False}
+
+    def _request_stop(*_):
+        stop_requested["flag"] = True
+
+    signal.signal(signal.SIGINT, _request_stop)
+    signal.signal(signal.SIGTERM, _request_stop)
+
     def pump():
+        if stop_requested["flag"] or not rclpy.ok():
+            root.destroy()
+            return
         # spin_once executes at most ONE callback; subscriptions deliver ~35
         # msg/s while driving, so a single call per 100ms tick backlogs the
         # executor and the guard/battery labels lag by seconds. Drain a bounded

@@ -8,6 +8,7 @@ config every frame). Run on the operator PC only.
 from __future__ import annotations
 
 import os
+import signal
 from pathlib import Path
 
 import rclpy
@@ -235,7 +236,23 @@ def main(args=None) -> None:
     status = ttk.Label(root, text=f"target: {node.target_node}  (drag a slider to apply)")
     status.grid(row=1, column=0, pady=4)
 
+    # Ctrl+C: rclpy.init installs a SIGINT handler that only flips an internal
+    # flag, but tkinter's mainloop never checks it, so Ctrl+C otherwise leaves
+    # the window hanging. Flag a stop from the signal (the only reentrant-safe
+    # thing to do — Tk calls aren't) and let the pump close the window from the
+    # main thread.
+    stop_requested = {"flag": False}
+
+    def _request_stop(*_):
+        stop_requested["flag"] = True
+
+    signal.signal(signal.SIGINT, _request_stop)
+    signal.signal(signal.SIGTERM, _request_stop)
+
     def pump():
+        if stop_requested["flag"] or not rclpy.ok():
+            root.destroy()
+            return
         rclpy.spin_once(node, timeout_sec=0.0)
         root.after(50, pump)
 

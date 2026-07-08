@@ -1,156 +1,156 @@
 roi:
-  near_y0: 0.70
-  mid_y0: 0.52
-  mid_y1: 0.75
-  far_y0: 0.32
-  far_y1: 0.58
-  detector_light: [0.20, 0.00, 0.80, 0.55]
-  detector_sign: [0.10, 0.05, 0.90, 0.70]
+  near_y0: 0.70                              # 차선 샘플링 근거리 밴드 상단 y비율
+  mid_y0: 0.52                               # 중거리 밴드 상단 y비율
+  mid_y1: 0.75                               # 중거리 밴드 하단 y비율
+  far_y0: 0.32                               # 원거리 밴드 상단 y비율
+  far_y1: 0.58                               # 원거리 밴드 하단 y비율
+  detector_light: [0.20, 0.00, 0.80, 0.55]  # 신호등 검출 허용 ROI(x0,y0,x1,y1 비율) — 상단 중앙만
+  detector_sign: [0.10, 0.05, 0.90, 0.70]   # 표지판 검출 허용 ROI(비율) — 이 밖 검출은 버림
 
 # Lane-only ROI. Camera stays full size for light/sign/aruco detection; only the
 # lane pipeline is cropped to this box. width/height are slider-adjustable live.
 # x_offset < 0 => centered horizontally, y_offset < 0 => anchored to frame bottom.
 lane_roi:
-  enabled: true
-  width: 640
-  height: 240
-  x_offset: -1
-  y_offset: -1
+  enabled: true    # 차선 파이프라인 전용 ROI 크롭 사용 여부
+  width: 640       # ROI 가로 px (라이브 조정)
+  height: 240      # ROI 세로 px (작게 유지해 연산 절감)
+  x_offset: -1     # <0 이면 가로 중앙 정렬
+  y_offset: -1     # <0 이면 프레임 하단에 붙임(차선이 보이는 영역)
 
 lane:
   # LAB 도로 마스크: CLAHE 적용된 LAB 이미지에 아래 min/max 임계값으로 inRange
   # 이진화. "Lane ROI Mask" 창을 보면서 튜닝.
   # OpenCV 8bit LAB: L 0..255, a/b 0..255 (128 = 무채색).
-  lab_l_min: 0
-  lab_l_max: 90
-  lab_a_min: 105
-  lab_a_max: 150
-  lab_b_min: 105
-  lab_b_max: 150
-  lab_clahe_clip: 2.0
-  lab_clahe_tile: 8
-  morph_open_kernel: 3
-  morph_close_kernel: 5
-  min_component_area_ratio: 0.006
-  fork_area_ratio: 0.035
-  hough_roi_top_ratio: 0.58
-  hough_canny_low: 50
-  hough_canny_high: 150
+  lab_l_min: 0                 # L(명도) 하한
+  lab_l_max: 90                # L 상한 — 어두운 노면만 통과(밝은 배경 제외)
+  lab_a_min: 105               # a채널 하한(무채색 128 근처만)
+  lab_a_max: 150               # a채널 상한
+  lab_b_min: 105               # b채널 하한
+  lab_b_max: 150               # b채널 상한
+  lab_clahe_clip: 2.0          # 이진화/캐니 전 L채널 CLAHE 대비제한
+  lab_clahe_tile: 8            # CLAHE 타일 그리드 크기
+  morph_open_kernel: 3         # 열림 커널 — 작은 잡티 제거
+  morph_close_kernel: 5        # 닫힘 커널 — 끊긴 차선 메움
+  min_component_area_ratio: 0.006  # 이 면적비 미만 연결요소는 버림(노이즈 컷)
+  fork_area_ratio: 0.035       # 갈림길로 인정할 최소 분기 영역 면적비
+  hough_roi_top_ratio: 0.58    # 허프 라인 검출을 이 y비율 아래에서만 수행
+  hough_canny_low: 50          # 캐니 엣지 하한 임계
+  hough_canny_high: 150        # 캐니 엣지 상한 임계
   hough_threshold: 38          # was 45: 커브의 짧은 세그먼트도 라인으로 채택 (표 낮춤)
   hough_min_line_length: 30    # was 45: 급커브에서 조각난 짧은 선분도 살림
-  hough_max_line_gap: 290
+  hough_max_line_gap: 290      # 선분 사이 이 간격(px) 이하면 하나로 연결
   hough_slope_min_abs: 0.22    # was 0.40: 커브에서 수평에 가까워진 차선이 버려지는 문제 해결(핵심)
-  assumed_lane_width_ratio: 0.62
+  assumed_lane_width_ratio: 0.62   # 한쪽 차선만 보일 때 가정하는 차폭(프레임 대비 비율)
   max_center_jump: 0.70        # was 0.45: 급커브의 정상적인 중심 이동을 "튐"으로 오인해 되돌리지 않도록
 
 detector:
-  model_path: checkpoints/best.pt
-  enabled: true
+  model_path: checkpoints/best.pt  # YOLO 가중치 경로(패키지 상대)
+  enabled: true                    # 검출기 사용 여부
   # imgsz는 추론 입력 해상도. 클수록 멀리 있는 작은 신호등을 미리 감지(PC라 여유
   # 있음). 480→640으로 더 올리면 더 멀리 보지만 느려짐. GUI에서 라이브 조정 가능.
-  imgsz: 640
+  imgsz: 640           # 추론 입력 해상도(px) — 차량 CPU는 onboard.launch에서 320으로 낮춤
   # GPU(RTX 4060)에서 imgsz 640 추론이 ~13ms(≈79Hz 여유) → 30Hz로 상향.
   # 아래 투표/연속 카운트는 30Hz 기준으로 스케일됨(프레임 수 = 시간 기준 유지).
-  inference_hz: 30.0
+  inference_hz: 30.0   # 추론 주기 상한(Hz) — 차량 CPU는 launch에서 4.0으로 낮춤
   # auto = CUDA GPU on the PC when available, else CPU. Force with cpu / cuda.
-  device: auto
+  device: auto         # auto=GPU 있으면 CUDA, 없으면 CPU
   # class_map은 fallback 전용 — 실제 클래스 이름은 모델 메타데이터에서 읽음.
   # 2026-07-07 detect 모델: 0=light_red, 1=light_green, 2=sign_left, 3=sign_right
   class_map:
-    traffic_red: 0
-    traffic_green: 1
-    sign_left: 2
-    sign_right: 3
+    traffic_red: 0     # (fallback) red 클래스 인덱스
+    traffic_green: 1   # (fallback) green 클래스 인덱스
+    sign_left: 2       # (fallback) 좌회전 표지 인덱스
+    sign_right: 3      # (fallback) 우회전 표지 인덱스
   # 신호등 conf를 낮추면 멀리/작게 잡히는 불도 미리 감지. 행 분할 재분류(row_*)
   # + 상태 게이팅 + 연속 투표가 오탐을 걸러주므로 낮춰도 비교적 안전.
   conf:
-    traffic_green: 0.40
-    traffic_red: 0.40
-    sign_left: 0.65
-    sign_right: 0.65
-  sign_vote_k: 9
-  sign_vote_n: 15
+    traffic_green: 0.40  # green 검출 최소 신뢰도
+    traffic_red: 0.40    # red 검출 최소 신뢰도
+    sign_left: 0.65      # 좌 표지 최소 신뢰도
+    sign_right: 0.65     # 우 표지 최소 신뢰도
+  sign_vote_k: 9         # 최근 n프레임 중 k회 이상 잡히면 표지 방향 확정
+  sign_vote_n: 15        # 표지 투표 창(프레임 수)
   # 신호등: classify_light verdict(튜너가 보여주는 값)로 green이면 출발/red면 정지.
   # 한 프레임 글리치를 거르려고 같은 verdict가 이만큼 연속 제어틱 유지돼야 동작
   # (control_hz=10 → 3틱=0.3s).
-  light_confirm_frames: 3
+  light_confirm_frames: 3  # 신호색이 이만큼 연속 확인돼야 출발/정지 실행
 
 throttle:
   # Moving speed band. Every throttle command (while not stopped) maps into
   # [speed_min, speed_max]. Change these two to retune overall speed.
-  speed_min: 0.20
-  speed_max: 0.25
-  launch_cap: 0.32
-  s_curve_cap: 0.24
-  fork_approach_cap: 0.20
-  fork_commit_cap: 0.25
-  post_fork_cap: 0.30
-  post_fork_min: 0.25
-  ramp_up_per_cmd: 0.03
-  steer_slowdown: 0.22
-  curvature_slowdown: 0.08
+  speed_min: 0.20          # 이동 속도밴드 하한(정지 아닌 최저속)
+  speed_max: 0.25          # 이동 속도밴드 상한(전체 속도 재조정 시 이 둘만 바꿈)
+  launch_cap: 0.32         # 출발 구간 속도 상한
+  s_curve_cap: 0.24        # S자 구간 속도 상한
+  fork_approach_cap: 0.20  # 갈림길 접근 속도 상한
+  fork_commit_cap: 0.25    # 갈림길 진입(커밋) 속도 상한
+  post_fork_cap: 0.30      # 갈림길 이후 크루즈(종단) 속도 상한
+  post_fork_min: 0.25      # 갈림길 이후 최저속(코너에서도 이 이하로 안 떨어짐)
+  ramp_up_per_cmd: 0.03    # 명령당 가속 증가 한도(급가속 방지)
+  steer_slowdown: 0.22     # 조향 클수록 감속하는 계수
+  curvature_slowdown: 0.08 # 곡률 클수록 감속하는 계수
 
 # Pure pursuit steering. center_error(정규화 오차)가 lateral_scale_m 미터의
 # 횡방향 오프셋으로 변환되고, lookahead_m 앞의 목표점을 향한 자전거 모델 조향각
 # atan2(2*wheelbase*sin(alpha), Ld) 을 max_steer_deg로 나눠 [-1,1] 명령으로 정규화.
 # curve_blend 는 도로 굽어짐(signed curvature)만큼 목표점을 이동시킴.
 steering:
-  steer_sign: 1
-  lookahead_m: 0.60
-  wheelbase_m: 0.16
-  lateral_scale_m: 0.30
-  max_steer_deg: 30.0
-  pp_gain: 1.0
-  curve_blend: 1.0
-  rate_limit_per_cmd: 0.10
-  straight_limit: 0.45
-  s_curve_limit: 0.80
-  fork_approach_limit: 0.55
-  fork_limit: 0.85
-  post_fork_limit: 0.65
-  lost_decay: 0.70
+  steer_sign: 1              # 조향 부호(좌우 반대로 나가면 -1)
+  lookahead_m: 0.60          # 순수추종 전방주시 거리(m)
+  wheelbase_m: 0.16          # 차축 거리(자전거 모델, m)
+  lateral_scale_m: 0.30      # 오차 1.0을 몇 m 횡오프셋으로 볼지
+  max_steer_deg: 30.0        # 조향각 정규화 기준(풀락 각도)
+  pp_gain: 1.0               # 순수추종 조향 게인
+  curve_blend: 1.0           # 곡률로 목표점 이동시키는 정도
+  rate_limit_per_cmd: 0.10   # 명령당 조향 변화 한도(급조향 방지)
+  straight_limit: 0.45       # 직진 상태 조향 클램프
+  s_curve_limit: 0.80        # S자 상태 조향 클램프
+  fork_approach_limit: 0.55  # 갈림길 접근 조향 클램프
+  fork_limit: 0.85           # 갈림길 커밋 조향 클램프
+  post_fork_limit: 0.65      # 갈림길 이후 조향 클램프
+  lost_decay: 0.70           # 차선 놓치면 직전 조향을 이 비율로 감쇠
 
 aruco:
-  enabled: true
-  dictionary: DICT_6X6_50
-  target_id: 3
-  detect_hz: 10.0
+  enabled: true              # ArUco 마커 검출 사용 여부
+  dictionary: DICT_6X6_50    # ArUco 사전
+  target_id: 3               # 이 ID 마커 보이면 즉시 정지/홀드
+  detect_hz: 10.0            # 마커 검출 주기(Hz)
 
 # YOLO 검출 프레임 전처리(CLAHE→채도부스트→밝기/대비/감마). 레퍼런스처럼
 # 검출 전에 적용해 색을 또렷하게. enabled=true면 검출기·색분류가 보정본을 봄.
 color_correction:
-  enabled: true
-  clahe_clip: 2.0
-  clahe_tile: 8
-  saturation_boost: 1.5
-  brightness: 0
-  contrast: 1.0
-  saturation: 1.0
-  gamma: 1.0
+  enabled: true          # true면 검출기·색분류가 보정본 프레임을 봄
+  clahe_clip: 2.0        # CLAHE 대비제한
+  clahe_tile: 8          # CLAHE 타일 크기
+  saturation_boost: 1.5  # 채도 부스트 배율(HSV S)
+  brightness: 0          # 밝기 가산값(-50..50)
+  contrast: 1.0          # 대비 배율(0..3)
+  saturation: 1.0        # 채도 배율(0..3)
+  gamma: 1.0             # 감마 보정(0.1..3)
 
 # YOLO가 검출한 신호등 박스의 red/green 색 판별. 박스를 세로 3등분해서
 # 윗칸(red)/아랫칸(green)만 점수내고 높은 쪽이 이김. 가운데(amber)는 무시
 # (미션은 red/green만, 대회 신호등은 가운데 불을 테이프로 가림).
 traffic_light:
-  red_h1_hi: 10
-  red_h2_lo: 170
-  red_s_min: 120
-  red_v_min: 100
-  green_h_lo: 40
-  green_h_hi: 90
-  green_s_min: 50
-  green_v_min: 50
+  red_h1_hi: 10        # red 저역 hue 상한 [0..this]
+  red_h2_lo: 170       # red 고역 hue 하한 [this..180]
+  red_s_min: 120       # red 최소 채도
+  red_v_min: 100       # red 최소 명도
+  green_h_lo: 40       # green hue 하한
+  green_h_hi: 90       # green hue 상한
+  green_s_min: 50      # green 최소 채도
+  green_v_min: 50      # green 최소 명도
   # 이긴 칸의 매칭(color)/점등(lit) 픽셀 비율이 이 값 이상이어야 인정, 아니면 drop.
-  row_min_ratio: 0.02
+  row_min_ratio: 0.02  # 이긴 칸 픽셀비 임계(이하면 판정 무효)
   # lit 분류기 전용: 점등 픽셀 = V>=row_lit_v_min AND 색마스크, 또는 그 밝은 색
   # 링 근처의 백열 픽셀(S<=row_white_s_max). color/lab 분류기에선 미사용.
-  row_lit_v_min: 220
-  row_white_s_max: 80
+  row_lit_v_min: 220   # (lit 전용) 점등으로 볼 최소 명도 V
+  row_white_s_max: 80  # (lit 전용) 백열 코어로 볼 최대 채도 S
   # lab 분류기 전용: OpenCV 8bit LAB은 초록↔빨강 a채널 중심이 128.
   # a>=lab_a_red_min=빨강, a<=lab_a_green_max=초록, L>=lab_l_min 픽셀만 카운트.
-  lab_a_red_min: 150
-  lab_a_green_max: 110
-  lab_l_min: 69
+  lab_a_red_min: 150   # (lab 전용) a>=이 값이면 red
+  lab_a_green_max: 110 # (lab 전용) a<=이 값이면 green
+  lab_l_min: 69        # (lab 전용) L>=이 값 픽셀만 카운트(어두운 배경 제외)
   # 주행 파이프라인이 쓸 분류기:
   #   color = 레퍼런스 순수 색비율(HSV, 밝기 무시). 기본값. 대회 신호등은 안 쓰는
   #           불을 검은 테이프로 가려서 색이 있는 건 켜진 램프뿐 → 꺼진 렌즈에
@@ -160,13 +160,13 @@ traffic_light:
   #           렌즈가 색을 유지할 때만 필요. V>=220 게이트가 흐린 램프를 놓칠 수 있음.
   #   lab   = LAB a채널(빨강=a큼, 초록=a작음). hue 랩어라운드 없고 조명 변화에
   #           더 안정적, HSV green 범위가 놓치는 청록 초록불도 잡음. 현장 A/B용.
-  classifier: lab
+  classifier: lab      # 사용할 색분류기: color / lit / lab
 
 mission:
-  route_mode: OUT
-  control_hz: 10.0
-  launch_min_sec: 1.0
-  fork_commit_min_sec: 0.8
-  fork_commit_timeout_sec: 1.8
-  finish_min_elapsed_sec: 8.0
-  debug_log_hz: 1.0
+  route_mode: OUT               # 코스 모드(OUT=본선, LANE=차선전용 테스트)
+  control_hz: 10.0              # 제어 루프 주기(Hz)
+  launch_min_sec: 1.0           # 출발(LAUNCH) 상태 최소 유지 시간(s)
+  fork_commit_min_sec: 0.8      # 갈림길 커밋 최소 유지 시간(s)
+  fork_commit_timeout_sec: 1.8  # 커밋 강제 종료 타임아웃(s)
+  finish_min_elapsed_sec: 8.0   # 출발 후 이 시간(s) 지나야 red 정지 창이 열림
+  debug_log_hz: 1.0             # 상태 로그 출력 주기(Hz)

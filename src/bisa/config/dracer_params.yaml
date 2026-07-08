@@ -6,7 +6,6 @@ roi:
   far_y1: 0.58
   detector_light: [0.20, 0.00, 0.80, 0.55]
   detector_sign: [0.10, 0.05, 0.90, 0.70]
-  detector_dynamic: [0.00, 0.35, 1.00, 1.00]
 
 # Lane-only ROI. Camera stays full size for light/sign/aruco detection; only the
 # lane pipeline is cropped to this box. width/height are slider-adjustable live.
@@ -71,8 +70,6 @@ detector:
     sign_right: 0.65
   sign_vote_k: 9
   sign_vote_n: 15
-  dynamic_detect_consecutive: 6
-  dynamic_clear_consecutive: 36
   # 신호등: classify_light verdict(튜너가 보여주는 값)로 green이면 출발/red면 정지.
   # 한 프레임 글리치를 거르려고 같은 verdict가 이만큼 연속 제어틱 유지돼야 동작
   # (control_hz=10 → 3틱=0.3s).
@@ -89,9 +86,6 @@ throttle:
   fork_commit_cap: 0.25
   post_fork_cap: 0.30
   post_fork_min: 0.25
-  dynamic_approach_cap: 0.18
-  resume_cap: 0.30
-  finish_cap: 0.34
   ramp_up_per_cmd: 0.03
   steer_slowdown: 0.22
   curvature_slowdown: 0.08
@@ -114,9 +108,6 @@ steering:
   fork_approach_limit: 0.55
   fork_limit: 0.85
   post_fork_limit: 0.65
-  dynamic_limit: 0.45
-  resume_limit: 0.60
-  finish_limit: 0.55
   lost_decay: 0.70
 
 aruco:
@@ -159,7 +150,7 @@ traffic_light:
   # a>=lab_a_red_min=빨강, a<=lab_a_green_max=초록, L>=lab_l_min 픽셀만 카운트.
   lab_a_red_min: 150
   lab_a_green_max: 110
-  lab_l_min: 40
+  lab_l_min: 69
   # 주행 파이프라인이 쓸 분류기:
   #   color = 레퍼런스 순수 색비율(HSV, 밝기 무시). 기본값. 대회 신호등은 안 쓰는
   #           불을 검은 테이프로 가려서 색이 있는 건 켜진 램프뿐 → 꺼진 렌즈에
@@ -177,8 +168,5 @@ mission:
   launch_min_sec: 1.0
   fork_commit_min_sec: 0.8
   fork_commit_timeout_sec: 1.8
-  dynamic_stop_hold_sec: 0.2
-  resume_min_sec: 1.0
   finish_min_elapsed_sec: 8.0
-  dynamic_zone_elapsed_sec: 4.0
   debug_log_hz: 1.0

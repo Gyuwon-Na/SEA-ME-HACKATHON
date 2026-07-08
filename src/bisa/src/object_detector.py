@@ -48,29 +48,6 @@ class DetectionBuffer:
 
         return self.count(cls, n) >= k
 
-    def consecutive_count(self, cls: str) -> int:
-        """Counts class detections in consecutive frames ending at the latest frame."""
-
-        total = 0
-        for frame in reversed(self.frames):
-            if any(det.cls == cls for det in frame):
-                total += 1
-            else:
-                break
-        return total
-
-    def stable_consecutive(self, cls: str, frames: int) -> bool:
-        """Returns true when a class appears for the requested consecutive frames."""
-
-        return self.consecutive_count(cls) >= frames
-
-    def not_seen_consecutive(self, cls: str, frames: int) -> bool:
-        """Returns true when a class is absent for the requested consecutive frames."""
-
-        if len(self.frames) < frames:
-            return False
-        recent = list(self.frames)[-frames:]
-        return all(not any(det.cls == cls for det in frame) for frame in recent)
 
 
 class BestPthDetector:
@@ -254,8 +231,6 @@ class BestPthDetector:
             roi = self.config.roi.detector_light
         elif detection.cls.startswith("sign"):
             roi = self.config.roi.detector_sign
-        elif detection.cls == "dynamic_marker":
-            roi = self.config.roi.detector_dynamic
         else:
             return True
 

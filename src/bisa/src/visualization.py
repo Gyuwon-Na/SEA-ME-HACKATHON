@@ -33,8 +33,6 @@ DET_COLORS = {
     "traffic_red": (0, 0, 255),
     "sign_left": (255, 200, 0),
     "sign_right": (0, 200, 255),
-    "dynamic_marker": (255, 0, 0),
-    "finish_line": (200, 200, 200),
 }
 
 MAX_STEER_DEG = 50.0

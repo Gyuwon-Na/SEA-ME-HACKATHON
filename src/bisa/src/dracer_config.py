@@ -23,7 +23,6 @@ class RoiConfig:
     far_y1: float = 0.58
     detector_light: list[float] = field(default_factory=lambda: [0.20, 0.00, 0.80, 0.55])
     detector_sign: list[float] = field(default_factory=lambda: [0.10, 0.05, 0.90, 0.70])
-    detector_dynamic: list[float] = field(default_factory=lambda: [0.00, 0.35, 1.00, 1.00])
 
 
 @dataclass
@@ -109,8 +108,6 @@ class DetectorConfig:
     })
     sign_vote_k: int = 9
     sign_vote_n: int = 15
-    dynamic_detect_consecutive: int = 6
-    dynamic_clear_consecutive: int = 36
     # Traffic light: the mission launches on green and stops on red directly from
     # the classify_light verdict (the value the tuner shows). To reject a single
     # glitch frame, the same verdict must hold for this many consecutive control
@@ -137,9 +134,6 @@ class ThrottleConfig:
     fork_commit_cap: float = 0.25
     post_fork_cap: float = 0.30
     post_fork_min: float = 0.25
-    dynamic_approach_cap: float = 0.18
-    resume_cap: float = 0.30
-    finish_cap: float = 0.34
     ramp_up_per_cmd: float = 0.03
     steer_slowdown: float = 0.22
     curvature_slowdown: float = 0.08
@@ -170,9 +164,6 @@ class SteeringConfig:
     fork_approach_limit: float = 0.55
     fork_limit: float = 0.85
     post_fork_limit: float = 0.65
-    dynamic_limit: float = 0.45
-    resume_limit: float = 0.60
-    finish_limit: float = 0.55
     lost_decay: float = 0.70
 
 
@@ -265,10 +256,7 @@ class MissionConfig:
     launch_min_sec: float = 1.0
     fork_commit_min_sec: float = 0.8
     fork_commit_timeout_sec: float = 1.8
-    dynamic_stop_hold_sec: float = 0.2
-    resume_min_sec: float = 1.0
     finish_min_elapsed_sec: float = 8.0
-    dynamic_zone_elapsed_sec: float = 4.0
     debug_log_hz: float = 1.0
 
 

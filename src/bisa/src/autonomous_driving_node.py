@@ -100,16 +100,17 @@ class BisaAutonomousNode(Node):
         self.controller = LaneController(self.config)
         self.fsm = make_course_fsm(self.config, self.controller)
         self.latest_lane = LaneObs(valid=False)
-        self.latest_detections = []
+        # Phase-gated detections that feed the FSM vote buffer and status topics.
+        self.fsm_detections = []
         # Pre-gate snapshot for the Detect View only: shows every model
         # detection (incl. traffic lights the FSM is currently ignoring) so
         # the model's raw behavior stays visible while tuning. Never feeds
         # the vote buffer or the status topics.
-        self.latest_detections_viz = []
-        # Raw classify_light verdict ("green"/"red"/None) on the latest frame's
+        self.raw_detections = []
+        # Raw classify_light state ("green"/"red"/None) on the latest frame's
         # light boxes, ignoring mission phase — drives the /detect_green and
         # /detect_red monitor topics exactly as the tuner reports it.
-        self.light_verdict = None
+        self.light_state = None
         self.latest_markers = []
         self.last_cmd = ControlCmd(0.0, 0.0)
         self.last_frame = None
@@ -201,41 +202,54 @@ class BisaAutonomousNode(Node):
 
         self._tuning_names = set()
         for name, value in self._flatten_config():
-            if not self.has_parameter(name):
-                self.declare_parameter(name, value)
+            if self.has_parameter(name):
+                self._tuning_names.add(name)
+                continue
+            param = self.declare_parameter(name, value)
             self._tuning_names.add(name)
+            # A launch/CLI override resolves declare_parameter to a value that
+            # differs from the config default. The on-set callback is not
+            # registered yet at declaration time, so it never fires for these
+            # initial overrides; push them into self.config here. This is what
+            # makes onboard.launch's CPU overrides (imgsz/inference_hz/device/…)
+            # actually take effect without editing the shared YAML.
+            if param.value != value:
+                self._apply_tuning_value(name, param.value)
+
+    def _apply_tuning_value(self, name: str, value) -> None:
+        """Writes one flat dotted config value back into the shared config."""
+
+        from dataclasses import is_dataclass
+
+        if name not in getattr(self, "_tuning_names", set()):
+            return
+        parts = name.split(".")
+        obj = getattr(self.config, parts[0], None)
+        ok = obj is not None
+        for key in parts[1:-1]:
+            if isinstance(obj, dict):
+                obj = obj.get(key)
+            elif is_dataclass(obj):
+                obj = getattr(obj, key, None)
+            else:
+                obj = None
+            if obj is None:
+                ok = False
+                break
+        if not ok:
+            return
+        leaf = parts[-1]
+        if isinstance(obj, dict):
+            if leaf in obj:
+                obj[leaf] = self._cast_like(obj[leaf], value)
+        elif is_dataclass(obj) and hasattr(obj, leaf):
+            setattr(obj, leaf, self._cast_like(getattr(obj, leaf), value))
 
     def _on_set_tuning_params(self, params) -> SetParametersResult:
         """Applies parameter updates to the shared config so they take effect live."""
 
-        from dataclasses import is_dataclass
-
         for param in params:
-            name = param.name
-            if name not in getattr(self, "_tuning_names", set()):
-                continue
-            parts = name.split(".")
-            obj = getattr(self.config, parts[0], None)
-            ok = obj is not None
-            for key in parts[1:-1]:
-                if isinstance(obj, dict):
-                    obj = obj.get(key)
-                elif is_dataclass(obj):
-                    obj = getattr(obj, key, None)
-                else:
-                    obj = None
-                if obj is None:
-                    ok = False
-                    break
-            if not ok:
-                continue
-            leaf = parts[-1]
-            value = param.value
-            if isinstance(obj, dict):
-                if leaf in obj:
-                    obj[leaf] = self._cast_like(obj[leaf], value)
-            elif is_dataclass(obj) and hasattr(obj, leaf):
-                setattr(obj, leaf, self._cast_like(getattr(obj, leaf), value))
+            self._apply_tuning_value(param.name, param.value)
         return SetParametersResult(successful=True)
 
     @staticmethod
@@ -257,13 +271,13 @@ class BisaAutonomousNode(Node):
     def publish_detection_status(self) -> None:
         """Publishes compact detection flags for PC-side echo monitoring."""
 
-        # Traffic light: the raw classify_light verdict, mutually exclusive —
+        # Traffic light: the raw classify_light state, mutually exclusive —
         # GREEN -> green=True/red=False, RED -> green=False/red=True, else both
         # False. Independent of the mission-phase gating used for driving.
-        verdict = self.light_verdict
-        self.detect_green_pub.publish(Bool(data=(verdict == "green")))
-        self.detect_red_pub.publish(Bool(data=(verdict == "red")))
-        classes = {det.cls for det in self.latest_detections}
+        state = self.light_state
+        self.detect_green_pub.publish(Bool(data=(state == "green")))
+        self.detect_red_pub.publish(Bool(data=(state == "red")))
+        classes = {det.cls for det in self.fsm_detections}
         left = int("sign_left" in classes)
         right = int("sign_right" in classes)
         self.detect_sign_pub.publish(String(data=f"left={left} right={right}"))
@@ -301,27 +315,27 @@ class BisaAutonomousNode(Node):
         # boxes exactly like the tuner (by verdict, not the raw YOLO class).
         light_verdicts = {
             id(det): traffic_light.classify_light(frame, det.bbox, self.config)[0]
-            for det in self.latest_detections_viz
+            for det in self.raw_detections
             if det.cls in ("traffic_green", "traffic_red")
         }
         overlay = visualization.draw_overlay(
             frame,
             self.lane_perception.last_viz,
-            self.latest_detections_viz,
+            self.raw_detections,
             self.latest_markers,
             self.last_cmd,
             self.fsm.state,
             target_id=self.config.aruco.target_id,
             light_roi=self.config.roi.detector_light,
             light_verdicts=light_verdicts,
-            accepted_ids={id(d) for d in self.latest_detections},
+            accepted_ids={id(d) for d in self.fsm_detections},
             cc_active=bool(self.config.color_correction.enabled),
         )
-        # The live traffic-light verdict driving /detect_green|/detect_red, so
-        # the operator can see exactly what the mission is reacting to.
-        verdict = self.light_verdict
-        vtxt = {"green": "GREEN", "red": "RED"}.get(verdict, "none")
-        vcolor = {"green": (0, 255, 0), "red": (0, 0, 255)}.get(verdict, (170, 170, 170))
+        # The live traffic-light state driving /detect_green|/detect_red, so the
+        # operator can see exactly what the mission is reacting to.
+        state = self.light_state
+        vtxt = {"green": "GREEN", "red": "RED"}.get(state, "none")
+        vcolor = {"green": (0, 255, 0), "red": (0, 0, 255)}.get(state, (170, 170, 170))
         cv2.putText(overlay, f"light: {vtxt}", (8, overlay.shape[0] - 12),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 3, cv2.LINE_AA)
         cv2.putText(overlay, f"light: {vtxt}", (8, overlay.shape[0] - 12),
@@ -361,24 +375,30 @@ class BisaAutonomousNode(Node):
         now_sec = self.get_clock().now().nanoseconds / 1e9
         self.latest_markers = self.aruco_detector.detect(frame, now_sec)
 
-    def _gate_traffic_detections(self, detections, frame) -> list:
-        """Keeps traffic-light detections only in their mission phase, row-classified.
+    def _classify_and_gate(self, detections, frame):
+        """Classifies every light box once, returning ``(light_state, gated)``.
 
         The YOLO class of a light box is unreliable (an unlit red lens still
-        looks red), so the model only localizes: the box is split into three
-        rows and the LIT row decides the class (top=red, bottom=green),
-        overriding the YOLO label. Boxes with no clearly lit row are dropped.
-        Green only matters while waiting to launch; red only after the finish
-        window opened — outside those windows the classes are dropped outright,
-        so mid-course false positives can never reach the vote buffer that
-        drives the FSM. (The /detect_green and /detect_red monitor topics are
-        published separately from the raw verdict — see :meth:`_light_verdict`.)
-        Sign and other classes pass through untouched. Reads FSM state from the
-        inference thread; a one-frame-stale value is harmless here.
+        looks red), so the model only localizes: :func:`classify_light` splits
+        the box into rows and the LIT row decides the class (top=red,
+        bottom=green), overriding the YOLO label. That single verdict feeds two
+        outputs so ``classify_light`` runs only once per box:
+
+        * ``light_state`` — the raw verdict ("green"/"red"/None) ignoring
+          mission phase, mirroring the tuner; drives /detect_green|/detect_red.
+          Red wins if both somehow appear (fail-safe toward "stop").
+        * ``gated`` — the FSM-facing detection list. Boxes with no clearly lit
+          row are dropped; green only survives while waiting to launch, red only
+          after the finish window opened, so mid-course false positives never
+          reach the vote buffer. Sign/other classes pass through untouched.
+
+        Reads FSM state from the inference thread; a one-frame-stale value is
+        harmless here.
         """
 
         listen_green = self.fsm.state.endswith("WAIT_GREEN")
         listen_red = bool(self.fsm.finish_crossed)
+        seen_green = seen_red = False
         kept = []
         for det in detections:
             if det.cls in ("traffic_green", "traffic_red"):
@@ -387,41 +407,25 @@ class BisaAutonomousNode(Node):
                 )
                 if row_cls is None:
                     continue
+                seen_green = seen_green or row_cls == "traffic_green"
+                seen_red = seen_red or row_cls == "traffic_red"
                 det = replace(det, cls=row_cls)
                 if det.cls == "traffic_green" and not listen_green:
                     continue
                 if det.cls == "traffic_red" and not listen_red:
                     continue
             kept.append(det)
-        return kept
-
-    def _light_verdict(self, detections, frame):
-        """Raw classify_light verdict on the light boxes, ignoring mission phase.
-
-        This is exactly what the tuner reports: each YOLO light box is run
-        through ``classify_light`` and the result drives the /detect_green and
-        /detect_red monitor topics — green -> "green", red -> "red", nothing ->
-        None. Red wins if both somehow appear (fail-safe toward "stop"). Unlike
-        :meth:`_gate_traffic_detections`, no mission-phase or vote filtering is
-        applied, so the topics mirror the live verdict.
-        """
-
-        seen_green = seen_red = False
-        for det in detections:
-            if det.cls not in ("traffic_green", "traffic_red"):
-                continue
-            verdict, _scores = traffic_light.classify_light(frame, det.bbox, self.config)
-            seen_green = seen_green or verdict == "traffic_green"
-            seen_red = seen_red or verdict == "traffic_red"
-        if seen_red:
-            return "red"
-        if seen_green:
-            return "green"
-        return None
+        light_state = "red" if seen_red else "green" if seen_green else None
+        return light_state, kept
 
     def _inference_worker(self) -> None:
         """Runs YOLO off the executor thread so camera/control stay responsive."""
 
+        # Latency accounting so the CPU-only vehicle's real YOLO throughput is
+        # visible in the log — the numbers to tune imgsz/inference_hz against.
+        infer_count = 0
+        infer_time_sum = 0.0
+        last_report = time.perf_counter()
         while not self._infer_stop:
             with self._infer_lock:
                 frame = self._infer_frame
@@ -434,15 +438,33 @@ class BisaAutonomousNode(Node):
             proc = traffic_light.preprocess_frame(frame, self.config.color_correction)
             now_sec = self.get_clock().now().nanoseconds / 1e9
             previous_infer_time = self.detector.last_infer_time
+            infer_start = time.perf_counter()
             detections = self.detector.infer(proc, now_sec)
             if self.detector.last_infer_time != previous_infer_time:
                 # Inference actually ran; refresh buffer and status snapshot.
-                self.latest_detections_viz = detections
-                # Raw verdict for the monitor topics, taken before phase gating.
-                self.light_verdict = self._light_verdict(detections, proc)
-                detections = self._gate_traffic_detections(detections, proc)
-                self.det_buffer.push(detections)
-                self.latest_detections = detections
+                infer_count += 1
+                infer_time_sum += time.perf_counter() - infer_start
+                self.raw_detections = detections
+                # One classify_light pass yields both the raw monitor state and
+                # the phase-gated FSM detections.
+                self.light_state, gated = self._classify_and_gate(detections, proc)
+                self.det_buffer.push(gated)
+                self.fsm_detections = gated
+            # Report effective throughput every few seconds (debug_log only).
+            if self.debug_log and infer_count > 0:
+                report_elapsed = time.perf_counter() - last_report
+                if report_elapsed >= 3.0:
+                    avg_ms = 1000.0 * infer_time_sum / infer_count
+                    fps = infer_count / report_elapsed
+                    self.get_logger().info(
+                        f"YOLO infer: {avg_ms:.0f} ms/frame, {fps:.1f} FPS effective "
+                        f"(imgsz={self.config.detector.imgsz}, "
+                        f"hz_cap={self.config.detector.inference_hz}, "
+                        f"device={self.detector.device})"
+                    )
+                    infer_count = 0
+                    infer_time_sum = 0.0
+                    last_report = time.perf_counter()
 
     def publish_control(self, cmd: ControlCmd) -> None:
         """Publishes clamped normalized throttle/steering to the /control topic."""
@@ -472,7 +494,7 @@ class BisaAutonomousNode(Node):
             cmd = ControlCmd(0.0, self.last_cmd.steering)
         else:
             cmd = self.fsm.step(self.latest_lane, self.det_buffer, now_sec,
-                                 light_verdict=self.light_verdict)
+                                 light_state=self.light_state)
         self.last_cmd = cmd
         self.publish_control(cmd)
         # Status flags and the debug overlay are published here at control_hz,
@@ -498,13 +520,13 @@ class BisaAutonomousNode(Node):
         # Raw (ROI-gated) traffic-light boxes the detector currently sees, so it
         # is obvious whether a missing verdict is "no detection" vs "wrong color".
         n_light = sum(
-            1 for d in self.latest_detections_viz
+            1 for d in self.raw_detections
             if d.cls in ("traffic_green", "traffic_red")
         )
         green_streak = getattr(self.fsm, "_green_streak", 0)
         red_streak = getattr(self.fsm, "_red_streak", 0)
         self.get_logger().info(
-            f"state={self.fsm.state} verdict={self.light_verdict} "
+            f"state={self.fsm.state} light={self.light_state} "
             f"lights={n_light} g_streak={green_streak} r_streak={red_streak} "
             f"throttle={cmd.throttle:.2f} steering={cmd.steering:.2f} "
             f"lane_valid={lane.valid} err={lane.center_error:.2f}"

@@ -33,8 +33,8 @@ class LaneController:
 
         return previous + clamp(target - previous, -max_delta, max_delta)
 
-    def steering_from_lane(self, lane: LaneObs, steer_ff: float = 0.0, steer_limit: float = 0.80) -> float:
-        """Computes pure-pursuit lane steering plus mission feedforward.
+    def steering_from_lane(self, lane: LaneObs, steer_limit: float = 0.80) -> float:
+        """Computes pure-pursuit lane steering.
 
         The aim point sits ``lookahead_m`` ahead, laterally offset by the lane
         center error (shifted along the road bend by ``curve_blend``). The
@@ -53,7 +53,7 @@ class LaneController:
             lookahead = max(cfg.lookahead_m, 1e-3)
             alpha = math.atan2(lateral, lookahead)
             delta = math.atan2(2.0 * cfg.wheelbase_m * math.sin(alpha), lookahead)
-            raw = cfg.pp_gain * delta / math.radians(max(cfg.max_steer_deg, 1.0)) + steer_ff
+            raw = cfg.pp_gain * delta / math.radians(max(cfg.max_steer_deg, 1.0))
 
         raw = clamp(raw, -steer_limit, steer_limit)
         steer = self.rate_limit(raw, self.prev_steer, cfg.rate_limit_per_cmd)
@@ -99,16 +99,9 @@ class LaneController:
             self.prev_throttle = throttle
             return ControlCmd(throttle, steer)
 
-        steer = self.steering_from_lane(lane, steer_ff=0.0, steer_limit=steer_limit)
+        steer = self.steering_from_lane(lane, steer_limit=steer_limit)
         throttle = self.throttle_scheduler(cap, steer, lane.curvature, section_min=section_min)
         return ControlCmd(throttle, steer)
-
-    def hold_or_zero_steering(self) -> float:
-        """Slowly releases the last steering command while stopped."""
-
-        steer = self.rate_limit(0.0, self.prev_steer, self.config.steering.rate_limit_per_cmd)
-        self.prev_steer = steer
-        return steer
 
 
 class BaseCourseFSM:
@@ -127,7 +120,7 @@ class BaseCourseFSM:
         self._green_streak = 0
         self._red_streak = 0
 
-    def update_light(self, light_verdict) -> None:
+    def update_light(self, light_state) -> None:
         """Accumulates how long the classify_light verdict has held green/red.
 
         Called once per FSM tick with the latest verdict ("green"/"red"/None).
@@ -136,8 +129,8 @@ class BaseCourseFSM:
         frame never launches or stops the car.
         """
 
-        self._green_streak = self._green_streak + 1 if light_verdict == "green" else 0
-        self._red_streak = self._red_streak + 1 if light_verdict == "red" else 0
+        self._green_streak = self._green_streak + 1 if light_state == "green" else 0
+        self._red_streak = self._red_streak + 1 if light_state == "red" else 0
 
     def green_confirmed(self) -> bool:
         """True once green has held for ``light_confirm_frames`` ticks."""
@@ -160,21 +153,18 @@ class BaseCourseFSM:
 
         return now - self.enter_t
 
-    def finish_line_crossed(self, detector: DetectionBuffer, now: float) -> bool:
-        """Latches finish after elapsed time or optional finish_line detection."""
+    def finish_window_open(self, now: float) -> bool:
+        """Latches the red-listen finish window open after enough elapsed time.
 
-        if self.finish_crossed:
-            return True
-        if detector.stable_consecutive("finish_line", 2):
-            self.finish_crossed = True
-        elif now - self.start_t >= self.config.mission.finish_min_elapsed_sec:
+        The detect model has no finish_line class, so the finish window is a
+        pure mission timer: once ``finish_min_elapsed_sec`` has passed since
+        launch (so the start light is out of view), a confirmed red verdict is
+        allowed to stop the car. The latch never re-closes.
+        """
+
+        if not self.finish_crossed and now - self.start_t >= self.config.mission.finish_min_elapsed_sec:
             self.finish_crossed = True
         return self.finish_crossed
-
-    def likely_dynamic_zone(self, lane: LaneObs, now: float) -> bool:
-        """Estimates dynamic zone approach from mission elapsed time and lane context."""
-
-        return now - self.start_t >= self.config.mission.dynamic_zone_elapsed_sec or lane.curvature < 0.12
 
     def single_lane_reacquired(self, lane: LaneObs) -> bool:
         """Checks whether branch geometry has returned to one stable lane."""
@@ -194,7 +184,15 @@ class BaseCourseFSM:
 
 
 class OutCourseFSM(BaseCourseFSM):
-    """FSM for the Out/Base route: S-curve, fork, dynamic obstacle, finish."""
+    """FSM for the Out/Base route: green launch, S-curve, sign fork, red stop.
+
+    Reachable path:
+        OUT_WAIT_GREEN -> OUT_LAUNCH -> OUT_S_CURVE -> OUT_FORK_APPROACH
+        -> OUT_FORK_COMMIT -> OUT_POST_FORK -(confirmed red)-> OUT_FINISH_STOP
+
+    OUT_POST_FORK cruises to the finish; the red stop is handled by the global
+    gate in :meth:`step`, not by a dedicated finish-approach state.
+    """
 
     def __init__(self, config: AutonomousConfig, controller: LaneController):
         """Creates the OUT course state machine."""
@@ -223,7 +221,6 @@ class OutCourseFSM(BaseCourseFSM):
         virtual_lane = lane.with_center_error(target_error)
         steer = self.controller.steering_from_lane(
             virtual_lane,
-            steer_ff=0.0,
             steer_limit=self.config.steering.fork_limit,
         )
         throttle = self.controller.throttle_scheduler(
@@ -234,23 +231,22 @@ class OutCourseFSM(BaseCourseFSM):
         return ControlCmd(throttle, steer)
 
     def step(self, lane: LaneObs, detector: DetectionBuffer, now: float,
-             light_verdict=None) -> ControlCmd:
+             light_state=None) -> ControlCmd:
         """Runs one OUT-course FSM tick and returns the desired control command."""
 
         if self.start_t <= 0.0:
             self.start_t = now
             self.enter_t = now
-        self.update_light(light_verdict)
+        self.update_light(light_state)
 
-        # Arrival red-stop, independent of the intermediate state chain: once
-        # the finish window is open (enough time since launch, so the start
-        # light is out of view), a confirmed red verdict stops the car from ANY
-        # driving state. The detect model has no dynamic_marker/finish_line
-        # classes, so states like OUT_POST_FORK can never advance on detections
-        # alone; this gate keeps the red stop from depending on that progression.
+        # Arrival red-stop, independent of the intermediate state chain: once the
+        # finish window is open (enough time since launch, so the start light is
+        # out of view), a confirmed red verdict stops the car from ANY driving
+        # state. OUT_POST_FORK has no detection-driven exit, so this global gate
+        # is what actually ends the run.
         if (
             self.state not in ("OUT_WAIT_GREEN", "OUT_FINISH_STOP")
-            and self.finish_line_crossed(detector, now)
+            and self.finish_window_open(now)
             and self.red_confirmed()
         ):
             self.transition("OUT_FINISH_STOP", now)
@@ -259,8 +255,8 @@ class OutCourseFSM(BaseCourseFSM):
             cmd = ControlCmd(0.0, 0.0)
             if self.green_confirmed():
                 # Mission clock starts at launch, not at node startup, so the
-                # finish/dynamic-zone timers are unaffected by how long the
-                # car waited at the start light.
+                # finish timer is unaffected by how long the car waited at the
+                # start light.
                 self.start_t = now
                 self.transition("OUT_LAUNCH", now)
 
@@ -300,39 +296,13 @@ class OutCourseFSM(BaseCourseFSM):
                 self.transition("OUT_POST_FORK", now)
 
         elif self.state == "OUT_POST_FORK":
-            cap = self.config.throttle.post_fork_cap
-            limit = self.config.steering.post_fork_limit
-            section_min = self.config.throttle.post_fork_min
-            if self.likely_dynamic_zone(lane, now):
-                cap = self.config.throttle.dynamic_approach_cap
-                limit = self.config.steering.dynamic_limit
-                section_min = None
-            cmd = self.controller.lane_follow(lane, cap, limit, section_min=section_min)
-            if detector.stable_consecutive("dynamic_marker", self.config.detector.dynamic_detect_consecutive):
-                self.transition("OUT_DYNAMIC_STOP", now)
-
-        elif self.state == "OUT_DYNAMIC_STOP":
-            cmd = ControlCmd(0.0, self.controller.hold_or_zero_steering())
-            if self.elapsed(now) >= self.config.mission.dynamic_stop_hold_sec:
-                self.transition("OUT_DYNAMIC_WAIT_CLEAR", now)
-
-        elif self.state == "OUT_DYNAMIC_WAIT_CLEAR":
-            cmd = ControlCmd(0.0, 0.0)
-            if detector.not_seen_consecutive("dynamic_marker", self.config.detector.dynamic_clear_consecutive):
-                self.transition("OUT_RESUME", now)
-
-        elif self.state == "OUT_RESUME":
-            cap = self.config.throttle.dynamic_approach_cap if not lane.valid else self.config.throttle.resume_cap
-            cmd = self.controller.lane_follow(lane, cap, self.config.steering.resume_limit)
-            if lane.valid and self.elapsed(now) > self.config.mission.resume_min_sec:
-                self.transition("OUT_FINISH_APPROACH", now)
-
-        elif self.state == "OUT_FINISH_APPROACH":
-            # The red-stop itself is handled by the global gate above.
+            # Terminal cruise: follow the lane to the finish. The confirmed-red
+            # stop is handled by the global gate above.
             cmd = self.controller.lane_follow(
                 lane,
-                self.config.throttle.finish_cap,
-                self.config.steering.finish_limit,
+                self.config.throttle.post_fork_cap,
+                self.config.steering.post_fork_limit,
+                section_min=self.config.throttle.post_fork_min,
             )
 
         else:
@@ -356,7 +326,7 @@ class LaneTestFSM(BaseCourseFSM):
         self.state = "LANE_TEST"
 
     def step(self, lane: LaneObs, detector: DetectionBuffer, now: float,
-             light_verdict=None) -> ControlCmd:
+             light_state=None) -> ControlCmd:
         """Follows the lane every tick, capped by the speed band (ignores lights)."""
 
         if self.start_t <= 0.0:

@@ -7,9 +7,12 @@
 # running on the car and the vehicle does NOT stop. Reconnect and re-attach
 # to get your screen back.
 #
-# The car runs:   ros2 launch bisa vehicle.launch.py   (camera_node + control_node)
-# The PC runs:    ros2 launch bisa driving.launch.py route_mode:=OUT
-# Both machines must share the same ROS_DOMAIN_ID and LAN.
+# Two modes, selected with LAUNCH_FILE:
+#   onboard.launch.py (DEFAULT) -> full self-driving ON the car. Perception +
+#       mission FSM + control all run on the car's CPU; nodes talk over
+#       localhost, so NO PC and NO WiFi dongle are needed to drive.
+#   vehicle.launch.py           -> car only streams the camera; the PC runs
+#       driving.launch.py and computes. Needs both on the same LAN/domain.
 #
 # Usage (on the car):
 #   bash scripts/car_run.sh            # start (idempotent) then attach
@@ -19,6 +22,8 @@
 #   bash scripts/car_run.sh stop       # stop the car safely (neutral throttle)
 #
 # Env overrides:
+#   ROUTE_MODE=IN   bash scripts/car_run.sh            # onboard course direction
+#   LAUNCH_FILE=vehicle.launch.py   bash scripts/car_run.sh   # PC-offload mode
 #   WS=~/D-Racer-Kit   ROS_DOMAIN_ID=7   WIFI_IFACE=wlan0   bash scripts/car_run.sh
 #
 set -euo pipefail
@@ -26,6 +31,10 @@ set -euo pipefail
 SESSION="${SESSION:-dracer}"
 ROS_DISTRO_NAME="${ROS_DISTRO:-humble}"
 DOMAIN="${ROS_DOMAIN_ID:-0}"
+# Default = full self-driving on the car (no PC/WiFi). Set to vehicle.launch.py
+# to fall back to streaming-to-PC mode.
+LAUNCH_FILE="${LAUNCH_FILE:-onboard.launch.py}"
+ROUTE_MODE="${ROUTE_MODE:-OUT}"
 
 # Default workspace = the repo this script lives in (…/scripts/car_run.sh -> repo root).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -71,17 +80,25 @@ start() {
 
   disable_wifi_powersave
 
-  info "Starting vehicle.launch.py in tmux session '$SESSION'"
+  info "Starting ${LAUNCH_FILE} in tmux session '$SESSION'"
   info "  workspace   = $WS"
   info "  ROS distro  = $ROS_DISTRO_NAME"
   info "  ROS_DOMAIN_ID = $DOMAIN"
+
+  # onboard.launch.py accepts route_mode; vehicle.launch.py does not, so only
+  # pass it for the onboard (full self-driving) mode.
+  local launch_args=""
+  if [ "$LAUNCH_FILE" = "onboard.launch.py" ]; then
+    launch_args="route_mode:=${ROUTE_MODE}"
+    info "  route_mode  = $ROUTE_MODE (full self-driving on the car)"
+  fi
 
   # Build the env inside the pane via send-keys (avoids nested-quote issues).
   tmux new-session -d -s "$SESSION" -n vehicle
   tmux send-keys -t "$SESSION" "source /opt/ros/${ROS_DISTRO_NAME}/setup.bash" C-m
   tmux send-keys -t "$SESSION" "source '${WS}/install/setup.bash'" C-m
   tmux send-keys -t "$SESSION" "export ROS_DOMAIN_ID=${DOMAIN} ROS_LOCALHOST_ONLY=0" C-m
-  tmux send-keys -t "$SESSION" "ros2 launch bisa vehicle.launch.py" C-m
+  tmux send-keys -t "$SESSION" "ros2 launch bisa ${LAUNCH_FILE} ${launch_args}" C-m
 
   info "Started. The car keeps running even if SSH drops."
   info "  Attach (watch logs): tmux attach -t $SESSION      (detach: Ctrl+b then d)"

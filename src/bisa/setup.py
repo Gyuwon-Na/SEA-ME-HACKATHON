@@ -14,7 +14,14 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
-        (os.path.join('share', package_name, 'checkpoints'), glob('checkpoints/*')),
+        # Top-level checkpoint files only (glob('*') would also match the
+        # best_ncnn_model/ dir, which data_files cannot copy as a unit).
+        (os.path.join('share', package_name, 'checkpoints'),
+         [p for p in glob('checkpoints/*') if os.path.isfile(p)]),
+        # NCNN export is a directory of files (param/bin/metadata) — install
+        # each file into checkpoints/best_ncnn_model/ so YOLO() can load it.
+        (os.path.join('share', package_name, 'checkpoints', 'best_ncnn_model'),
+         [p for p in glob('checkpoints/best_ncnn_model/*') if os.path.isfile(p)]),
     ],
     install_requires=['setuptools', 'PyYAML'],
     zip_safe=True,
@@ -26,7 +33,11 @@ setup(
         'console_scripts': [
             'bisa_autonomous_node = bisa.autonomous_driving_node:main',
             'viz_node = bisa.viz_node:main',
+            'power_gui_node = bisa.power_gui_node:main',
+            'system_telemetry_node = bisa.system_telemetry_node:main',
             'param_gui_node = bisa.param_gui_node:main',
+            'traffic_light_tuner = bisa.traffic_light:main',
+            'dash_line_tuner = bisa.dash_line_tuner:main',
         ],
     },
 )

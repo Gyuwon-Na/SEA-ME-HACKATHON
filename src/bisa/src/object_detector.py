@@ -22,7 +22,6 @@ class Detection:
     bbox: tuple[float, float, float, float]
     cx: float
     cy: float
-    area: float
 
 
 class DetectionBuffer:
@@ -49,50 +48,20 @@ class DetectionBuffer:
 
         return self.count(cls, n) >= k
 
-    def consecutive_count(self, cls: str) -> int:
-        """Counts class detections in consecutive frames ending at the latest frame."""
-
-        total = 0
-        for frame in reversed(self.frames):
-            if any(det.cls == cls for det in frame):
-                total += 1
-            else:
-                break
-        return total
-
-    def stable_consecutive(self, cls: str, frames: int) -> bool:
-        """Returns true when a class appears for the requested consecutive frames."""
-
-        return self.consecutive_count(cls) >= frames
-
-    def not_seen_consecutive(self, cls: str, frames: int) -> bool:
-        """Returns true when a class is absent for the requested consecutive frames."""
-
-        if len(self.frames) < frames:
-            return False
-        recent = list(self.frames)[-frames:]
-        return all(not any(det.cls == cls for det in frame) for frame in recent)
-
-    def best(self, cls: str) -> Detection | None:
-        """Returns the highest-confidence latest detection for the requested class."""
-
-        if not self.frames:
-            return None
-        candidates = [det for det in self.frames[-1] if det.cls == cls]
-        if not candidates:
-            return None
-        return max(candidates, key=lambda item: item.conf)
 
 
 class BestPthDetector:
     """Runs the fine-tuned best.pt model when ultralytics is available."""
 
-    # The shipped best.pt is a 4-class image classifier whose label names differ
-    # from the mission class names the FSM expects. Translate them here so a
-    # classification checkpoint drops straight into the detection/vote pipeline.
-    CLASSIFY_NAME_ALIASES = {
+    # Checkpoint label names differ from the mission class names the FSM
+    # expects (and differ between retrained models). Mapping by NAME through
+    # this table — instead of by class index — means a retrained model with a
+    # different index order can never silently swap red and green.
+    NAME_ALIASES = {
         "green_light": "traffic_green",
         "red_light": "traffic_red",
+        "light_green": "traffic_green",
+        "light_red": "traffic_red",
         "left_turn": "sign_left",
         "right_turn": "sign_right",
     }
@@ -107,23 +76,43 @@ class BestPthDetector:
         self.task = "detect"
         self.device = "cpu"
         self.last_infer_time = 0.0
-        self.load_error: Exception | None = None
 
     def _resolve_device(self) -> str:
-        """Picks the inference device, auto-detecting a CUDA GPU on the PC."""
+        """Picks the inference device: CUDA GPU, Vulkan GPU, or CPU.
+
+        Priority for 'auto': CUDA (PC GPU) → Vulkan (embedded GPU, e.g.
+        TOPST D3-G PowerVR via NCNN) → CPU fallback.
+        """
 
         preference = str(getattr(self.config.detector, "device", "auto")).lower()
         if preference in ("cpu",):
             return "cpu"
-        if preference in ("cuda", "gpu", "0", "cuda:0"):
+        if preference in ("cuda", "cuda:0"):
             return "cuda:0"
-        try:  # 'auto'
+        if preference.startswith("vulkan"):
+            # Accept 'vulkan', 'vulkan:0', 'vulkan:1', etc.
+            return preference if ":" in preference else "vulkan:0"
+        if preference in ("gpu", "0"):
+            # Generic 'gpu' — try CUDA first, then Vulkan.
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    return "cuda:0"
+            except Exception:
+                pass
+            return "vulkan:0"
+        # 'auto' — cascade CUDA → Vulkan → CPU.
+        try:
             import torch
-
             if torch.cuda.is_available():
                 return "cuda:0"
         except Exception:  # pragma: no cover - depends on target env.
             pass
+        # On embedded boards with Vulkan-capable GPUs (PowerVR, Mali, etc.),
+        # NCNN can use Vulkan compute. Ultralytics NCNN models accept
+        # device='vulkan:0' to offload inference to the GPU.
+        if self._is_ncnn_model():
+            return "vulkan:0"
         return "cpu"
 
     def _log_warn(self, message: str) -> None:
@@ -132,8 +121,18 @@ class BestPthDetector:
         if self.logger is not None:
             self.logger.warning(message)
 
+    def _is_ncnn_model(self) -> bool:
+        """Returns True when the configured model path points to an NCNN export."""
+
+        p = Path(self.model_path)
+        # NCNN exports are directories containing .param + .bin files, or the
+        # path ends with '_ncnn_model' by ultralytics convention.
+        if p.is_dir():
+            return (p / "model.ncnn.param").exists() or str(p).endswith("_ncnn_model")
+        return False
+
     def load_model(self) -> bool:
-        """Loads the YOLO model from checkpoints/best.pth on first use."""
+        """Loads the YOLO model from checkpoints on first use."""
 
         if self.model is not None:
             return True
@@ -143,23 +142,27 @@ class BestPthDetector:
             self._log_warn(f"Detector model not found: {self.model_path}")
             return False
         try:
-            import torch
             from ultralytics import YOLO
 
             self.device = self._resolve_device()
             # Only cap CPU threads when falling back to CPU (e.g. the all-on-vehicle
-            # launch). On the PC GPU path torch manages the device itself.
+            # launch). On GPU paths the runtime manages the device itself.
             if self.device == "cpu":
-                torch.set_num_threads(max(1, min(4, (os.cpu_count() or 4) - 1)))
+                try:
+                    import torch
+                    torch.set_num_threads(max(1, min(4, (os.cpu_count() or 4) - 1)))
+                except ImportError:
+                    pass  # NCNN-only install may lack torch
             self.model = YOLO(self.model_path)
             self.task = str(getattr(self.model, "task", "detect"))
             if self.logger is not None:
+                backend = "NCNN" if self._is_ncnn_model() else "PyTorch"
                 self.logger.info(
-                    f"Detector loaded on device={self.device} (task={self.task})"
+                    f"Detector loaded: backend={backend}, device={self.device} "
+                    f"(task={self.task})"
                 )
             return True
         except Exception as exc:  # pragma: no cover - depends on target vehicle env.
-            self.load_error = exc
             self._log_warn(f"Failed to load detector model: {exc}")
             return False
 
@@ -212,7 +215,6 @@ class BestPthDetector:
                     bbox=(x1, y1, x2, y2),
                     cx=(x1 + x2) / 2.0,
                     cy=(y1 + y2) / 2.0,
-                    area=max(0.0, (x2 - x1) * (y2 - y1)),
                 )
                 if self.in_expected_roi(det, frame_bgr.shape[1], frame_bgr.shape[0]):
                     detections.append(det)
@@ -228,7 +230,7 @@ class BestPthDetector:
         conf = float(probs.top1conf)
         model_names = getattr(self.model, "names", {}) or {}
         raw_name = str(model_names.get(top1, top1))
-        cls_name = self.CLASSIFY_NAME_ALIASES.get(raw_name, raw_name)
+        cls_name = self.NAME_ALIASES.get(raw_name, raw_name)
         if conf < self.config.detector.conf.get(cls_name, 0.55):
             return []
         return [
@@ -238,13 +240,21 @@ class BestPthDetector:
                 bbox=(0.0, 0.0, float(width), float(height)),
                 cx=width / 2.0,
                 cy=height / 2.0,
-                area=float(width * height),
             )
         ]
 
     def _class_name_from_index(self, cls_index: int) -> str:
-        """Maps model class IDs to mission class names via CLASS_MAP."""
+        """Maps model class IDs to mission class names via model names + aliases.
 
+        The model's own ``names`` metadata is authoritative; the config
+        ``class_map`` is only a fallback for checkpoints that lack names.
+        """
+
+        model_names = getattr(self.model, "names", {}) or {}
+        raw_name = model_names.get(cls_index)
+        if raw_name is not None:
+            raw_name = str(raw_name)
+            return self.NAME_ALIASES.get(raw_name, raw_name)
         for name, index in self.config.detector.class_map.items():
             if int(index) == cls_index:
                 return name
@@ -257,8 +267,6 @@ class BestPthDetector:
             roi = self.config.roi.detector_light
         elif detection.cls.startswith("sign"):
             roi = self.config.roi.detector_sign
-        elif detection.cls == "dynamic_marker":
-            roi = self.config.roi.detector_dynamic
         else:
             return True
 

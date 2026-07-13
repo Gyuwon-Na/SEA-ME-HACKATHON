@@ -15,9 +15,6 @@ class ArucoMarker:
     """One detected ArUco marker in original image coordinates."""
 
     id: int
-    corners: np.ndarray  # shape (4, 2) float
-    cx: float
-    cy: float
     bbox: tuple[float, float, float, float]  # x1, y1, x2, y2
 
 
@@ -97,14 +94,6 @@ class ArucoDetector:
                 pts = corner.reshape(4, 2).astype(float)
                 x1, y1 = float(pts[:, 0].min()), float(pts[:, 1].min())
                 x2, y2 = float(pts[:, 0].max()), float(pts[:, 1].max())
-                markers.append(
-                    ArucoMarker(
-                        id=int(marker_id),
-                        corners=pts,
-                        cx=float(pts[:, 0].mean()),
-                        cy=float(pts[:, 1].mean()),
-                        bbox=(x1, y1, x2, y2),
-                    )
-                )
+                markers.append(ArucoMarker(id=int(marker_id), bbox=(x1, y1, x2, y2)))
         self.last_markers = markers
         return markers

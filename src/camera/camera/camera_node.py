@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 import cv2
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
@@ -30,6 +31,11 @@ class CameraNode(Node):
         self.declare_parameter('mipi_camera_device', '/dev/video0')
         self.declare_parameter('flip_method', 'rotate-180')
         self.declare_parameter('jpeg_quality', 90)
+        # USB-only: republish the camera's native MJPG frames without a
+        # decode->re-encode round-trip (saves ~1 CPU core on the car). Falls
+        # back automatically to the decode+encode pipeline if the camera can't
+        # deliver a consumer-decodable JPEG at the configured resolution.
+        self.declare_parameter('mjpg_passthrough', True)
         self.declare_parameter('debug_log', True)
 
         self.vehicle_config_file = os.path.expanduser(
@@ -47,8 +53,12 @@ class CameraNode(Node):
         if not 0 <= jpeg_quality <= 100:
             raise ValueError('jpeg_quality must be in range [0, 100]')
         self.debug_log = bool(self.get_parameter('debug_log').value)
+        self.mjpg_passthrough = bool(self.get_parameter('mjpg_passthrough').value)
         self.publish_hz = publish_hz
         self.jpeg_quality = jpeg_quality
+        # True once a raw-MJPG capture is active; timer_callback then republishes
+        # frames verbatim instead of re-encoding them.
+        self.passthrough = False
 
         self.image_width, self.image_height = self.load_image_size()
         self.usb_cam_enabled, self.mipi_cam_enabled = self.load_camera_source_flags()
@@ -172,6 +182,18 @@ class CameraNode(Node):
         if hasattr(self, 'cap') and self.cap is not None:
             self.cap.release()
             self.cap = None
+        self.passthrough = False
+
+        # Prefer USB MJPG passthrough: the webcam already emits JPEG, so decoding
+        # it (jpegdec) only to re-encode it in timer_callback is pure CPU waste.
+        # Republish the native JPEG bytes instead. Only engages when the frames
+        # are decodable by consumers (cv2.imdecode) at the configured resolution.
+        if self.usb_cam_enabled and self.mjpg_passthrough:
+            if self.open_mjpg_passthrough():
+                return True
+            self.get_logger().warning(
+                'MJPG passthrough unavailable; falling back to decode+encode pipeline'
+            )
 
         for candidate_pipeline in self.build_candidate_pipelines(self.camera_device, self.flip_method):
             cap = cv2.VideoCapture(candidate_pipeline, cv2.CAP_GSTREAMER)
@@ -187,6 +209,60 @@ class CameraNode(Node):
         self.cap = None
         self.pipeline = None
         return False
+
+    def open_mjpg_passthrough(self):
+        """Open the USB camera in raw-MJPG mode so frames are republished as-is.
+
+        Returns True only if the camera delivers JPEG frames that (a) start with
+        the JPEG SOI marker, (b) decode with cv2.imdecode (the same call every
+        consumer uses — some webcams emit Huffman-table-less MJPEG that fails
+        here), and (c) match the configured resolution. Otherwise releases the
+        capture and returns False so the caller uses the decode+encode pipeline.
+        """
+
+        cap = cv2.VideoCapture(self.camera_device, cv2.CAP_V4L2)
+        if not cap.isOpened():
+            cap.release()
+            return False
+
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, float(self.image_width))
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, float(self.image_height))
+        cap.set(cv2.CAP_PROP_FPS, 30.0)
+        # 0 = hand back the raw compressed buffer instead of a decoded BGR frame.
+        cap.set(cv2.CAP_PROP_CONVERT_RGB, 0.0)
+
+        validated = False
+        for _ in range(5):
+            ret, buf = cap.read()
+            if not ret or buf is None:
+                continue
+            raw = np.asarray(buf, dtype=np.uint8).reshape(-1)
+            if raw.size < 2 or raw[0] != 0xFF or raw[1] != 0xD8:
+                # CONVERT_RGB was ignored (decoded frame) or not JPEG; unsafe.
+                break
+            decoded = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+            if decoded is None:
+                break  # consumers' cv2.imdecode would also fail on this frame
+            height, width = decoded.shape[:2]
+            if (width, height) != (self.image_width, self.image_height):
+                self.get_logger().warning(
+                    f'MJPG passthrough resolution {width}x{height} != '
+                    f'{self.image_width}x{self.image_height}; using decode pipeline'
+                )
+                break
+            validated = True
+            break
+
+        if not validated:
+            cap.release()
+            return False
+
+        self.cap = cap
+        self.passthrough = True
+        self.pipeline = f'v4l2 MJPG passthrough (device={self.camera_device})'
+        self.get_logger().info(f'Camera capture opened with {self.pipeline}')
+        return True
 
     def load_camera_device_overrides(self, default_usb_camera_device, default_mipi_camera_device):
         if not os.path.exists(self.vehicle_config_file):
@@ -219,20 +295,26 @@ class CameraNode(Node):
             self.get_logger().warning('Failed to read frame')
             return
 
-        success, encoded = cv2.imencode(
-            '.jpg',
-            frame,
-            [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality],
-        )
-        if not success:
-            self.get_logger().warning('Failed to encode frame as JPEG')
-            return
+        if self.passthrough:
+            # frame is already the camera's native JPEG buffer — republish as-is,
+            # no decode and no re-encode.
+            data = np.asarray(frame, dtype=np.uint8).tobytes()
+        else:
+            success, encoded = cv2.imencode(
+                '.jpg',
+                frame,
+                [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality],
+            )
+            if not success:
+                self.get_logger().warning('Failed to encode frame as JPEG')
+                return
+            data = encoded.tobytes()
 
         msg = CompressedImage()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'camera'
         msg.format = 'jpeg'
-        msg.data = encoded.tobytes()
+        msg.data = data
 
         self.publisher_.publish(msg)
         if self.debug_log:

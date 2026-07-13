@@ -31,9 +31,6 @@ class LaneObs:
     fork_seen: bool = False
     left_branch: Optional[PathCandidate] = None
     right_branch: Optional[PathCandidate] = None
-    rotary_seen: bool = False
-    rotary_exit_seen: bool = False
-    lost_reason: str = ""
 
     def with_center_error(self, center_error: float) -> "LaneObs":
         """Returns a copy with a different target error for virtual branch control."""
@@ -48,7 +45,7 @@ def clamp(value: float, low: float, high: float) -> float:
 
 
 class LanePerception:
-    """Builds road masks, lane centers, fork candidates, and rotary hints."""
+    """Builds road masks, lane centers, and fork candidates."""
 
     def __init__(self, config: AutonomousConfig):
         """Initializes kernels and keeps the last valid center for dropout recovery."""
@@ -62,12 +59,19 @@ class LanePerception:
         self.last_viz: dict = {}
 
     def build_road_mask(self, frame_bgr: np.ndarray) -> np.ndarray:
-        """Extracts the black track area with HSV thresholding and morphology."""
+        """Extracts the drivable road area with LAB thresholding and morphology."""
 
-        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        lower = np.array(self.config.lane.black_hsv_lower, dtype=np.uint8)
-        upper = np.array(self.config.lane.black_hsv_upper, dtype=np.uint8)
-        mask = cv2.inRange(hsv, lower, upper)
+        cfg = self.config.lane
+        lab = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2LAB)
+        l_ch, a_ch, b_ch = cv2.split(lab)
+        clahe = cv2.createCLAHE(
+            clipLimit=max(float(cfg.lab_clahe_clip), 0.01),
+            tileGridSize=(max(1, int(cfg.lab_clahe_tile)),) * 2,
+        )
+        lab = cv2.merge((clahe.apply(l_ch), a_ch, b_ch))
+        lower = np.array([cfg.lab_l_min, cfg.lab_a_min, cfg.lab_b_min], dtype=np.uint8)
+        upper = np.array([cfg.lab_l_max, cfg.lab_a_max, cfg.lab_b_max], dtype=np.uint8)
+        mask = cv2.inRange(lab, lower, upper)
         open_size = max(1, int(self.config.lane.morph_open_kernel))
         close_size = max(1, int(self.config.lane.morph_close_kernel))
         open_kernel = np.ones((open_size, open_size), dtype=np.uint8)
@@ -82,7 +86,10 @@ class LanePerception:
         try:
             lab = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2Lab)
             l_channel, _, _ = cv2.split(lab)
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            clahe = cv2.createCLAHE(
+                clipLimit=max(float(self.config.lane.lab_clahe_clip), 0.01),
+                tileGridSize=(max(1, int(self.config.lane.lab_clahe_tile)),) * 2,
+            )
             return clahe.apply(l_channel)
         except cv2.error:
             return np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
@@ -145,17 +152,17 @@ class LanePerception:
         return ((float(x_top), int(top_y)), (float(x_bot), int(height)))
 
     def average_hough_lanes(
-        self, frame_bgr: np.ndarray, record: bool = False
+        self, frame_bgr: np.ndarray, record: bool = False, viz_out: dict | None = None
     ) -> tuple[Optional[float], bool, bool]:
         """Computes lane center from Canny/Hough lines as in the ERP reference code."""
 
         height, width = frame_bgr.shape[:2]
         top_y = int(self.config.lane.hough_roi_top_ratio * height)
-        if record:
-            self.last_viz["hough_left"] = None
-            self.last_viz["hough_right"] = None
-            self.last_viz["hough_segments"] = []
-            self.last_viz["hough_top_y"] = top_y
+        if record and viz_out is not None:
+            viz_out["hough_left"] = None
+            viz_out["hough_right"] = None
+            viz_out["hough_segments"] = []
+            viz_out["hough_top_y"] = top_y
         l_channel = self.get_l_channel(frame_bgr)
         blur = cv2.GaussianBlur(l_channel, (5, 5), 0)
         edges = cv2.Canny(
@@ -167,6 +174,10 @@ class LanePerception:
         vertices = np.array([[(0, height), (0, top_y), (width, top_y), (width, height)]])
         cv2.fillPoly(roi, vertices, 255)
         roi_edges = cv2.bitwise_and(edges, roi)
+        if record and viz_out is not None:
+            # Shown in the lane mask debug view so the canny/hough sliders have
+            # a visible effect (this is exactly what HoughLinesP consumes).
+            viz_out["edges"] = roi_edges
         lines = cv2.HoughLinesP(
             roi_edges,
             1,
@@ -178,24 +189,34 @@ class LanePerception:
         if lines is None:
             return None, False, False
 
-        left_fit: list[tuple[float, float]] = []
-        right_fit: list[tuple[float, float]] = []
-        for raw_line in lines:
-            x1, y1, x2, y2 = raw_line.reshape(4)
-            if x1 == x2:
-                continue
-            slope, intercept = np.polyfit((x1, x2), (y1, y2), 1)
-            if slope < -self.config.lane.hough_slope_min_abs:
-                left_fit.append((float(slope), float(intercept)))
-                if record:
-                    self.last_viz["hough_segments"].append((int(x1), int(y1), int(x2), int(y2)))
-            elif slope > self.config.lane.hough_slope_min_abs:
-                right_fit.append((float(slope), float(intercept)))
-                if record:
-                    self.last_viz["hough_segments"].append((int(x1), int(y1), int(x2), int(y2)))
+        pts = lines.reshape(-1, 4).astype(float)
+        x1, y1, x2, y2 = pts[:, 0], pts[:, 1], pts[:, 2], pts[:, 3]
 
-        left_present = bool(left_fit)
-        right_present = bool(right_fit)
+        valid = x1 != x2
+        x1, y1, x2, y2 = x1[valid], y1[valid], x2[valid], y2[valid]
+
+        slopes = (y2 - y1) / (x2 - x1)
+        intercepts = y1 - slopes * x1
+
+        min_abs = self.config.lane.hough_slope_min_abs
+        left_mask = slopes < -min_abs
+        right_mask = slopes > min_abs
+
+        left_slopes, left_intercepts = slopes[left_mask], intercepts[left_mask]
+        right_slopes, right_intercepts = slopes[right_mask], intercepts[right_mask]
+
+        if record and viz_out is not None:
+            for m_mask in (left_mask, right_mask):
+                for ix in np.where(m_mask)[0]:
+                    viz_out["hough_segments"].append(
+                        (int(x1[ix]), int(y1[ix]), int(x2[ix]), int(y2[ix]))
+                    )
+
+        left_fit = list(zip(left_slopes.tolist(), left_intercepts.tolist()))
+        right_fit = list(zip(right_slopes.tolist(), right_intercepts.tolist()))
+
+        left_present = len(left_fit) > 0
+        right_present = len(right_fit) > 0
         if not left_present and not right_present:
             return None, False, False
 
@@ -204,13 +225,13 @@ class LanePerception:
         if left_present:
             slope, intercept = np.average(left_fit, axis=0)
             x_targets.append((top_y - intercept) / slope)
-            if record:
-                self.last_viz["hough_left"] = self._line_endpoints(slope, intercept, top_y, height)
+            if record and viz_out is not None:
+                viz_out["hough_left"] = self._line_endpoints(slope, intercept, top_y, height)
         if right_present:
             slope, intercept = np.average(right_fit, axis=0)
             x_targets.append((top_y - intercept) / slope)
-            if record:
-                self.last_viz["hough_right"] = self._line_endpoints(slope, intercept, top_y, height)
+            if record and viz_out is not None:
+                viz_out["hough_right"] = self._line_endpoints(slope, intercept, top_y, height)
 
         if left_present and right_present:
             center_x = float(np.average(x_targets))
@@ -252,45 +273,21 @@ class LanePerception:
         target_error = (full_width / 2.0 - center_x) / (full_width / 2.0)
         return PathCandidate(clamp(target_error, -1.0, 1.0), area_ratio, center_x)
 
-    def detect_rotary_candidates(self, mask: np.ndarray) -> tuple[bool, bool]:
-        """Estimates rotary presence and exit branches from contour shape cues."""
-
-        height, width = mask.shape[:2]
-        mid = self.region_of_interest(mask, self.config.roi.mid_y0, 1.0)
-        if mid.size == 0:
-            return False, False
-
-        contours, _ = cv2.findContours(mid, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            return False, False
-        largest = max(contours, key=cv2.contourArea)
-        area_ratio = cv2.contourArea(largest) / float(mid.size)
-        perimeter = max(cv2.arcLength(largest, True), 1.0)
-        circularity = 4.0 * np.pi * cv2.contourArea(largest) / (perimeter * perimeter)
-        rotary_seen = (
-            area_ratio >= self.config.lane.rotary_area_ratio
-            and circularity >= self.config.lane.rotary_circularity_min
-        )
-
-        far = self.region_of_interest(mask, self.config.roi.far_y0, self.config.roi.far_y1)
-        left_pixels = cv2.countNonZero(far[:, : width // 3]) if far.size else 0
-        right_pixels = cv2.countNonZero(far[:, 2 * width // 3 :]) if far.size else 0
-        exit_seen = rotary_seen and max(left_pixels, right_pixels) > far.size * 0.03
-        return rotary_seen, exit_seen
-
     def _record_obs_viz(self, width, height, near_center, mid_center, far_center,
-                        lane_center, center_error, roi_rect) -> None:
+                        lane_center, center_error, roi_rect, viz_out: dict | None = None) -> None:
         """Stores ROI bands and centers for the PC debug overlay.
 
         Coordinates are recorded in ROI-local space; ``roi_offset`` lets the
         overlay translate them back onto the full camera frame.
         """
 
+        target = viz_out if viz_out is not None else self.last_viz
+
         def band(y0_ratio, y1_ratio):
             return (int(clamp(y0_ratio, 0.0, 1.0) * height), int(clamp(y1_ratio, 0.0, 1.0) * height))
 
         x0, y0, roi_w, roi_h = roi_rect
-        self.last_viz.update({
+        target.update({
             "width": int(width),
             "height": int(height),
             "near_band": band(self.config.roi.near_y0, 1.0),
@@ -308,6 +305,10 @@ class LanePerception:
     def compute_lane_obs(self, frame_bgr: np.ndarray, collect_viz: bool = False) -> LaneObs:
         """Computes a full lane observation from one decoded BGR image."""
 
+        # Thread safety: build viz data in a local dict, then swap atomically
+        # at the end so control_loop never sees a half-built dict.
+        viz_tmp: dict = {} if collect_viz else self.last_viz
+
         full_height, full_width = frame_bgr.shape[:2]
         x0, y0, roi_w, roi_h = self.lane_roi_rect(full_width, full_height)
         roi_rect = (x0, y0, roi_w, roi_h)
@@ -316,6 +317,11 @@ class LanePerception:
         roi_frame = frame_bgr[y0:y0 + roi_h, x0:x0 + roi_w]
 
         mask = self.build_road_mask(roi_frame)
+        if collect_viz:
+            # Shown in the lane mask debug view: the binarized road mask, so the
+            # HSV/LAB threshold and morphology sliders have a visible effect.
+            viz_tmp["road_mask"] = mask
+            viz_tmp["frame_size"] = (int(full_width), int(full_height))
         height, width = mask.shape[:2]
         mid = self.region_of_interest(mask, self.config.roi.mid_y0, self.config.roi.mid_y1)
         far = self.region_of_interest(mask, self.config.roi.far_y0, self.config.roi.far_y1)
@@ -325,7 +331,7 @@ class LanePerception:
         # average -> lane center from the left/right line x at the ROI top. This
         # always runs (the PC does the heavy compute), matching the reference which
         # is purely Hough-line based rather than road-mask based.
-        hough_center, _, _ = self.average_hough_lanes(roi_frame, record=collect_viz)
+        hough_center, _, _ = self.average_hough_lanes(roi_frame, record=collect_viz, viz_out=viz_tmp)
         near_center = hough_center
         if near_center is None:
             # Fall back to the black-road-mask centroid only when no lane line was
@@ -333,16 +339,17 @@ class LanePerception:
             near = self.region_of_interest(mask, self.config.roi.near_y0, 1.0)
             near_center = self.contour_center_x(near, self.config.lane.min_component_area_ratio)
 
-        # Far/mid centroids stay mask-based; they feed curvature and fork/rotary
-        # cues the reference never computes but the mission FSM depends on.
+        # Far/mid centroids stay mask-based; they feed curvature and fork cues
+        # the reference never computes but the mission FSM depends on.
         mid_center = self.contour_center_x(mid, self.config.lane.min_component_area_ratio)
         far_center = self.contour_center_x(far, self.config.lane.min_component_area_ratio)
 
         if near_center is None:
             if collect_viz:
                 self._record_obs_viz(width, height, None, mid_center, far_center,
-                                     None, self.prev_center_error, roi_rect)
-            return LaneObs(valid=False, center_error=self.prev_center_error, lost_reason="no_road_center")
+                                     None, self.prev_center_error, roi_rect, viz_out=viz_tmp)
+                self.last_viz = viz_tmp
+            return LaneObs(valid=False, center_error=self.prev_center_error)
 
         # Steering error is measured against the full-frame center (vehicle
         # heading), so translate the ROI-local center back into frame x.
@@ -363,11 +370,11 @@ class LanePerception:
             curvature = max(curvature, clamp(abs(mid_or_near - near_center) / max(float(full_width), 1.0) * 2.0, 0.0, 1.0))
 
         fork_seen, left_branch, right_branch = self.detect_fork_candidates(mask)
-        rotary_seen, rotary_exit_seen = self.detect_rotary_candidates(mask)
         self.prev_center_error = clamp(center_error, -1.0, 1.0)
         if collect_viz:
             self._record_obs_viz(width, height, near_center, mid_center, far_center,
-                                 near_center, self.prev_center_error, roi_rect)
+                                 near_center, self.prev_center_error, roi_rect, viz_out=viz_tmp)
+            self.last_viz = viz_tmp  # atomic reference swap
         return LaneObs(
             valid=True,
             center_error=self.prev_center_error,
@@ -376,6 +383,4 @@ class LanePerception:
             fork_seen=fork_seen,
             left_branch=left_branch,
             right_branch=right_branch,
-            rotary_seen=rotary_seen,
-            rotary_exit_seen=rotary_exit_seen,
         )

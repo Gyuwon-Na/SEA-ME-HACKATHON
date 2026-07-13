@@ -8,6 +8,7 @@ add_compile_options(-Wall -Wextra -Wpedantic)
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rcl_interfaces REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -18,7 +19,7 @@ find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs aruco)
 add_executable(bisa_autonomous_node src/bisa_autonomous_node.cpp)
 ament_target_dependencies(
   bisa_autonomous_node
-  rclcpp ament_index_cpp sensor_msgs std_msgs control_msgs yaml_cpp_vendor
+  rclcpp rcl_interfaces ament_index_cpp sensor_msgs std_msgs control_msgs yaml_cpp_vendor
 )
 target_include_directories(bisa_autonomous_node PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(bisa_autonomous_node ${OpenCV_LIBRARIES} yaml-cpp)

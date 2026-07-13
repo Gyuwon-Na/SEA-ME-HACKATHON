@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import time
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import cv2
 import numpy as np
 import rclpy
 from ament_index_python.packages import get_package_share_directory
+from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CompressedImage
@@ -25,6 +27,36 @@ CLASS_IDS = {
     "traffic_green": 1,
     "sign_left": 2,
     "sign_right": 3,
+}
+
+LIVE_PARAMETER_PATHS = {
+    "detector.imgsz": ("detector", "imgsz"),
+    "detector.inference_hz": ("detector", "inference_hz"),
+    "detector.conf.traffic_green": ("detector", "conf", "traffic_green"),
+    "detector.conf.traffic_red": ("detector", "conf", "traffic_red"),
+    "detector.conf.sign_left": ("detector", "conf", "sign_left"),
+    "detector.conf.sign_right": ("detector", "conf", "sign_right"),
+    "color_correction.enabled": ("color_correction", "enabled"),
+    "color_correction.clahe_clip": ("color_correction", "clahe_clip"),
+    "color_correction.saturation_boost": ("color_correction", "saturation_boost"),
+    "color_correction.brightness": ("color_correction", "brightness"),
+    "color_correction.contrast": ("color_correction", "contrast"),
+    "color_correction.saturation": ("color_correction", "saturation"),
+    "color_correction.gamma": ("color_correction", "gamma"),
+    "traffic_light.green_h_lo": ("traffic_light", "green_h_lo"),
+    "traffic_light.green_h_hi": ("traffic_light", "green_h_hi"),
+    "traffic_light.green_s_min": ("traffic_light", "green_s_min"),
+    "traffic_light.green_v_min": ("traffic_light", "green_v_min"),
+    "traffic_light.red_h1_hi": ("traffic_light", "red_h1_hi"),
+    "traffic_light.red_h2_lo": ("traffic_light", "red_h2_lo"),
+    "traffic_light.red_s_min": ("traffic_light", "red_s_min"),
+    "traffic_light.red_v_min": ("traffic_light", "red_v_min"),
+    "traffic_light.row_min_ratio": ("traffic_light", "row_min_ratio"),
+    "traffic_light.row_lit_v_min": ("traffic_light", "row_lit_v_min"),
+    "traffic_light.row_white_s_max": ("traffic_light", "row_white_s_max"),
+    "traffic_light.lab_a_red_min": ("traffic_light", "lab_a_red_min"),
+    "traffic_light.lab_a_green_max": ("traffic_light", "lab_a_green_max"),
+    "traffic_light.lab_l_min": ("traffic_light", "lab_l_min"),
 }
 
 
@@ -70,9 +102,11 @@ class BisaDetectorNode(Node):
         self.config.detector.warmup_enabled = bool(
             self.get_parameter("detector.warmup_enabled").value
         )
+        self._declare_live_parameters()
         cv2.setNumThreads(max(1, int(self.get_parameter("opencv_num_threads").value)))
 
         self.detector = BestPthDetector(self.config, model_path, logger=self.get_logger())
+        self.add_on_set_parameters_callback(self._on_set_parameters)
         self.sequence = 0
         self.infer_count = 0
         self.infer_time_sum = 0.0
@@ -100,6 +134,81 @@ class BisaDetectorNode(Node):
         )
         self.create_timer(1.0, self._republish_status)
         self._publish_status(False, "waiting for first camera frame")
+
+    @staticmethod
+    def _config_value(config, path):
+        value = config
+        for part in path:
+            value = value[part] if isinstance(value, dict) else getattr(value, part)
+        return value
+
+    @staticmethod
+    def _set_config_value(config, path, value) -> None:
+        target = config
+        for part in path[:-1]:
+            target = target[part] if isinstance(target, dict) else getattr(target, part)
+        if isinstance(target, dict):
+            target[path[-1]] = value
+        else:
+            setattr(target, path[-1], value)
+
+    def _declare_live_parameters(self) -> None:
+        """Declares GUI-visible detector parameters from the loaded YAML."""
+
+        already_declared = {"detector.imgsz", "detector.inference_hz"}
+        for name, path in LIVE_PARAMETER_PATHS.items():
+            if name in already_declared:
+                continue
+            initial = self._config_value(self.config, path)
+            value = self.declare_parameter(name, initial).value
+            self._set_config_value(self.config, path, value)
+
+    def _on_set_parameters(self, parameters) -> SetParametersResult:
+        """Atomically applies GUI tuning values before the next inference frame."""
+
+        candidate = copy.deepcopy(self.config)
+        changed = []
+        for parameter in parameters:
+            path = LIVE_PARAMETER_PATHS.get(parameter.name)
+            if path is None:
+                continue
+            self._set_config_value(candidate, path, parameter.value)
+            changed.append(parameter.name)
+
+        detector = candidate.detector
+        color = candidate.color_correction
+        light = candidate.traffic_light
+        valid = (
+            detector.imgsz >= 32
+            and detector.inference_hz > 0.0
+            and all(0.0 <= float(value) <= 1.0 for value in detector.conf.values())
+            and color.clahe_clip >= 0.0
+            and color.gamma > 0.0
+            and 0 <= light.green_h_lo <= light.green_h_hi <= 180
+            and 0 <= light.red_h1_hi <= 180
+            and 0 <= light.red_h2_lo <= 180
+            and 0.0 <= light.row_min_ratio <= 1.0
+        )
+        if not valid:
+            return SetParametersResult(
+                successful=False,
+                reason="invalid detector, color-correction, or traffic-light range",
+            )
+        if (
+            "detector.imgsz" in changed
+            and self.detector._is_ncnn_model()
+            and detector.imgsz != self.config.detector.imgsz
+        ):
+            return SetParametersResult(
+                successful=False,
+                reason="the installed NCNN model has a fixed export size; re-export before changing imgsz",
+            )
+
+        self.config = candidate
+        self.detector.config = candidate
+        if changed:
+            self.get_logger().info("applied live parameters: %s" % ", ".join(changed))
+        return SetParametersResult(successful=True)
 
     def _publish_status(self, ready: bool, status: str) -> None:
         self._status = (bool(ready), str(status))

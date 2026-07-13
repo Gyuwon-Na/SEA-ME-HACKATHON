@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import signal
+from collections import deque
 from pathlib import Path
 
 import rclpy
@@ -145,11 +146,21 @@ class ParamGuiNode(Node):
 
         super().__init__("bisa_param_gui_node")
         self.declare_parameter("target_node", "bisa_autonomous_node")
+        self.declare_parameter("detector_node", "bisa_detector_node")
         self.declare_parameter("config_file", default_config_path())
         self.target_node = str(self.get_parameter("target_node").value)
+        self.detector_node = str(self.get_parameter("detector_node").value)
         self.config_file = str(self.get_parameter("config_file").value)
-        service = f"/{self.target_node}/set_parameters"
-        self.client = self.create_client(SetParameters, service)
+        self.parameter_clients = {
+            self.target_node: self.create_client(
+                SetParameters, f"/{self.target_node.strip('/')}/set_parameters"
+            ),
+            self.detector_node: self.create_client(
+                SetParameters, f"/{self.detector_node.strip('/')}/set_parameters"
+            ),
+        }
+        self.pending = []
+        self.results = deque(maxlen=20)
 
     def load_yaml(self) -> dict:
         """Loads the params yaml for initial slider positions (best effort)."""
@@ -159,17 +170,49 @@ class ParamGuiNode(Node):
         with open(self.config_file, "r", encoding="utf-8") as stream:
             return yaml.safe_load(stream) or {}
 
-    def send(self, parameters) -> None:
-        """Fires an async SetParameters request; results are pumped by spin_once."""
+    def _targets_for(self, name: str) -> tuple[str, ...]:
+        """Routes hot-path values to C++ and detector-only values to Python."""
 
-        if not self.client.service_is_ready():
-            self.client.wait_for_service(timeout_sec=0.0)
-            if not self.client.service_is_ready():
-                self.get_logger().warning("bisa set_parameters service not ready yet")
-                return
-        request = SetParameters.Request()
-        request.parameters = [p.to_parameter_msg() for p in parameters]
-        self.client.call_async(request)
+        if name.startswith("color_correction."):
+            return self.target_node, self.detector_node
+        if name.startswith(("detector.", "traffic_light.")):
+            return (self.detector_node,)
+        return (self.target_node,)
+
+    def send(self, parameter: Parameter) -> None:
+        """Sends one tuning value and retains each result for visible feedback."""
+
+        for target in dict.fromkeys(self._targets_for(parameter.name)):
+            client = self.parameter_clients[target]
+            if not client.service_is_ready():
+                client.wait_for_service(timeout_sec=0.0)
+            if not client.service_is_ready():
+                message = f"{target}: service unavailable"
+                self.results.append((False, message))
+                self.get_logger().warning(message)
+                continue
+            request = SetParameters.Request()
+            request.parameters = [parameter.to_parameter_msg()]
+            self.pending.append((target, parameter.name, client.call_async(request)))
+
+    def poll_results(self) -> tuple[bool, str] | None:
+        """Collects completed SetParameters calls without blocking tkinter."""
+
+        remaining = []
+        for target, name, future in self.pending:
+            if not future.done():
+                remaining.append((target, name, future))
+                continue
+            try:
+                response = future.result()
+                result = response.results[0]
+                reason = str(result.reason or "ok")
+                message = f"{target}: {name} -> {reason}"
+                self.results.append((bool(result.successful), message))
+            except Exception as exc:
+                self.results.append((False, f"{target}: {name} -> {exc}"))
+        self.pending = remaining
+        return self.results[-1] if self.results else None
 
 
 def build_param(name: str, kind: str, value) -> Parameter:
@@ -199,10 +242,23 @@ def main(args=None) -> None:
     root = tk.Tk()
     root.title(f"D-Racer params -> {node.target_node}")
 
+    pending_after = {}
+
     def make_sender(name, kind):
-        def _send(_event=None, n=name, k=kind):
-            value = scales[n].get()
-            node.send([build_param(n, k, value)])
+        def _send(_value=None, n=name, k=kind):
+            previous = pending_after.pop(n, None)
+            if previous is not None:
+                root.after_cancel(previous)
+
+            def apply_value():
+                pending_after.pop(n, None)
+                node.send(build_param(n, k, scales[n].get()))
+                status_var.set(f"sending: {n}")
+
+            # Tk Scale calls command continuously while dragging. A short
+            # debounce keeps the ROS service responsive while still updating
+            # perception/debug output perceptibly in real time.
+            pending_after[n] = root.after(40, apply_value)
         return _send
 
     # One Notebook tab per algorithm group so the active values are easy to scan.
@@ -229,11 +285,14 @@ def main(args=None) -> None:
             scale = tk.Scale(tab, from_=lo, to=hi, orient="horizontal",
                              resolution=resolution, length=240)
             scale.set(init)
+            scale.configure(command=make_sender(name, kind))
             scale.grid(row=row, column=1, padx=4, pady=1)
-            scale.bind("<ButtonRelease-1>", make_sender(name, kind))
             scales[name] = scale
 
-    status = ttk.Label(root, text=f"target: {node.target_node}  (drag a slider to apply)")
+    status_var = tk.StringVar(
+        value=f"targets: {node.target_node} + {node.detector_node}  (drag to apply live)"
+    )
+    status = ttk.Label(root, textvariable=status_var)
     status.grid(row=1, column=0, pady=4)
 
     # Ctrl+C: rclpy.init installs a SIGINT handler that only flips an internal
@@ -254,6 +313,10 @@ def main(args=None) -> None:
             root.destroy()
             return
         rclpy.spin_once(node, timeout_sec=0.0)
+        result = node.poll_results()
+        if result is not None:
+            successful, message = result
+            status_var.set(("OK  " if successful else "ERROR  ") + message)
         root.after(50, pump)
 
     def on_close():

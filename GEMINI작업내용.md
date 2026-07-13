@@ -762,3 +762,169 @@ Error ID: c30cee0a67a149e9a1f2f37e3e5ce2ea
 ### 미완료 사항
 
 - red/green/left/right의 실제 트랙 거리·점등/소등·역광 라벨 데이터는 아직 제공/수집되지 않아 320/384/416 recall 비교와 색 분류기 재튜닝은 데이터 수집 후 실행해야 한다.
+
+---
+
+## 2026-07-13 — 20 Hz C++ 주행 코어 및 디버그 경로 분리
+
+### 요청
+
+- 디버그 이미지 생성/압축을 주행 제어 루프에서 분리한다.
+- 카메라·차선·ArUco·추론 상한·FSM·하위 제어 명령을 20 Hz로 통일한다.
+- 차선 인식의 중복 색 변환과 CLAHE 연산을 제거한다.
+- BISA 온보드 주행 경로와 카메라 노드를 C++로 전환한다.
+- NCNN CPU/Vulkan A/B 및 새 모델 변환은 보류한다.
+
+### 변경 파일
+
+- `src/bisa/launch/onboard.launch.py`
+- `src/bisa/config/dracer_params.yaml`
+- `src/bisa/src/autonomous_driving_node.py`
+- `src/bisa/src/lane_perception.py`
+- `src/bisa/src/detector_node.py` 신규
+- `src/bisa/setup.py`, `src/bisa/package.xml`
+- `src/bisa/test/test_perception_timing.py`
+- `src/bisa_cpp/CMakeLists.txt`, `src/bisa_cpp/package.xml` 신규
+- `src/bisa_cpp/src/bisa_autonomous_node.cpp` 신규
+- `src/camera/CMakeLists.txt`, `src/camera/src/camera_node.cpp` 신규
+- `src/camera/package.xml`
+
+### 핵심 변경
+
+- Python 호환 경로의 디버그 오버레이/마스크 JPEG 인코딩을 `control_loop`에서 제거하고 독립 callback group과 5 Hz 타이머로 이동했다. 차선 시각화용 중간 데이터도 5 Hz에 필요한 프레임에서만 수집한다.
+- 온보드 기본값을 카메라 캡처/발행 20 Hz, detector 상한 20 Hz, FSM 제어 20 Hz, ArUco 20 Hz, control node 명령 20 Hz로 통일했다. 디버그만 제어와 분리해 5 Hz로 유지한다.
+- 20 Hz에서 기존 벽시계 확인 시간이 급격히 짧아지지 않도록 표지판 투표를 6/10 프레임, 신호등 확인을 8개 고유 추론 프레임으로 조정했다.
+- 차선 ROI에서 BGR→LAB 변환과 CLAHE를 한 번만 수행하고, 동일한 보정 L채널을 road mask와 Canny/Hough가 공유하도록 변경했다.
+- 새 `bisa_cpp` 패키지는 C++로 JPEG decode, 최적화된 LAB/CLAHE 차선 인식, ArUco, 표지판 투표, OUT/LANE FSM, pure-pursuit 제어, `/control` 및 상태/디버그 발행을 수행한다.
+- NCNN Python 바인딩만 설치된 현재 차량 환경을 고려해 YOLO는 `bisa_detector_node` 독립 프로세스로 격리했다. C++ 코어와 `/bisa/detections` compact packet으로 연결되어 NCNN의 GIL/웜업이 20 Hz 제어를 막지 않는다.
+- 카메라 패키지를 `ament_cmake` C++ 노드로 전환했다. USB native MJPG passthrough 검증, GStreamer USB/MIPI 폴백, BEST_EFFORT depth-1 및 20 Hz 캡처/발행을 유지한다.
+- 기존 Python BISA 노드와 튜닝 GUI는 비교·복구 및 NCNN Python 런타임용으로 삭제하지 않고 보존했다. `onboard.launch.py`의 생산 경로는 Python detector + C++ BISA core를 실행한다.
+
+### 검증
+
+- `colcon build --symlink-install --packages-select camera bisa_cpp bisa` 통과.
+- `rosdep check --from-paths src/bisa_cpp src/camera --ignore-src` 로컬 의존성 충족.
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ... test_perception_timing.py`: 3 passed. 고유 추론 프레임 투표, stale 해제, 차선 프레임당 LAB 변환 1회를 확인했다.
+- Python 변경 파일 `py_compile` 통과.
+- C++ 두 노드 `cppcheck`에서 오류 없음. 생성자 초기화 방식 관련 성능 권고만 존재한다.
+- 모터/control node 없이 로컬 ROS 통합 시험을 수행했다. 합성 20 Hz JPEG와 detection packet 입력에서 C++ `/control`은 평균 20.000 Hz(간격 0.049~0.051초), 디버그는 4.999 Hz, 마스크는 4.999 Hz를 기록했다.
+- 실차 액추에이터 구동 시험은 수행하지 않았다.
+
+### 미완료 사항
+
+- TOPST 차량에는 OpenCV 런타임만 있고 C++ 헤더/CMake 파일을 제공하는 `libopencv-dev`가 설치되어 있지 않다. sudo 비대화식 권한도 없어 차량 빌드·배포를 진행하지 않았다.
+- 차량에서 먼저 `sudo apt install libopencv-dev`가 필요하다. 설치 후 소스 동기화, `camera/bisa_cpp/bisa` 빌드 및 모터를 연결하지 않은 상태의 20 Hz 실측을 수행해야 한다.
+- 차량에는 NCNN C++ SDK가 없고 Python 바인딩만 있다. 요청대로 NCNN A/B는 보류했으므로 detector 자체가 실제 20 Hz를 내는지는 아직 검증하지 않았고, 이번 결과의 20 Hz 보장은 차선/FSM/제어 C++ 코어에 대한 것이다.
+
+### 설치 후 재확인 및 bbox 프레임 동기화
+
+- 차량에서 `pkg-config --modversion opencv4`가 4.5.4를 반환해 `libopencv-dev` 설치 완료를 확인했다.
+- 차량에는 아직 `src/bisa_cpp`와 C++ 카메라 소스가 배포되지 않았으며, 실행 중인 `onboard.launch.py`도 기존 Python camera + Python 통합 BISA 경로임을 확인했다.
+- 현재 기존 detector는 꺼진 상태가 아니다. `/bisa/detector/ready=true`, 상태는 `ready device=vulkan:0 ncnn_threads=2 opencv_threads=1`이며, 카메라 15.199 Hz와 디버그/추론 경로 약 6.53 Hz를 실측했다.
+- 새 생산 경로는 기존 `best_ncnn_model`을 Python NCNN detector가 그대로 사용하고 C++ 코어가 detection packet만 소비한다. NCNN 재학습·재변환 또는 `.pt` 수정은 필요하지 않다.
+- 비동기 detector 결과를 최신 카메라 프레임 위에 그리던 구조가 bbox 위치가 이동해 보이는 직접 원인임을 확인했다. detection packet을 `Float64MultiArray`로 변경하고 원본 ROS sec/nanosec를 포함시켰다.
+- C++ 코어에 timestamp별 40프레임 히스토리와 수신 순서 양방향 매칭을 추가했다. 정확히 일치한 원본 프레임에만 bbox를 그리고, 매칭 프레임이 없으면 최신 화면에는 bbox를 그리지 않는다.
+- 신호등 ROI 필터 자체는 `object_detector.py::in_expected_roi()`에 여전히 활성화되어 있다. 기능은 유지하되 운영 GUI의 노란 ROI 안내 사각형만 제거했다. 새 C++ GUI에는 원래 해당 사각형이 없다.
+- 변경 후 `bisa`/`bisa_cpp` 빌드와 Python `py_compile`을 통과했다. 로컬 ROS 합성 검증에서 debug 60/60 프레임의 timestamp가 원본 카메라 stamp와 정확히 일치했고, 60/60 프레임에서 의도한 bbox를 같은 프레임에 확인했으며 debug 주기는 5.001 Hz였다.
+- 차량 배포와 실차 액추에이터 구동은 수행하지 않았다.
+
+---
+
+## 2026-07-13 — C++ 20 Hz 경로 및 MJPEG 전송 보강
+
+### 목표
+
+- C++ 생산 경로를 카메라 20 Hz, perception/제어 20 Hz 기준으로 고정한다.
+- 차선 ROI의 BGR→LAB 및 CLAHE를 프레임당 한 번만 수행한다.
+- USB 카메라의 native MJPEG를 재디코딩/재인코딩하지 않고 압축 토픽으로 전달한다.
+
+### 변경
+
+- `bisa_cpp`에 image 수신, perception, detection, control, debug 전용 callback group을 각각 추가했다. 기본 callback group의 직렬 실행으로 JPEG/차선 처리가 `/control` 타이머를 막던 구조를 제거했다.
+- image subscription은 BEST_EFFORT depth-1로 최신 `CompressedImage` 포인터만 저장하고 즉시 반환한다. 별도 `perception_hz=20` 타이머가 최신 프레임만 JPEG decode하고 LAB/CLAHE/Hough/ArUco를 실행하며, 중간에 교체된 오래된 프레임은 처리하지 않는다.
+- C++ 차선 처리의 BGR→LAB 호출은 한 곳만 유지하고, CLAHE가 적용된 동일 L 채널을 mask와 Hough가 공유한다.
+- C++ perception 처리 시간/실효 Hz와 detector packet 입력 Hz를 3초마다 기록한다. detector 입력이 `detection_hz_target=20`보다 낮으면 warning을 출력한다.
+- 운영 detection과 timestamp가 검증된 GUI용 detection/frame 쌍을 분리해 비동기 수신에서도 bbox가 다른 프레임에 그려지지 않도록 했다.
+- C++ 카메라에 `require_mjpg_passthrough`를 추가했다. onboard에서는 이를 true로 지정해 USB native MJPEG가 불가능하면 재인코딩 경로로 조용히 저하되지 않고 시작 실패하도록 했다.
+- passthrough 프레임마다 연속 버퍼와 JPEG SOI를 확인하고, 3초마다 실제 발행 Hz/평균 압축 크기/passthrough 상태를 기록한다.
+- onboard 기본은 camera capture/publish 20 Hz, inference cap 20 Hz, C++ perception 20 Hz, C++ control 20 Hz, debug 5 Hz다.
+
+### 검증
+
+- `colcon build --symlink-install --packages-select camera bisa_cpp bisa` 통과.
+- BISA 회귀 테스트 3 passed, `onboard.launch.py --show-args` 타입/기본값 확인, `git diff --check` 통과.
+- C++ 차선 파일의 BGR→LAB 변환은 정적 검사에서 1개만 존재한다.
+- 로컬 20 Hz 합성 JPEG/detection 통합 시험에서 perception 19.9~20.2 Hz(안정 구간 평균 처리 13.4~13.7 ms), detection 입력 20.3 Hz, control 19.997 Hz, debug 4.998 Hz를 기록했다.
+- bbox는 discovery 이전 첫 화면을 제외하고 59/59 debug 화면에서 원본 카메라 timestamp 및 의도한 위치와 일치했다.
+- 차량에는 NCNN C++ pkg-config/헤더가 없고 Python ncnn 1.0.20260526만 설치되어 있다. 따라서 위 detection 20.3 Hz는 C++ packet 소비 성능이며, 기존 NCNN 모델의 실차 추론 20 Hz 달성을 의미하지 않는다.
+- 차량 배포 및 액추에이터 시험은 수행하지 않았다.
+
+---
+
+## 2026-07-13 — TOPST 실시간 파라미터, C++ 디버그 복구 및 20/30 Hz 검증
+
+### 요청
+
+- TOPST 차량에 직접 접속해 `param_gui_node` 트랙바 변경이 차선 마스크와 주행 설정에 즉시 반영되도록 수정한다.
+- C++ 전환 뒤 사라진 차선 ROI, 차선/Hough, 밴드 중심, 조향각, 검출/ArUco/HUD 디버그 표시를 복구하고 두 디버그 스트림을 20 Hz로 확인한다.
+- BISA의 Python/C++ 역할을 성능 기준으로 재판단하고 카메라·제어·추론 30 Hz 가능 여부를 실측한다.
+- `onboard.launch.py`의 노드/토픽/QoS 연결과 전체 시스템을 TOPST에서 검증한다.
+
+### 변경 파일
+
+- `src/bisa/src/param_gui_node.py`
+- `src/bisa/src/detector_node.py`
+- `src/bisa/launch/onboard.launch.py`
+- `src/bisa_cpp/src/bisa_autonomous_node.cpp`
+- `src/bisa_cpp/CMakeLists.txt`
+- `src/bisa_cpp/package.xml`
+- `GEMINI작업내용.md`
+
+### 원인 및 핵심 변경
+
+- 기존 GUI가 보내던 `lane.lab_l_min` 등 dotted 파라미터는 C++ `bisa_autonomous_node`에 선언돼 있지 않았다. 실제 차량의 `ros2 param set`도 `cannot be set because it was not declared`로 실패했으며, GUI가 비동기 서비스 응답을 표시하지 않아 실패가 보이지 않았다.
+- C++ 코어에 lane/LAB/Hough/ROI, pure-pursuit, throttle, 디버그 색보정 파라미터를 선언하고 원자적 검증/적용 콜백을 추가했다. 차선 파라미터만 바뀔 때만 CLAHE/커널을 재생성하고, 제어 파라미터만 바뀔 때만 controller 설정을 갱신한다.
+- Python detector에 confidence, inference cap, color correction, traffic-light classifier 파라미터 선언/적용 콜백을 추가했다. NCNN export 크기는 고정이므로 `imgsz` 변경은 재-export 전에는 이유를 포함해 거부한다.
+- GUI는 lane/steering/throttle을 C++ 코어로, detector/traffic-light를 detector로, color correction을 두 노드로 라우팅한다. 트랙바 드래그 중 40 ms debounce로 연속 반영하며 각 서비스의 성공/실패 이유를 GUI 상태줄에 표시한다.
+- C++ 디버그 생산자에 전체 프레임 차선 ROI, 평균 차선, 차량/차선 중심, 조향 화살표, bbox/클래스/confidence, ArUco ID, 상태/스로틀/신호 HUD를 복구했다. LAB 마스크 화면에는 Canny edge, raw/평균 Hough, near/mid/far 밴드와 중심, 차량 중심 및 조향 화살표를 복구했다. 기존 `viz_node.py`는 두 압축 토픽을 올바르게 표시하고 있어 변경하지 않았다.
+- 전체 프레임 색보정은 CLAHE 객체를 캐시하고 두 saturation 배율을 한 번의 HSV 변환으로 합쳐 디버그 20 Hz의 색 튜닝 반영 비용을 줄였다.
+- `pipeline_hz`를 추가해 camera capture/publish, C++ perception/control, low-level command 주기의 기본 기준을 하나로 묶었다. `debug_image_hz`는 요구대로 기본 20 Hz다. detector cap도 기본적으로 같은 값을 받지만 실제 주기는 추론 시간에 제한된다.
+- `enable_actuation` launch 인자를 추가했다. 기본 `true`로 기존 주행 동작은 유지하고, `false`에서는 PCA9685 `control_node`를 아예 실행하지 않아 카메라/인식/FSM/토픽 전체를 모터 출력 없이 검증할 수 있다.
+- 온보드 hot path는 C++ camera + C++ lane/FSM/control/debug로 유지했다. NCNN Python API가 실제 네이티브 backend를 호출하고 별도 프로세스로 C++ 제어와 격리되므로 detector wrapper를 C++로 옮겨도 108 ms GPU 추론을 33 ms로 줄일 수 없다고 판단했다. PC 전용 tkinter GUI/OpenCV viewer도 Python 유지가 적합하다.
+
+### TOPST 직접 반영 및 검증
+
+- 변경 전 백업: `/tmp/dracer_pre_live_tuning_20260713.tar.gz`.
+- 로컬과 TOPST 양쪽에서 `bisa`/`bisa_cpp` 빌드, Python `py_compile`, BISA 회귀 테스트 3개, launch `--show-args`, `git diff --check`를 통과했다. ARM GCC의 C++17 `std::pair` ABI 문구는 오류가 아닌 compiler note이며 링크가 정상 완료됐다.
+- 합성 비구동 시험에서 `lane.lab_l_max=90 -> 1 -> 90` 서비스 요청이 모두 성공했다. 마스크 흰 픽셀 비율은 `0.3231 -> 0.0007`로 변해 다음 디버그 프레임부터 LAB 값이 실제 연산에 반영됨을 확인했다.
+- 실제 USB 카메라, detector, C++ core를 별도 ROS domain에서 실행하고 `/test/control`을 사용했으며 hardware control node는 실행하지 않았다. 최종 20 Hz 안전 런치 실측은 camera `19.999 Hz`, control `19.998 Hz`, full debug `19.999 Hz`, lane mask `19.995 Hz`, NCNN/Vulkan detections `6.554 Hz`였다.
+- 실제 디버그 JPEG를 회수해 차선 ROI, 두 차선, 차량/차선 중심, 조향 화살표, 상태/HUD 및 마스크의 band/Hough overlay를 육안 확인했다.
+- QoS endpoint를 직접 확인했다. `/camera/image/compressed`는 publisher와 C++/detector subscriber 모두 BEST_EFFORT + VOLATILE + depth 1이고, `/bisa/detections`와 `/test/control`은 양단 RELIABLE + VOLATILE로 일치했다. safe launch node 목록은 camera, battery, telemetry, detector, C++ autonomous였으며 `control_node`가 없고 `/test/control` subscriber count가 0임을 확인했다.
+- detector runtime parameter `detector.conf.traffic_green`을 `0.40 -> 0.41 -> 0.40`으로 변경/복원했고 서비스와 get 결과가 성공했다.
+- 30 Hz 비구동 분리 시험(디버그/YOLO 제외)에서 camera `29.920 Hz`, control `29.998 Hz`를 달성했다. 그러나 lane perception은 안정 구간 `27.9~29.3 Hz`, 평균 `33.1~35.6 ms`로 30 Hz deadline 여유가 없었다. 전체 구성에서는 NCNN/Vulkan이 `6.554 Hz`이므로 카메라+차선+검출+디버그를 모두 30 Hz로 만드는 것은 현재 모델/보드에서 불가능하다. 생산 기본값은 안정적인 20 Hz로 유지했다.
+
+### 실패/재시도와 미완료 사항
+
+- 로컬 pytest 첫 실행은 사용자 영역의 오래된 `anyio` plugin과 시스템 pytest 불일치로 실패했다. plugin autoload를 끄고 설치 환경을 source한 뒤 3 passed를 확인했다.
+- 첫 로컬 ROS 통합 실행은 sandbox의 ROS log/소켓 제한으로 실패해 TOPST의 별도 ROS domain 비구동 시험으로 대체했다.
+- 첫 TOPST 합성 시험은 `/tmp/dracer_same_frame.jpg`가 없어 실패했다. 정지 JPEG를 전송한 뒤 재시험했다. 차량 안에서 디버그 JPEG를 동시에 재디코딩한 시험은 CPU 측정 자체가 부하가 되어 낮은 주기를 보였으므로, 실제 PC viewer 조건과 같은 비디코딩 구독 및 실제 camera node로 재측정했다.
+- 장시간 SSH 명령의 클라이언트 대기 제한 뒤 safe launch 프로세스가 남은 1회가 있었고, hardware control node가 없는 것을 확인한 상태에서 모든 launch child를 명시적으로 종료했다. 최종 `pgrep`에서 관련 프로세스가 없음을 확인했다.
+- 실제 모터/조향 출력 및 주행 시험은 안전상 수행하지 않았다. 최종 실차 주행 검증은 바퀴를 지면에서 띄우고 사용자 확인 후 별도로 해야 한다.
+
+---
+
+## 2026-07-13 — `param_gui_node` 시작 실패 수정
+
+### 요청 및 원인
+
+- `ros2 run bisa param_gui_node` 실행 시 `AttributeError: can't set attribute 'clients'`로 종료되는 문제를 수정했다.
+- `rclpy.node.Node`가 읽기 전용 `clients` 속성을 이미 제공하는데 `ParamGuiNode`가 같은 이름에 파라미터 클라이언트 딕셔너리를 대입한 것이 원인이었다.
+- 전송 루프의 `client` 참조 줄에 있던 들여쓰기 오류도 문법 검사에서 확인해 함께 수정했다.
+
+### 변경 및 검증
+
+- `src/bisa/src/param_gui_node.py`의 내부 딕셔너리 이름을 `parameter_clients`로 변경하고 모든 참조를 일치시켰다.
+- 로컬에서 `python3 -m py_compile src/bisa/src/param_gui_node.py`와 `colcon build --packages-select bisa --symlink-install`을 통과했다.
+- 같은 수정 파일을 TOPST에 반영하고 `bisa` 패키지를 재빌드했다.
+- 액추에이터가 없는 별도 ROS domain에서 C++ 코어의 제어 출력을 `/test/control`로 격리하고 GUI의 실제 `send()` 경로를 시험했다. `lane.lab_l_max`를 `90 -> 1 -> 90`으로 전송했으며 서비스 응답은 모두 `ok`, 중간 `get_parameters` 조회값은 실제 `1`이었다.
+- 스모크 테스트 뒤 TOPST의 테스트용 `bisa_autonomous_node`와 GUI 테스트 프로세스가 남아 있지 않음을 확인했다. 실차 모터/조향 출력은 수행하지 않았다.

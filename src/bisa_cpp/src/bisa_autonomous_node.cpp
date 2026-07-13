@@ -4,9 +4,11 @@
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -17,6 +19,7 @@
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/compressed_image.hpp>
 #include <std_msgs/msg/bool.hpp>
@@ -40,6 +43,22 @@ struct LaneObs {
   bool fork_seen{false};
   std::optional<double> left_target;
   std::optional<double> right_target;
+};
+
+struct HoughDebug {
+  std::vector<cv::Vec4i> segments;
+  std::optional<cv::Vec4d> left_line;
+  std::optional<cv::Vec4d> right_line;
+  cv::Mat edges;
+  int top_y{0};
+};
+
+struct LaneDebug {
+  cv::Rect roi;
+  cv::Mat mask;
+  HoughDebug hough;
+  std::array<cv::Range, 3> bands;
+  std::array<std::optional<double>, 3> centers;
 };
 
 struct Detection {
@@ -87,6 +106,12 @@ struct Config {
   double steer_rate{0.10}, straight_limit{0.45}, s_curve_limit{0.80};
   double fork_approach_limit{0.55}, fork_limit{0.85}, post_fork_limit{0.65};
   double lost_decay{0.70};
+  bool color_enabled{true};
+  double color_clahe_clip{2.0};
+  int color_clahe_tile{8};
+  double saturation_boost{1.5};
+  int brightness{0};
+  double contrast{1.0}, saturation{1.0}, gamma{1.0};
   int sign_vote_k{6}, sign_vote_n{10}, light_confirm_frames{8};
   double light_stale_sec{0.75};
   double launch_min_sec{1.0}, fork_commit_min_sec{0.8};
@@ -153,6 +178,15 @@ Config load_config(const std::string & path) {
   read_value(steering, "fork_approach_limit", c.fork_approach_limit);
   read_value(steering, "fork_limit", c.fork_limit); read_value(steering, "post_fork_limit", c.post_fork_limit);
   read_value(steering, "lost_decay", c.lost_decay);
+  const auto color = root["color_correction"];
+  read_value(color, "enabled", c.color_enabled);
+  read_value(color, "clahe_clip", c.color_clahe_clip);
+  read_value(color, "clahe_tile", c.color_clahe_tile);
+  read_value(color, "saturation_boost", c.saturation_boost);
+  read_value(color, "brightness", c.brightness);
+  read_value(color, "contrast", c.contrast);
+  read_value(color, "saturation", c.saturation);
+  read_value(color, "gamma", c.gamma);
   const auto mission = root["mission"];
   read_value(mission, "launch_min_sec", c.launch_min_sec);
   read_value(mission, "fork_commit_min_sec", c.fork_commit_min_sec);
@@ -169,11 +203,16 @@ public:
     rebuild_kernels();
   }
 
-  LaneObs process(const cv::Mat & frame, cv::Mat * debug_mask = nullptr) {
+  void update_config(const Config & config) {
+    c_ = config;
+    rebuild_kernels();
+  }
+
+  LaneObs process(const cv::Mat & frame, LaneDebug * debug = nullptr) {
     LaneObs obs;
     if (frame.empty()) return obs;
-    const int rw = std::min(c_.lane_width, frame.cols);
-    const int rh = std::min(c_.lane_height, frame.rows);
+    const int rw = std::clamp(c_.lane_width, 1, frame.cols);
+    const int rh = std::clamp(c_.lane_height, 1, frame.rows);
     const int x0 = c_.lane_x < 0 ? (frame.cols - rw) / 2 : std::clamp(c_.lane_x, 0, frame.cols - rw);
     const int y0 = c_.lane_y < 0 ? frame.rows - rh : std::clamp(c_.lane_y, 0, frame.rows - rh);
     const cv::Mat roi = frame(cv::Rect(x0, y0, rw, rh));
@@ -192,13 +231,23 @@ public:
       cv::Scalar(c_.lab_l_max, c_.lab_a_max, c_.lab_b_max), mask);
     cv::morphologyEx(mask, mask, cv::MORPH_OPEN, open_kernel_);
     cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, close_kernel_);
-    if (debug_mask) *debug_mask = mask.clone();
+    if (debug) {
+      debug->roi = cv::Rect(x0, y0, rw, rh);
+      debug->mask = mask.clone();
+    }
 
-    auto hough_center = hough(channels[0]);
+    auto hough_center = hough(channels[0], debug ? &debug->hough : nullptr);
     auto near_center = hough_center;
     if (!near_center) near_center = contour_center(mask, c_.near_y0, 1.0);
     const auto mid_center = contour_center(mask, c_.mid_y0, c_.mid_y1);
     const auto far_center = contour_center(mask, c_.far_y0, c_.far_y1);
+    if (debug) {
+      debug->bands = {
+        make_range(mask.rows, c_.near_y0, 1.0),
+        make_range(mask.rows, c_.mid_y0, c_.mid_y1),
+        make_range(mask.rows, c_.far_y0, c_.far_y1)};
+      debug->centers = {near_center, mid_center, far_center};
+    }
     if (!near_center) {
       obs.center_error = previous_error_;
       return obs;
@@ -240,10 +289,15 @@ private:
     close_kernel_ = cv::Mat::ones(std::max(1, c_.morph_close), std::max(1, c_.morph_close), CV_8U);
   }
 
+  static cv::Range make_range(int height, double y0r, double y1r) {
+    const int y0 = std::clamp(static_cast<int>(y0r * height), 0, height - 1);
+    const int y1 = std::clamp(static_cast<int>(y1r * height), y0 + 1, height);
+    return cv::Range(y0, y1);
+  }
+
   std::optional<double> contour_center(const cv::Mat & mask, double y0r, double y1r) const {
-    const int y0 = std::clamp(static_cast<int>(y0r * mask.rows), 0, mask.rows - 1);
-    const int y1 = std::clamp(static_cast<int>(y1r * mask.rows), y0 + 1, mask.rows);
-    cv::Mat band = mask.rowRange(y0, y1);
+    const auto range = make_range(mask.rows, y0r, y1r);
+    cv::Mat band = mask.rowRange(range);
     std::vector<std::vector<cv::Point>> contours;
     cv::findContours(band.clone(), contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
     const double minimum = band.total() * c_.min_area_ratio;
@@ -258,7 +312,7 @@ private:
     return sx / area_sum;
   }
 
-  std::optional<double> hough(const cv::Mat & l_channel) const {
+  std::optional<double> hough(const cv::Mat & l_channel, HoughDebug * debug) const {
     cv::Mat blur, edges;
     cv::GaussianBlur(l_channel, blur, cv::Size(5, 5), 0.0);
     cv::Canny(blur, edges, c_.canny_low, c_.canny_high);
@@ -275,16 +329,35 @@ private:
       const double intercept = line[1] - slope * line[0];
       (slope < 0.0 ? left : right).emplace_back(slope, intercept);
     }
+    if (debug) {
+      debug->segments = lines;
+      debug->edges = edges.clone();
+      debug->top_y = top;
+    }
     if (left.empty() && right.empty()) return std::nullopt;
-    auto target = [top](const auto & fits) {
+    auto average_fit = [](const auto & fits) {
       double sm = 0.0, sb = 0.0;
       for (const auto & fit : fits) { sm += fit.first; sb += fit.second; }
       sm /= fits.size(); sb /= fits.size();
-      return (top - sb) / sm;
+      return std::pair<double, double>{sm, sb};
     };
-    if (!left.empty() && !right.empty()) return (target(left) + target(right)) / 2.0;
-    if (!left.empty()) return target(left) + l_channel.cols * c_.assumed_lane_width / 2.0;
-    return target(right) - l_channel.cols * c_.assumed_lane_width / 2.0;
+    auto endpoints = [top, &l_channel](const auto & fit) {
+      const double bottom = static_cast<double>(l_channel.rows - 1);
+      return cv::Vec4d(
+        (bottom - fit.second) / fit.first, bottom,
+        (top - fit.second) / fit.first, static_cast<double>(top));
+    };
+    std::optional<std::pair<double, double>> left_fit, right_fit;
+    if (!left.empty()) left_fit = average_fit(left);
+    if (!right.empty()) right_fit = average_fit(right);
+    if (debug) {
+      if (left_fit) debug->left_line = endpoints(*left_fit);
+      if (right_fit) debug->right_line = endpoints(*right_fit);
+    }
+    const auto target = [top](const auto & fit) { return (top - fit.second) / fit.first; };
+    if (left_fit && right_fit) return (target(*left_fit) + target(*right_fit)) / 2.0;
+    if (left_fit) return target(*left_fit) + l_channel.cols * c_.assumed_lane_width / 2.0;
+    return target(*right_fit) - l_channel.cols * c_.assumed_lane_width / 2.0;
   }
 
   Config c_;
@@ -297,6 +370,8 @@ private:
 class Controller {
 public:
   explicit Controller(const Config & c) : c_(c) {}
+
+  void update_config(const Config & config) { c_ = config; }
 
   Command follow(const LaneObs & lane, double cap, double steer_limit, std::optional<double> floor = std::nullopt) {
     if (!lane.valid) {
@@ -365,6 +440,11 @@ public:
     config_.sign_vote_k = declare_parameter<int>("sign_vote_k", 6);
     config_.sign_vote_n = declare_parameter<int>("sign_vote_n", 10);
     config_.light_confirm_frames = declare_parameter<int>("light_confirm_frames", 8);
+    declare_tunable_parameters();
+    lane_.update_config(config_);
+    controller_.update_config(config_);
+    parameter_callback_handle_ = add_on_set_parameters_callback(
+      std::bind(&BisaAutonomousNode::on_parameters, this, std::placeholders::_1));
 
     // Each real-time path gets an independent mutually-exclusive group.  The
     // default callback group would serialize JPEG/lane work with /control even
@@ -421,6 +501,150 @@ public:
   }
 
 private:
+  void declare_tunable_parameters() {
+    config_.lane_width = declare_parameter<int>("lane_roi.width", config_.lane_width);
+    config_.lane_height = declare_parameter<int>("lane_roi.height", config_.lane_height);
+    config_.lane_x = declare_parameter<int>("lane_roi.x_offset", config_.lane_x);
+    config_.lane_y = declare_parameter<int>("lane_roi.y_offset", config_.lane_y);
+    config_.lab_l_min = declare_parameter<int>("lane.lab_l_min", config_.lab_l_min);
+    config_.lab_l_max = declare_parameter<int>("lane.lab_l_max", config_.lab_l_max);
+    config_.lab_a_min = declare_parameter<int>("lane.lab_a_min", config_.lab_a_min);
+    config_.lab_a_max = declare_parameter<int>("lane.lab_a_max", config_.lab_a_max);
+    config_.lab_b_min = declare_parameter<int>("lane.lab_b_min", config_.lab_b_min);
+    config_.lab_b_max = declare_parameter<int>("lane.lab_b_max", config_.lab_b_max);
+    config_.clahe_clip = declare_parameter<double>("lane.lab_clahe_clip", config_.clahe_clip);
+    config_.clahe_tile = declare_parameter<int>("lane.lab_clahe_tile", config_.clahe_tile);
+    config_.morph_open = declare_parameter<int>("lane.morph_open_kernel", config_.morph_open);
+    config_.morph_close = declare_parameter<int>("lane.morph_close_kernel", config_.morph_close);
+    config_.min_area_ratio = declare_parameter<double>(
+      "lane.min_component_area_ratio", config_.min_area_ratio);
+    config_.fork_area_ratio = declare_parameter<double>("lane.fork_area_ratio", config_.fork_area_ratio);
+    config_.hough_top = declare_parameter<double>("lane.hough_roi_top_ratio", config_.hough_top);
+    config_.canny_low = declare_parameter<int>("lane.hough_canny_low", config_.canny_low);
+    config_.canny_high = declare_parameter<int>("lane.hough_canny_high", config_.canny_high);
+    config_.hough_threshold = declare_parameter<int>("lane.hough_threshold", config_.hough_threshold);
+    config_.hough_min_length = declare_parameter<int>(
+      "lane.hough_min_line_length", config_.hough_min_length);
+    config_.hough_max_gap = declare_parameter<int>("lane.hough_max_line_gap", config_.hough_max_gap);
+    config_.hough_slope_min = declare_parameter<double>(
+      "lane.hough_slope_min_abs", config_.hough_slope_min);
+
+    config_.lookahead = declare_parameter<double>("steering.lookahead_m", config_.lookahead);
+    config_.wheelbase = declare_parameter<double>("steering.wheelbase_m", config_.wheelbase);
+    config_.lateral_scale = declare_parameter<double>("steering.lateral_scale_m", config_.lateral_scale);
+    config_.max_steer_deg = declare_parameter<double>("steering.max_steer_deg", config_.max_steer_deg);
+    config_.pp_gain = declare_parameter<double>("steering.pp_gain", config_.pp_gain);
+    config_.curve_blend = declare_parameter<double>("steering.curve_blend", config_.curve_blend);
+    config_.straight_limit = declare_parameter<double>("steering.straight_limit", config_.straight_limit);
+    config_.s_curve_limit = declare_parameter<double>("steering.s_curve_limit", config_.s_curve_limit);
+    config_.steer_rate = declare_parameter<double>("steering.rate_limit_per_cmd", config_.steer_rate);
+    config_.steer_sign = declare_parameter<int>("steering.steer_sign", config_.steer_sign);
+
+    config_.speed_min = declare_parameter<double>("throttle.speed_min", config_.speed_min);
+    config_.speed_max = declare_parameter<double>("throttle.speed_max", config_.speed_max);
+    config_.launch_cap = declare_parameter<double>("throttle.launch_cap", config_.launch_cap);
+    config_.s_curve_cap = declare_parameter<double>("throttle.s_curve_cap", config_.s_curve_cap);
+
+    config_.color_enabled = declare_parameter<bool>("color_correction.enabled", config_.color_enabled);
+    config_.color_clahe_clip = declare_parameter<double>(
+      "color_correction.clahe_clip", config_.color_clahe_clip);
+    config_.saturation_boost = declare_parameter<double>(
+      "color_correction.saturation_boost", config_.saturation_boost);
+    config_.brightness = declare_parameter<int>("color_correction.brightness", config_.brightness);
+    config_.contrast = declare_parameter<double>("color_correction.contrast", config_.contrast);
+    config_.saturation = declare_parameter<double>("color_correction.saturation", config_.saturation);
+    config_.gamma = declare_parameter<double>("color_correction.gamma", config_.gamma);
+  }
+
+  rcl_interfaces::msg::SetParametersResult on_parameters(
+    const std::vector<rclcpp::Parameter> & parameters)
+  {
+    Config next;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      next = config_;
+    }
+    bool lane_changed = false;
+    bool controller_changed = false;
+    try {
+      for (const auto & parameter : parameters) {
+        const auto & name = parameter.get_name();
+        lane_changed = lane_changed || name.rfind("lane.", 0) == 0 || name.rfind("lane_roi.", 0) == 0;
+        controller_changed = controller_changed ||
+          name.rfind("steering.", 0) == 0 || name.rfind("throttle.", 0) == 0;
+        if (name == "lane_roi.width") next.lane_width = parameter.as_int();
+        else if (name == "lane_roi.height") next.lane_height = parameter.as_int();
+        else if (name == "lane_roi.x_offset") next.lane_x = parameter.as_int();
+        else if (name == "lane_roi.y_offset") next.lane_y = parameter.as_int();
+        else if (name == "lane.lab_l_min") next.lab_l_min = parameter.as_int();
+        else if (name == "lane.lab_l_max") next.lab_l_max = parameter.as_int();
+        else if (name == "lane.lab_a_min") next.lab_a_min = parameter.as_int();
+        else if (name == "lane.lab_a_max") next.lab_a_max = parameter.as_int();
+        else if (name == "lane.lab_b_min") next.lab_b_min = parameter.as_int();
+        else if (name == "lane.lab_b_max") next.lab_b_max = parameter.as_int();
+        else if (name == "lane.lab_clahe_clip") next.clahe_clip = parameter.as_double();
+        else if (name == "lane.lab_clahe_tile") next.clahe_tile = parameter.as_int();
+        else if (name == "lane.morph_open_kernel") next.morph_open = parameter.as_int();
+        else if (name == "lane.morph_close_kernel") next.morph_close = parameter.as_int();
+        else if (name == "lane.min_component_area_ratio") next.min_area_ratio = parameter.as_double();
+        else if (name == "lane.fork_area_ratio") next.fork_area_ratio = parameter.as_double();
+        else if (name == "lane.hough_roi_top_ratio") next.hough_top = parameter.as_double();
+        else if (name == "lane.hough_canny_low") next.canny_low = parameter.as_int();
+        else if (name == "lane.hough_canny_high") next.canny_high = parameter.as_int();
+        else if (name == "lane.hough_threshold") next.hough_threshold = parameter.as_int();
+        else if (name == "lane.hough_min_line_length") next.hough_min_length = parameter.as_int();
+        else if (name == "lane.hough_max_line_gap") next.hough_max_gap = parameter.as_int();
+        else if (name == "lane.hough_slope_min_abs") next.hough_slope_min = parameter.as_double();
+        else if (name == "steering.lookahead_m") next.lookahead = parameter.as_double();
+        else if (name == "steering.wheelbase_m") next.wheelbase = parameter.as_double();
+        else if (name == "steering.lateral_scale_m") next.lateral_scale = parameter.as_double();
+        else if (name == "steering.max_steer_deg") next.max_steer_deg = parameter.as_double();
+        else if (name == "steering.pp_gain") next.pp_gain = parameter.as_double();
+        else if (name == "steering.curve_blend") next.curve_blend = parameter.as_double();
+        else if (name == "steering.straight_limit") next.straight_limit = parameter.as_double();
+        else if (name == "steering.s_curve_limit") next.s_curve_limit = parameter.as_double();
+        else if (name == "steering.rate_limit_per_cmd") next.steer_rate = parameter.as_double();
+        else if (name == "steering.steer_sign") next.steer_sign = parameter.as_int();
+        else if (name == "throttle.speed_min") next.speed_min = parameter.as_double();
+        else if (name == "throttle.speed_max") next.speed_max = parameter.as_double();
+        else if (name == "throttle.launch_cap") next.launch_cap = parameter.as_double();
+        else if (name == "throttle.s_curve_cap") next.s_curve_cap = parameter.as_double();
+        else if (name == "color_correction.enabled") next.color_enabled = parameter.as_bool();
+        else if (name == "color_correction.clahe_clip") next.color_clahe_clip = parameter.as_double();
+        else if (name == "color_correction.saturation_boost") next.saturation_boost = parameter.as_double();
+        else if (name == "color_correction.brightness") next.brightness = parameter.as_int();
+        else if (name == "color_correction.contrast") next.contrast = parameter.as_double();
+        else if (name == "color_correction.saturation") next.saturation = parameter.as_double();
+        else if (name == "color_correction.gamma") next.gamma = parameter.as_double();
+      }
+    } catch (const rclcpp::exceptions::InvalidParameterTypeException & error) {
+      return rcl_interfaces::msg::SetParametersResult().set__successful(false).set__reason(error.what());
+    }
+
+    const bool lab_valid = next.lab_l_min <= next.lab_l_max && next.lab_a_min <= next.lab_a_max &&
+      next.lab_b_min <= next.lab_b_max;
+    const bool geometry_valid = next.lane_width >= 1 && next.lane_height >= 1 && next.clahe_tile >= 1 &&
+      next.morph_open >= 1 && next.morph_close >= 1 && next.lookahead > 0.0 && next.wheelbase > 0.0 &&
+      next.max_steer_deg > 0.0 && next.gamma > 0.0;
+    const bool speed_valid = next.speed_min >= 0.0 && next.speed_min <= next.speed_max && next.speed_max <= 1.0;
+    if (!lab_valid || !geometry_valid || !speed_valid || std::abs(next.steer_sign) != 1) {
+      return rcl_interfaces::msg::SetParametersResult().set__successful(false).set__reason(
+        "invalid LAB bounds, ROI/kernel size, steering geometry/sign, gamma, or speed band");
+    }
+
+    if (lane_changed) {
+      std::lock_guard<std::mutex> lane_lock(lane_mutex_);
+      lane_.update_config(next);
+    }
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      config_ = next;
+      if (controller_changed) controller_.update_config(config_);
+    }
+    RCLCPP_INFO(get_logger(), "applied %zu live parameter(s)", parameters.size());
+    return rcl_interfaces::msg::SetParametersResult().set__successful(true);
+  }
+
   void image_callback(const sensor_msgs::msg::CompressedImage::SharedPtr msg) {
     // Depth-1/latest-only transport: never decode or run OpenCV in the DDS
     // callback.  The dedicated 20 Hz perception timer consumes the newest
@@ -446,21 +670,31 @@ private:
     cv::Mat encoded(1, static_cast<int>(msg->data.size()), CV_8U, msg->data.data());
     cv::Mat frame = cv::imdecode(encoded, cv::IMREAD_COLOR);
     if (frame.empty()) return;
-    cv::Mat mask;
-    LaneObs observation = lane_.process(frame, publish_debug_ ? &mask : nullptr);
+    LaneDebug lane_debug;
+    LaneObs observation;
+    {
+      std::lock_guard<std::mutex> lane_lock(lane_mutex_);
+      observation = lane_.process(frame, publish_debug_ ? &lane_debug : nullptr);
+    }
     bool marker = false;
+    int aruco_target_id = 3;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      aruco_target_id = config_.aruco_target_id;
+    }
     std::vector<int> ids;
     std::vector<std::vector<cv::Point2f>> corners;
     cv::aruco::detectMarkers(frame, cv::aruco::getPredefinedDictionary(cv::aruco::DICT_6X6_50), corners, ids);
-    marker = std::find(ids.begin(), ids.end(), config_.aruco_target_id) != ids.end();
+    marker = std::find(ids.begin(), ids.end(), aruco_target_id) != ids.end();
     {
       std::lock_guard<std::mutex> lock(mutex_);
       latest_lane_ = observation;
       target_marker_ = marker;
       marker_ids_ = std::move(ids);
+      marker_corners_ = std::move(corners);
       if (publish_debug_) {
         latest_frame_ = frame;
-        latest_mask_ = mask;
+        latest_lane_debug_ = std::move(lane_debug);
         frame_history_.push_back(
           StampedFrame{msg->header.stamp.sec, msg->header.stamp.nanosec, frame});
         while (frame_history_.size() > 40U) frame_history_.pop_front();
@@ -623,6 +857,7 @@ private:
     int light;
     std::vector<int> markers;
     Command cmd;
+    double speed_max;
     std::optional<std::string> decision;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -635,11 +870,12 @@ private:
       if (marker) controller_.stop();
       last_command_ = cmd;
       decision = sign_decision();
+      speed_max = config_.speed_max;
     }
     control_msgs::msg::Control output;
     output.header.stamp = now();
     output.steering = static_cast<float>(clamp(cmd.steering, -1.0, 1.0));
-    output.throttle = static_cast<float>(clamp(cmd.throttle, 0.0, config_.speed_max));
+    output.throttle = static_cast<float>(clamp(cmd.throttle, 0.0, speed_max));
     control_pub_->publish(output);
     green_pub_->publish(std_msgs::msg::Bool().set__data(light == 1));
     red_pub_->publish(std_msgs::msg::Bool().set__data(light == 2));
@@ -661,18 +897,188 @@ private:
     publisher->publish(msg);
   }
 
+  static void put_outlined_text(
+    cv::Mat & image, const std::string & text, const cv::Point & origin,
+    double scale = 0.55, const cv::Scalar & color = cv::Scalar(255, 255, 255))
+  {
+    cv::putText(image, text, origin, cv::FONT_HERSHEY_SIMPLEX, scale,
+      cv::Scalar(0, 0, 0), 3, cv::LINE_AA);
+    cv::putText(image, text, origin, cv::FONT_HERSHEY_SIMPLEX, scale,
+      color, 1, cv::LINE_AA);
+  }
+
+  static cv::Point steering_tip(const cv::Point & origin, double steering, int length) {
+    constexpr double max_steer_degrees = 50.0;
+    const double theta = clamp(steering, -1.0, 1.0) * max_steer_degrees * CV_PI / 180.0;
+    return cv::Point(
+      cvRound(origin.x - length * std::sin(theta)),
+      cvRound(origin.y - length * std::cos(theta)));
+  }
+
+  static std::string detection_name(int class_id) {
+    static const std::array<std::string, 4> names = {
+      "traffic_red", "traffic_green", "sign_left", "sign_right"};
+    return class_id >= 0 && class_id < static_cast<int>(names.size()) ?
+      names[class_id] : "unknown";
+  }
+
+  cv::Mat corrected_debug_frame(const cv::Mat & input, const Config & config) {
+    cv::Mat lab;
+    cv::cvtColor(input, lab, cv::COLOR_BGR2Lab);
+    std::vector<cv::Mat> channels;
+    cv::split(lab, channels);
+    const double clip = std::max(config.color_clahe_clip, 0.01);
+    const int tile = std::max(config.color_clahe_tile, 1);
+    if (!debug_clahe_ || std::abs(clip - debug_clahe_clip_) >= 1e-6 || tile != debug_clahe_tile_) {
+      debug_clahe_ = cv::createCLAHE(clip, cv::Size(tile, tile));
+      debug_clahe_clip_ = clip;
+      debug_clahe_tile_ = tile;
+    }
+    debug_clahe_->apply(channels[0], channels[0]);
+    cv::merge(channels, lab);
+    cv::Mat output;
+    cv::cvtColor(lab, output, cv::COLOR_Lab2BGR);
+
+    auto scale_saturation = [](cv::Mat & bgr, double factor) {
+      if (std::abs(factor - 1.0) < 1e-3) return;
+      cv::Mat hsv;
+      cv::cvtColor(bgr, hsv, cv::COLOR_BGR2HSV);
+      std::vector<cv::Mat> hsv_channels;
+      cv::split(hsv, hsv_channels);
+      hsv_channels[1].convertTo(hsv_channels[1], CV_8U, std::max(factor, 0.0));
+      cv::merge(hsv_channels, hsv);
+      cv::cvtColor(hsv, bgr, cv::COLOR_HSV2BGR);
+    };
+    // Both saturation controls are multiplicative, so one HSV round trip is
+    // equivalent and avoids two full-frame color conversions at debug rate.
+    scale_saturation(output, config.saturation_boost * config.saturation);
+    if (std::abs(config.contrast - 1.0) >= 1e-3 || config.brightness != 0) {
+      cv::convertScaleAbs(
+        output, output, std::max(config.contrast, 0.0), config.brightness);
+    }
+    if (std::abs(config.gamma - 1.0) >= 1e-3) {
+      cv::Mat lut(1, 256, CV_8U);
+      const double inverse_gamma = 1.0 / std::max(config.gamma, 0.1);
+      for (int i = 0; i < 256; ++i) {
+        lut.at<uint8_t>(i) = cv::saturate_cast<uint8_t>(
+          std::pow(i / 255.0, inverse_gamma) * 255.0);
+      }
+      cv::LUT(output, lut, output);
+    }
+    return output;
+  }
+
+  static void draw_lane_debug(
+    cv::Mat & frame, const LaneDebug & debug, const LaneObs & lane, const Command & cmd)
+  {
+    if (debug.roi.width <= 0 || debug.roi.height <= 0) return;
+    const cv::Scalar roi_color(255, 128, 0);
+    const cv::Scalar lane_color(0, 255, 0);
+    cv::rectangle(frame, debug.roi, roi_color, 2);
+    put_outlined_text(
+      frame,
+      "lane ROI " + std::to_string(debug.roi.width) + "x" + std::to_string(debug.roi.height),
+      cv::Point(debug.roi.x + 4, std::max(16, debug.roi.y + 18)), 0.5, roi_color);
+
+    auto draw_average = [&](const std::optional<cv::Vec4d> & line) {
+      if (!line) return;
+      cv::line(frame,
+        cv::Point(cvRound((*line)[0]) + debug.roi.x, cvRound((*line)[1]) + debug.roi.y),
+        cv::Point(cvRound((*line)[2]) + debug.roi.x, cvRound((*line)[3]) + debug.roi.y),
+        lane_color, 5, cv::LINE_AA);
+    };
+    draw_average(debug.hough.left_line);
+    draw_average(debug.hough.right_line);
+
+    const int center_x = frame.cols / 2;
+    cv::line(frame, cv::Point(center_x, 0), cv::Point(center_x, frame.rows - 1),
+      cv::Scalar(255, 255, 0), 1);
+    const auto & near_band = debug.bands[0];
+    const int marker_y = debug.roi.y + (near_band.start + near_band.end) / 2;
+    cv::circle(frame, cv::Point(center_x, marker_y), 7, cv::Scalar(0, 0, 255), -1);
+    if (debug.centers[0]) {
+      cv::circle(frame,
+        cv::Point(debug.roi.x + cvRound(*debug.centers[0]), marker_y),
+        7, lane_color, -1);
+    }
+    const cv::Point steer_origin(center_x, frame.rows - 1);
+    cv::arrowedLine(frame, steer_origin,
+      steering_tip(steer_origin, cmd.steering, frame.rows / 2),
+      cv::Scalar(0, 0, 255), 3, cv::LINE_AA, 0, 0.15);
+    (void)lane;
+  }
+
+  static cv::Mat make_lane_mask_view(
+    const LaneDebug & debug, const LaneObs & lane, const Command & cmd, int frame_width)
+  {
+    if (debug.mask.empty()) return {};
+    cv::Mat view;
+    cv::cvtColor(debug.mask, view, cv::COLOR_GRAY2BGR);
+    if (!debug.hough.edges.empty() && debug.hough.edges.size() == debug.mask.size()) {
+      view.setTo(cv::Scalar(255, 120, 0), debug.hough.edges);
+    }
+    const std::array<cv::Scalar, 3> colors = {
+      cv::Scalar(0, 255, 255), cv::Scalar(0, 200, 255), cv::Scalar(255, 200, 0)};
+    for (std::size_t i = 0; i < debug.bands.size(); ++i) {
+      const auto & band = debug.bands[i];
+      cv::line(view, cv::Point(0, band.start), cv::Point(view.cols - 1, band.start), colors[i], 1);
+      cv::line(view, cv::Point(0, band.end - 1), cv::Point(view.cols - 1, band.end - 1), colors[i], 1);
+      if (debug.centers[i]) {
+        cv::circle(view,
+          cv::Point(cvRound(*debug.centers[i]), (band.start + band.end) / 2), 6, colors[i], -1);
+      }
+    }
+    for (const auto & segment : debug.hough.segments) {
+      cv::line(view, cv::Point(segment[0], segment[1]), cv::Point(segment[2], segment[3]),
+        cv::Scalar(0, 160, 0), 1);
+    }
+    auto draw_average = [&](const std::optional<cv::Vec4d> & line) {
+      if (!line) return;
+      cv::line(view,
+        cv::Point(cvRound((*line)[0]), cvRound((*line)[1])),
+        cv::Point(cvRound((*line)[2]), cvRound((*line)[3])),
+        cv::Scalar(0, 255, 0), 2, cv::LINE_AA);
+    };
+    draw_average(debug.hough.left_line);
+    draw_average(debug.hough.right_line);
+    cv::line(view, cv::Point(0, debug.hough.top_y),
+      cv::Point(view.cols - 1, debug.hough.top_y), cv::Scalar(0, 160, 0), 1);
+
+    const int vehicle_x = std::clamp(frame_width / 2 - debug.roi.x, 0, view.cols - 1);
+    cv::line(view, cv::Point(vehicle_x, 0), cv::Point(vehicle_x, view.rows - 1),
+      cv::Scalar(255, 255, 0), 1);
+    const cv::Point steer_origin(vehicle_x, view.rows - 1);
+    cv::arrowedLine(view, steer_origin,
+      steering_tip(steer_origin, cmd.steering, static_cast<int>(view.rows * 0.45)),
+      cv::Scalar(0, 0, 255), 2, cv::LINE_AA, 0, 0.2);
+    put_outlined_text(view, "mask=LAB " + std::to_string(view.cols) + "x" + std::to_string(view.rows),
+      cv::Point(8, 20));
+    std::ostringstream status;
+    status.setf(std::ios::fixed); status.precision(2);
+    status << "err=" << std::showpos << lane.center_error << " steer=" << cmd.steering;
+    put_outlined_text(view, status.str(), cv::Point(8, 42));
+    return view;
+  }
+
   void debug_loop() {
-    cv::Mat frame, mask;
+    cv::Mat frame;
+    LaneDebug lane_debug;
     LaneObs lane;
     Command cmd;
     std::vector<Detection> detections;
+    std::vector<int> markers;
+    std::vector<std::vector<cv::Point2f>> marker_corners;
     std::string state;
+    int light{0};
+    Config config;
     rclcpp::Time frame_stamp{0, 0, RCL_ROS_TIME};
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (latest_frame_.empty()) return;
-      mask = latest_mask_.clone(); lane = latest_lane_;
+      lane_debug = latest_lane_debug_; lane = latest_lane_;
       cmd = last_command_; state = state_;
+      markers = marker_ids_; marker_corners = marker_corners_;
+      light = light_state_; config = config_;
       if (!detection_frame_.empty()) {
         frame = detection_frame_.clone();
         detections = debug_detections_;
@@ -685,31 +1091,51 @@ private:
         frame_stamp = now();
       }
     }
+    frame = corrected_debug_frame(frame, config);
+    draw_lane_debug(frame, lane_debug, lane, cmd);
     for (const auto & d : detections) {
       const cv::Scalar color = d.class_id == 0 ? cv::Scalar(0, 0, 255) :
         d.class_id == 1 ? cv::Scalar(0, 255, 0) : cv::Scalar(255, 180, 0);
       cv::rectangle(frame, d.box, color, 2);
+      std::ostringstream label;
+      label.setf(std::ios::fixed); label.precision(2);
+      label << detection_name(d.class_id) << " " << d.confidence;
+      put_outlined_text(frame, label.str(),
+        cv::Point(cvRound(d.box.x), std::max(14, cvRound(d.box.y) - 5)), 0.5, color);
     }
-    cv::putText(frame, state, {8, 24}, cv::FONT_HERSHEY_SIMPLEX, 0.65, {255, 255, 255}, 2);
-    cv::putText(frame, "err=" + std::to_string(lane.center_error) + " steer=" + std::to_string(cmd.steering),
-      {8, 50}, cv::FONT_HERSHEY_SIMPLEX, 0.55, {255, 255, 255}, 2);
+    for (std::size_t i = 0; i < marker_corners.size(); ++i) {
+      const bool target = i < markers.size() && markers[i] == config.aruco_target_id;
+      const cv::Scalar color = target ? cv::Scalar(0, 255, 255) : cv::Scalar(255, 0, 255);
+      cv::polylines(frame, marker_corners[i], true, color, target ? 3 : 2, cv::LINE_AA);
+      if (!marker_corners[i].empty() && i < markers.size()) {
+        put_outlined_text(frame, "ID " + std::to_string(markers[i]), marker_corners[i][0], 0.55, color);
+      }
+    }
+    put_outlined_text(frame, "state=" + state, cv::Point(8, 22));
+    std::ostringstream command_text;
+    command_text.setf(std::ios::fixed); command_text.precision(2);
+    command_text << "thr=" << cmd.throttle << " steer=" << std::showpos << cmd.steering;
+    put_outlined_text(frame, command_text.str(), cv::Point(8, 44));
+    put_outlined_text(frame, "light=" + std::string(light == 1 ? "GREEN" : light == 2 ? "RED" : "none"),
+      cv::Point(8, frame.rows - 12), 0.65,
+      light == 1 ? cv::Scalar(0, 255, 0) : light == 2 ? cv::Scalar(0, 0, 255) : cv::Scalar(170, 170, 170));
     publish_jpeg(frame, debug_pub_, frame_stamp);
-    if (!mask.empty()) {
-      cv::Mat mask_bgr; cv::cvtColor(mask, mask_bgr, cv::COLOR_GRAY2BGR);
-      publish_jpeg(mask_bgr, mask_pub_, now());
-    }
+    const cv::Mat mask_view = make_lane_mask_view(lane_debug, lane, cmd, frame.cols);
+    publish_jpeg(mask_view, mask_pub_, now());
   }
 
   Config config_;
   LaneProcessor lane_;
   Controller controller_;
-  std::mutex mutex_, image_mutex_;
+  std::mutex mutex_, image_mutex_, lane_mutex_;
   sensor_msgs::msg::CompressedImage::SharedPtr pending_image_;
   LaneObs latest_lane_;
-  cv::Mat latest_frame_, latest_mask_, detection_frame_;
+  LaneDebug latest_lane_debug_;
+  cv::Mat latest_frame_, detection_frame_;
   std::vector<Detection> detections_, debug_detections_;
   std::deque<StampedFrame> frame_history_;
   std::vector<int> marker_ids_;
+  std::vector<std::vector<cv::Point2f>> marker_corners_;
   std::deque<int> sign_history_;
   Command last_command_;
   bool target_marker_{false}, publish_debug_{false};
@@ -738,6 +1164,10 @@ private:
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr sign_pub_, aruco_pub_;
   rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr debug_pub_, mask_pub_;
   rclcpp::TimerBase::SharedPtr perception_timer_, control_timer_, debug_timer_;
+  OnSetParametersCallbackHandle::SharedPtr parameter_callback_handle_;
+  cv::Ptr<cv::CLAHE> debug_clahe_;
+  double debug_clahe_clip_{-1.0};
+  int debug_clahe_tile_{-1};
 };
 
 int main(int argc, char ** argv) {

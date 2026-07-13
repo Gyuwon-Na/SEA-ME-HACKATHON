@@ -66,6 +66,7 @@ def generate_launch_description():
     control_topic = LaunchConfiguration("control_topic")
     detections_topic = LaunchConfiguration("detections_topic")
     enable_joystick = LaunchConfiguration("enable_joystick")
+    enable_actuation = LaunchConfiguration("enable_actuation")
 
     # GPU-accelerated detector tuning (overridable on the command line). These
     # become flat dotted ROS parameters that override the shared YAML at launch
@@ -73,6 +74,7 @@ def generate_launch_description():
     # fields are typed (imgsz int, inference_hz float), and a LaunchConfiguration
     # resolves to a string, so wrap with ParameterValue to coerce the type —
     # otherwise declare_parameter rejects the override on a type mismatch.
+    pipeline_hz = ParameterValue(LaunchConfiguration("pipeline_hz"), value_type=float)
     imgsz = ParameterValue(LaunchConfiguration("imgsz"), value_type=int)
     inference_hz = ParameterValue(LaunchConfiguration("inference_hz"), value_type=float)
     camera_hz = ParameterValue(LaunchConfiguration("camera_hz"), value_type=float)
@@ -98,17 +100,27 @@ def generate_launch_description():
         DeclareLaunchArgument("detections_topic", default_value="/bisa/detections"),
         # Set false if no gamepad dongle is plugged into the car.
         DeclareLaunchArgument("enable_joystick", default_value="true"),
-        # All production loops use one 20 Hz time base. Debug rendering remains
-        # independently rate-limited because it is not part of vehicle control.
+        # Safe integration/benchmark mode: false keeps the hardware PCA9685
+        # control node completely absent while every perception/control topic is
+        # still produced and can be measured. Production default remains true.
+        DeclareLaunchArgument("enable_actuation", default_value="true"),
+        # Camera, lane perception, command publication, and the low-level command
+        # watchdog share one time base by default. The NCNN detector gets the same
+        # cap but may run slower when inference time exceeds the period.
+        DeclareLaunchArgument("pipeline_hz", default_value="20.0"),
         DeclareLaunchArgument("device", default_value="vulkan:0"),
-        DeclareLaunchArgument("camera_hz", default_value="20.0"),
+        DeclareLaunchArgument(
+            "camera_hz", default_value=LaunchConfiguration("pipeline_hz")
+        ),
         DeclareLaunchArgument("ncnn_threads", default_value="2"),
         DeclareLaunchArgument("opencv_threads", default_value="1"),
         # Detector input resolution. Must match the NCNN export resolution.
         # The NCNN model was exported at 320; override on CLI if re-exported.
         DeclareLaunchArgument("imgsz", default_value="320"),
         # Inference-rate cap; effective FPS is reported from measured results.
-        DeclareLaunchArgument("inference_hz", default_value="20.0"),
+        DeclareLaunchArgument(
+            "inference_hz", default_value=LaunchConfiguration("pipeline_hz")
+        ),
         # Stream debug JPEGs for a PC viewer (tuning only; costs CPU). Default
         # off — the car is headless and normally runs dongle-out.
         DeclareLaunchArgument("publish_debug_image", default_value="false"),
@@ -137,10 +149,11 @@ def generate_launch_description():
             executable="control_node",
             name="control_node",
             output="screen",
+            condition=IfCondition(enable_actuation),
             parameters=[{
                 "control_topic": control_topic,
                 "use_joystick_control": False,
-                "command_hz": 20.0,
+                "command_hz": pipeline_hz,
                 # Board-priority voltage guard: motor + the D3-G 5V/5A regulator
                 # share one 2S pack, so a sag browns out the board's 5V rail and
                 # USB camera. The guard watches /battery/voltage and scales the
@@ -233,9 +246,9 @@ def generate_launch_description():
                 "detections_topic": detections_topic,
                 "publish_debug_image": publish_debug_image,
                 "debug_image_hz": debug_image_hz,
-                "perception_hz": 20.0,
-                "control_hz": 20.0,
-                "detection_hz_target": 20.0,
+                "perception_hz": pipeline_hz,
+                "control_hz": pipeline_hz,
+                "detection_hz_target": inference_hz,
                 "sign_vote_k": 6,
                 "sign_vote_n": 10,
                 "light_confirm_frames": 8,

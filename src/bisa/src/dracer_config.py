@@ -87,6 +87,11 @@ class DetectorConfig:
     enabled: bool = True
     imgsz: int = 640
     inference_hz: float = 30.0
+    # NCNN defaults to every CPU core. On the 4-core TOPST that starves camera,
+    # lane, and ROS callbacks, so reserve cores for the rest of the stack.
+    ncnn_threads: int = 2
+    # Build the NCNN/Vulkan pipelines in the background before mission use.
+    warmup_enabled: bool = True
     # Inference device: 'auto' uses CUDA when available (PC GPU) else CPU. The
     # heavy detector runs on the operator PC, so a GPU there offloads the weak
     # vehicle board entirely. Set 'cpu'/'cuda' to force one.
@@ -113,6 +118,8 @@ class DetectorConfig:
     # glitch frame, the same verdict must hold for this many consecutive control
     # ticks before it acts (control_hz=10 => 3 ticks = 0.3 s).
     light_confirm_frames: int = 3
+    # A detector verdict older than this is never reused by the control FSM.
+    light_stale_sec: float = 0.75
 
 
 @dataclass

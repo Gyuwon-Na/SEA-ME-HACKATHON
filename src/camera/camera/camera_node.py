@@ -26,6 +26,10 @@ class CameraNode(Node):
         self.declare_parameter('vehicle_config_file', get_default_vehicle_config_path())
         self.declare_parameter('publish_topic', 'camera/image/compressed')
         self.declare_parameter('publish_hz', 30.0)
+        # Keep the physical capture rate aligned with the ROS publish rate on
+        # constrained boards. Capturing at 30 FPS while publishing at 15 Hz
+        # wastes USB/decode work and lets stale frames accumulate in drivers.
+        self.declare_parameter('capture_hz', 30.0)
         self.declare_parameter('camera_device', '/dev/video0')
         self.declare_parameter('usb_camera_device', '/dev/video1')
         self.declare_parameter('mipi_camera_device', '/dev/video0')
@@ -45,6 +49,9 @@ class CameraNode(Node):
         publish_hz = float(self.get_parameter('publish_hz').value)
         if publish_hz <= 0.0:
             raise ValueError('publish_hz must be greater than 0')
+        capture_hz = float(self.get_parameter('capture_hz').value)
+        if capture_hz <= 0.0:
+            raise ValueError('capture_hz must be greater than 0')
         default_camera_device = str(self.get_parameter('camera_device').value)
         usb_camera_device = str(self.get_parameter('usb_camera_device').value)
         mipi_camera_device = str(self.get_parameter('mipi_camera_device').value)
@@ -55,6 +62,10 @@ class CameraNode(Node):
         self.debug_log = bool(self.get_parameter('debug_log').value)
         self.mjpg_passthrough = bool(self.get_parameter('mjpg_passthrough').value)
         self.publish_hz = publish_hz
+        self.capture_hz = capture_hz
+        # GStreamer/V4L2 caps need an integer numerator for the camera's
+        # discrete modes (15/1, 30/1, ...).
+        self.capture_fps = max(1, int(round(capture_hz)))
         self.jpeg_quality = jpeg_quality
         # True once a raw-MJPG capture is active; timer_callback then republishes
         # frames verbatim instead of re-encoding them.
@@ -95,12 +106,15 @@ class CameraNode(Node):
             )
 
         self.timer = self.create_timer(1.0 / self.publish_hz, self.timer_callback)
-        self.get_logger().info('\n'
+        self.get_logger().info(
+            '\n'
             f'[Camera Node] : topic={publish_topic} \n'
             f'[camera source] : {self.camera_source} \n'
             f'[width] : {self.image_width}, [height] : {self.image_height} \n'
             f'[camera_device] : {camera_device} \n'
             f'[flip_method] : {flip_method} \n'
+            f'[capture_hz] : {self.capture_fps}, '
+            f'[publish_hz] : {self.publish_hz:g} \n'
             f'[jpeg_quality] : {self.jpeg_quality} \n'
             f'[vehicle_config_file] : {self.vehicle_config_file} \n'
             f'[debug_log] : {self.debug_log} \n'
@@ -156,23 +170,29 @@ class CameraNode(Node):
             # Many USB webcams expose MJPG by default.
             mjpg_pipeline = (
                 f"v4l2src device={camera_device} io-mode=2 ! "
-                "image/jpeg,framerate=30/1 ! jpegdec ! "
+                f"image/jpeg,framerate={self.capture_fps}/1 ! jpegdec ! "
                 "videoconvert ! videoscale ! "
-                f"video/x-raw,format=BGR,width={self.image_width},height={self.image_height},framerate=30/1 ! "
+                "video/x-raw,format=BGR,"
+                f"width={self.image_width},height={self.image_height},"
+                f"framerate={self.capture_fps}/1 ! "
                 "appsink sync=false drop=true max-buffers=1"
             )
             # Fallback for raw USB camera modes.
             raw_pipeline = (
                 f"v4l2src device={camera_device} io-mode=2 ! "
                 "videoconvert ! videoscale ! "
-                f"video/x-raw,format=BGR,width={self.image_width},height={self.image_height},framerate=30/1 ! "
+                "video/x-raw,format=BGR,"
+                f"width={self.image_width},height={self.image_height},"
+                f"framerate={self.capture_fps}/1 ! "
                 "appsink sync=false drop=true max-buffers=1"
             )
             return [mjpg_pipeline, raw_pipeline]
 
         mipi_pipeline = (
             f"v4l2src device={camera_device} io-mode=2 ! "
-            f"video/x-raw,format=NV12,width={self.image_width},height={self.image_height},framerate=30/1 ! "
+            "video/x-raw,format=NV12,"
+            f"width={self.image_width},height={self.image_height},"
+            f"framerate={self.capture_fps}/1 ! "
             f"videoconvert ! videoflip method={flip_method} ! "
             "video/x-raw,format=BGR ! appsink sync=false drop=true max-buffers=1"
         )
@@ -195,12 +215,17 @@ class CameraNode(Node):
                 'MJPG passthrough unavailable; falling back to decode+encode pipeline'
             )
 
-        for candidate_pipeline in self.build_candidate_pipelines(self.camera_device, self.flip_method):
+        candidate_pipelines = self.build_candidate_pipelines(
+            self.camera_device, self.flip_method
+        )
+        for candidate_pipeline in candidate_pipelines:
             cap = cv2.VideoCapture(candidate_pipeline, cv2.CAP_GSTREAMER)
             if cap.isOpened():
                 self.cap = cap
                 self.pipeline = candidate_pipeline
-                self.get_logger().info(f'Camera capture opened with pipeline: {candidate_pipeline}')
+                self.get_logger().info(
+                    f'Camera capture opened with pipeline: {candidate_pipeline}'
+                )
                 return True
 
             cap.release()
@@ -211,7 +236,8 @@ class CameraNode(Node):
         return False
 
     def open_mjpg_passthrough(self):
-        """Open the USB camera in raw-MJPG mode so frames are republished as-is.
+        """
+        Open the USB camera in raw-MJPG mode so frames are republished as-is.
 
         Returns True only if the camera delivers JPEG frames that (a) start with
         the JPEG SOI marker, (b) decode with cv2.imdecode (the same call every
@@ -219,7 +245,6 @@ class CameraNode(Node):
         here), and (c) match the configured resolution. Otherwise releases the
         capture and returns False so the caller uses the decode+encode pipeline.
         """
-
         cap = cv2.VideoCapture(self.camera_device, cv2.CAP_V4L2)
         if not cap.isOpened():
             cap.release()
@@ -228,7 +253,8 @@ class CameraNode(Node):
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, float(self.image_width))
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, float(self.image_height))
-        cap.set(cv2.CAP_PROP_FPS, 30.0)
+        cap.set(cv2.CAP_PROP_FPS, float(self.capture_fps))
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1.0)
         # 0 = hand back the raw compressed buffer instead of a decoded BGR frame.
         cap.set(cv2.CAP_PROP_CONVERT_RGB, 0.0)
 

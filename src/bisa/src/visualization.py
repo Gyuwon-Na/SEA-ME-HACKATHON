@@ -270,7 +270,8 @@ def draw_overlay(frame, lane_viz, detections, markers, cmd, state, target_id=3,
     draw_lanes(out, lane_viz)
     draw_center_and_steering(out, float(getattr(cmd, "steering", 0.0)))
     draw_detections(out, detections, accepted_ids, light_verdicts)
-    draw_light_roi(out, light_roi)
+    # Keep the traffic-light ROI gate active in object_detector.py, but do not
+    # clutter the operator view with its yellow guide rectangle.
     draw_aruco(out, markers, target_id)
 
     det_classes = sorted({det.cls for det in (detections or [])})

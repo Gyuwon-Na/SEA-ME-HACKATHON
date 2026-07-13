@@ -607,3 +607,158 @@ Error ID: c30cee0a67a149e9a1f2f37e3e5ce2ea
 
 
 }
+
+---
+
+## 2026-07-13 — Codex 프로젝트 전역 지침 이식
+
+### 요청
+
+- 기존 Gemini용 `global-rules` 내용을 Codex가 인식하는 지침 형식으로 변환한다.
+
+### 변경 파일
+
+- `/home/hyun/D-Racer-Kit/AGENTS.md` 신규 생성
+- `/home/hyun/D-Racer-Kit/GEMINI작업내용.md` 작업 기록 추가
+
+### 핵심 변경
+
+- Gemini용 YAML 머리말을 제거하고 Codex의 저장소 지침 파일인 `AGENTS.md` 형식으로 재구성했다.
+- TOPST D3-G 온보드 연산 원칙, 하드웨어 주소와 채널, 트랙 미션, ROS 2 노드 구조를 보존했다.
+- 사용자 허가 없이는 수정할 수 없는 12개 보호 경로를 절대 경로로 명시했다.
+- 사용자 미커밋 변경 보존, 실차 구동 전 확인, ROS 2 인터페이스 변경 시 파급 효과 확인, 안전 정지 고려 사항을 명확히 했다.
+- 작업 기록은 이 파일에 덮어쓰기 없이 계속 추가하고, 원격 업로드나 `git push`는 명시적 승인 후에만 수행하도록 정리했다.
+
+### 검증
+
+- 보호 대상으로 지정된 12개 경로가 모두 실제로 존재함을 확인했다.
+- `AGENTS.md`에서 보드, I2C 장치, 입력·카메라 경로, 미션 객체 4종, 보호 규칙 및 Artifact 규칙이 포함되었음을 검색해 확인했다.
+- 기존 작업 트리의 미커밋 변경은 수정하거나 되돌리지 않았다.
+- 문서 지침만 변경했으므로 ROS 2 빌드와 실차 테스트는 실행하지 않았다.
+
+### 미완료 사항
+
+- 원격 저장소 업로드는 요청 또는 승인이 없어 수행하지 않았다.
+
+---
+
+## 2026-07-13 — 실차 온보드 성능 및 프로젝트 충돌 진단
+
+### 요청
+
+- D-Racer-Kit 문서를 먼저 읽고 로컬 소스와 실제 차량을 읽기 전용으로 점검한다.
+- `ros2 launch bisa onboard.launch.py` 실행 시 낮은 처리율과 YOLO 미검출의 원인을 찾고 해결 전략을 수립한다.
+
+### 변경 파일
+
+- `/home/hyun/D-Racer-Kit/GEMINI작업내용.md` 진단 기록 추가
+- 소스, 설정, 차량 배포 파일은 변경하지 않음
+
+### 핵심 진단
+
+- 차량 `hyundo_opti` 브랜치의 bisa 핵심 소스/설정과 로컬 작업 트리의 SHA-256가 일치하고, 차량 `src`/`install` 사본도 일치했다.
+- 카메라 단독은 640x480 MJPG 30 FPS를 안정적으로 발행했지만 `camera_node` 자체가 CPU 약 75~94%를 사용했다.
+- NCNN 단독 추론은 CPU 약 56~58 ms, PowerVR Vulkan 약 104 ms로 CPU가 더 빨랐다. Vulkan 첫 추론은 약 30~36초가 걸렸다.
+- 실제 30 Hz 카메라+자율주행 파이프라인에서 CPU 모드는 YOLO 2.8~3.3 FPS, 제어 토픽 약 5.3 Hz였다. Vulkan은 웜업 후 YOLO 5.5~5.7 FPS, 제어 약 9.1 Hz였다.
+- 카메라를 15 Hz로 낮춘 CPU 비교 실험은 YOLO 5.1~5.6 FPS, 제어 약 9.7 Hz로 회복됐다. 단, 실제 반영 시에는 발행 주기만 아니라 카메라 하드웨어 FPS도 15로 맞춰 버퍼 지연을 방지해야 한다.
+- 차량 OpenCV와 NCNN이 각각 기본 4스레드를 사용하며, Python executor/추론 스레드와 함께 4코어에서 경합하는 구조다.
+- `route_mode:=IN`이 실제로 `OutCourseFSM` 을 생성하며, IN 회전교차로와 OUT/IN 동적 장애물 상태 머신이 현재 코드에서 삭제된 회귀를 확인했다.
+- `light_confirm_frames` 는 서로 다른 추론 프레임이 아니라 한 번 저장된 `light_state`를 10 Hz 제어 틱에서 반복 계수한다. 따라서 한 번의 오탐도 3프레임 확인처럼 처리될 수 있다.
+- 출발 8초 후 `finish_crossed` 가 영구적으로 켜지고, 이후에는 중간 상태에서도 잘못된 red 판정이 영구 정지를 유발할 수 있다.
+- `scripts/car_run.sh`와 문서가 이미 삭제된 `vehicle.launch.py`/`driving.launch.py`를 계속 참조하여 해당 운영 경로는 실행 불가다.
+- 현재 모델은 640으로 학습됐지만 차량 NCNN은 320 고정 export이다. 학습 검증 mAP50-95는 0.95182이지만, 320 NCNN/실차 거리별 검증 자료는 저장소에 없다.
+- 종속성 lock/requirements가 없고 `ultralytics`, `ncnn`, `torch` 런타임이 `package.xml`/`setup.py`에서 완전히 재현되지 않는다.
+
+### 검증
+
+- 로컬 `python3 -m compileall -q src` 통과.
+- 로컬 `colcon build --symlink-install` 10개 패키지 통과.
+- `colcon test` 는 user-site `anyio` 플러그인과 시스템 pytest 버전 충돌(`_pytest.scope` 없음)로 6개 패키지가 테스트 본체를 실행하지 못했다.
+- pytest 플러그인 자동 로드를 끄고 monitor 테스트를 별도 실행한 결과 5개 중 2개가 로컬 Flask 미설치로 실패했다.
+- 차량 원격 진단은 control node를 실행하지 않고 `/diagnostic/control*` 토픽을 사용했다. 모터/조향 출력은 발생시키지 않았다.
+
+### 미완료 사항
+
+- 진단만 요청된 단계라 코드/설정 수정, 차량 배포, 실차 구동 테스트는 수행하지 않았다.
+- 다음 단계에서 형상 기준선을 먼저 확정한 뒤, 15 Hz 카메라/처리 경로, 스레드 상한, 추론 프로세스 격리, 고유 추론 프레임 투표, IN/동적 장애물 FSM 복구를 순차 검증해야 한다.
+
+---
+
+## 2026-07-13 — 온보드 카메라·NCNN 성능 및 신호등 투표 개선
+
+### 요청
+
+- 카메라 15 Hz + NCNN CPU(A), 카메라 15 Hz + Vulkan 사전 웜업(B)을 실제 차량에서 비교한다.
+- OpenCV/NCNN 스레드 경합과 매 프레임 객체 생성을 줄인다.
+- 신호등을 고유 추론 프레임으로 투표하고 오래된 결과를 자동 해제한다.
+- Vulkan 드라이버 설치 여부를 확인하고 필요한 경우 설치한다.
+
+### 변경 파일
+
+- `src/camera/camera/camera_node.py`
+- `src/bisa/config/dracer_params.yaml`
+- `src/bisa/launch/onboard.launch.py`
+- `src/bisa/src/autonomous_driving_node.py`
+- `src/bisa/src/dracer_config.py`
+- `src/bisa/src/inference_process.py` 신규
+- `src/bisa/src/lane_perception.py`
+- `src/bisa/src/mission_controller.py`
+- `src/bisa/src/object_detector.py`
+- `src/bisa/src/traffic_light.py`
+- `src/bisa/package.xml`, `src/bisa/setup.py`
+- `src/bisa/test/test_perception_timing.py` 신규
+- `scripts/capture_recognition_dataset.py` 신규
+- `scripts/benchmark_detector.py` 신규
+
+### 핵심 변경
+
+- 카메라에 `capture_hz` 파라미터를 추가하고 USB MJPG passthrough, GStreamer USB/MIPI 후보 파이프라인 모두 실제 캡처 FPS를 사용하도록 변경했다. 온보드 기본은 캡처/발행 모두 15 Hz다.
+- 온보드 A/B 실행 인자로 `device`, `camera_hz`, `ncnn_threads`, `opencv_threads`를 추가했다. 기본은 Vulkan B안이며 `device:=cpu`로 A안을 선택할 수 있다.
+- OpenCV 내부 스레드는 온보드 기본 1개, NCNN CPU 스레드는 2개로 제한했다.
+- 차선 CLAHE 및 morphology kernel, 신호등 보정 CLAHE 및 gamma LUT를 설정 키 기반으로 재사용한다. 라이브 파라미터가 바뀌면 자동 재생성된다.
+- NCNN/Vulkan 전체를 별도 spawn 프로세스로 격리하고 최신 프레임 1장만 고정 shared memory로 전달한다. 부모 ROS 노드는 결과/상태 queue만 비차단으로 소비하므로 Vulkan 웜업이 Python GIL을 점유해도 제어가 멈추지 않는다.
+- `/bisa/detector/ready`, `/bisa/detector/status`를 발행하고 자식 프로세스 종료를 감시·재시작한다. PowerVR가 없거나 Vulkan 웜업/추론이 실패하면 자식 내부에서 NCNN CPU로 폴백한다.
+- Vulkan 장치 인덱스와 이름을 NCNN API로 확인하고 llvmpipe 소프트웨어 장치를 거부한다. 추론 예외나 자식 프로세스 종료를 상태로 노출하고 복구하도록 했다.
+- Ultralytics가 첫 `predict()` 안에서 `ncnn.Net`을 지연 생성하는 동작을 확인했다. 모델 로드 전에 `net.opt.num_threads=2`가 설정되도록 생성자를 한정 래핑하여 convolution이 초기 기본 스레드 수를 유지하던 문제를 수정했다.
+- 신호등 상태를 `(verdict, inference_sequence, timestamp)` 원자 스냅샷으로 저장한다. FSM은 같은 sequence를 반복 계수하지 않으며 0.75초 이상 지난 verdict를 자동 해제한다.
+- 동일 실차 영상 데이터로 모델/해상도/장치를 비교할 수 있는 벤치마크 스크립트와 거리·조명별 데이터 수집 스크립트를 추가했다. 라벨이 있는 `data.yaml`을 주면 mAP/클래스별 precision/recall도 기록한다.
+
+### Vulkan 확인
+
+- 차량 `/etc/vulkan/icd.d/icdconf.json`과 `/dev/dri` 장치가 존재한다.
+- NCNN은 GPU 0을 `PowerVR Furian GT9524`, GPU 1을 `llvmpipe`로 열었다.
+- GPU 0에서 NCNN Vulkan 실제 웜업과 추론을 완료했다. 런타임 드라이버는 이미 정상이라 재설치하지 않았다.
+- `vulkaninfo` 명령을 제공하는 `vulkan-tools`는 없지만 진단용 선택 패키지일 뿐, 현재 NCNN 실행에는 필요하지 않아 설치하지 않았다.
+
+### 실차 무구동 A/B 결과
+
+- control node는 실행하지 않고 BISA 출력을 `/diagnostic/control`로 변경했다. 모터/조향 출력은 발생하지 않았다.
+- A(CPU): 카메라 14.98~15.02 Hz, 제어 평균 9.75~10.04 Hz, 추론 주 구간 106~112 ms 및 6.7~6.8 FPS(후반 한 구간 5.1 FPS), camera CPU 44.5%, BISA CPU 181%.
+- B(Vulkan): 웜업 약 31초, 카메라 14.98~15.00 Hz, 제어 평균 9.52~10.04 Hz, 추론 112~118 ms 및 5.7~6.2 FPS, camera CPU 43.8%, BISA CPU 99%.
+- A가 추론 FPS는 높지만 B가 BISA CPU를 약 82%p 절감하므로, 카메라/차선/ROS/열 여유를 고려해 B를 온보드 기본으로 유지했다.
+- 두 안 모두 제어 간격의 순간 최대가 약 0.17초였다. 평균 10 Hz 목표는 달성했지만 더 엄격한 지터 기준이 필요하면 YOLO 프로세스 분리/shared memory가 다음 단계다.
+
+### 영구 배포 후 프로세스 격리 검증
+
+- 첫 영구 설치본 검증에서 Vulkan 웜업 30.6초 동안 NCNN Python 바인딩이 GIL을 잡아 제어 토픽 간격이 최대 30.289초까지 벌어지는 문제를 발견했다. `control_node`의 0.5초 command watchdog으로 스로틀은 안전 정지하지만 제어 공백 자체는 허용하지 않았다.
+- YOLO/Vulkan을 별도 spawn 프로세스와 최신 1장 shared memory로 격리한 뒤 전체 45초 창에서 제어가 정확히 10.000 Hz, 간격 0.098~0.102초로 유지됐다. 기존 30초 웜업 공백은 제거됐다.
+- 최종 설치본은 카메라 14.998 Hz(간격 0.050~0.083초), Vulkan 추론 107 ms 및 6.5 FPS를 기록했다.
+- 최종 ready 상태는 `device=vulkan:0 ncnn_threads=2 opencv_threads=1`로 확인했다.
+- 부모 BISA ROS 프로세스와 자식 추론 프로세스를 분리해 확인했고, 종료 시 프로세스 그룹과 shared memory를 정리하도록 검증했다.
+- 차량 배포 전 백업은 `/tmp/dracer_pre_perf_deploy_20260713.tar.gz`, 프로세스 격리 전 추가 백업은 `/tmp/dracer_pre_process_isolation_20260713.tar.gz`에 저장했다.
+
+### 검증
+
+- `python3 -m compileall` 통과.
+- `colcon build --symlink-install --packages-select camera bisa` 통과.
+- camera 테스트: 2 passed, 1 copyright test skipped.
+- BISA 회귀 테스트: 2 passed. 동일 추론 sequence 중복 방지, missing/stale 상태 해제를 검증했다.
+- NCNN CPU 웜업 스모크에서 `num_threads=2`, `use_vulkan_compute=False`를 실제 backend option으로 확인했다.
+- 벤치마크 스크립트가 NCNN 모델과 임시 이미지로 JSON 결과를 생성하는 스모크 테스트를 통과했다.
+- 온보드 launch 인자 및 타입 해석을 `--show-args`로 확인했다.
+- spawn/shared-memory 추론 스모크에서 ready와 실제 result 반환, 정상 프로세스 종료를 확인했다.
+- 차량에 `camera`/`bisa`를 영구 배포하고 두 패키지를 재빌드했다. 차량에서도 compileall, BISA 2 passed, camera 2 passed/1 skipped를 확인했다.
+
+### 미완료 사항
+
+- red/green/left/right의 실제 트랙 거리·점등/소등·역광 라벨 데이터는 아직 제공/수집되지 않아 320/384/416 recall 비교와 색 분류기 재튜닝은 데이터 수집 후 실행해야 한다.

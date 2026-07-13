@@ -10,6 +10,18 @@ from .lane_perception import LaneObs, clamp
 from .object_detector import DetectionBuffer
 
 
+def fresh_light_state(
+    snapshot: tuple[str | None, int, float], now_sec: float, max_age_sec: float
+) -> tuple[str | None, int]:
+    """Drops a light verdict when it is absent, future-dated, or too old."""
+
+    state, sequence, stamp = snapshot
+    age = float(now_sec) - float(stamp)
+    if state in ("green", "red") and 0.0 <= age <= max(float(max_age_sec), 0.0):
+        return state, int(sequence)
+    return None, int(sequence)
+
+
 @dataclass
 class ControlCmd:
     """Carries normalized control values published to /control."""
@@ -119,16 +131,24 @@ class BaseCourseFSM:
         # Consecutive control ticks the traffic-light verdict has held green/red.
         self._green_streak = 0
         self._red_streak = 0
+        self._last_light_seq = None
 
-    def update_light(self, light_state) -> None:
-        """Accumulates how long the classify_light verdict has held green/red.
+    def update_light(self, light_state, light_seq=None) -> None:
+        """Counts consecutive verdicts from distinct detector frames only.
 
-        Called once per FSM tick with the latest verdict ("green"/"red"/None).
-        :meth:`green_confirmed` / :meth:`red_confirmed` then gate on
-        ``detector.light_confirm_frames`` consecutive ticks, so a single glitch
-        frame never launches or stops the car.
+        The control loop runs faster than inference, so repeated control ticks
+        often carry the same result. ``light_seq`` prevents one detector frame
+        from being counted several times. A missing/stale verdict always clears
+        both streaks even when its sequence number is unchanged.
         """
 
+        if light_state not in ("green", "red"):
+            self._green_streak = 0
+            self._red_streak = 0
+            return
+        if light_seq is not None and light_seq == self._last_light_seq:
+            return
+        self._last_light_seq = light_seq
         self._green_streak = self._green_streak + 1 if light_state == "green" else 0
         self._red_streak = self._red_streak + 1 if light_state == "red" else 0
 
@@ -231,13 +251,13 @@ class OutCourseFSM(BaseCourseFSM):
         return ControlCmd(throttle, steer)
 
     def step(self, lane: LaneObs, detector: DetectionBuffer, now: float,
-             light_state=None) -> ControlCmd:
+             light_state=None, light_seq=None) -> ControlCmd:
         """Runs one OUT-course FSM tick and returns the desired control command."""
 
         if self.start_t <= 0.0:
             self.start_t = now
             self.enter_t = now
-        self.update_light(light_state)
+        self.update_light(light_state, light_seq)
 
         # Arrival red-stop, independent of the intermediate state chain: once the
         # finish window is open (enough time since launch, so the start light is
@@ -326,7 +346,7 @@ class LaneTestFSM(BaseCourseFSM):
         self.state = "LANE_TEST"
 
     def step(self, lane: LaneObs, detector: DetectionBuffer, now: float,
-             light_state=None) -> ControlCmd:
+             light_state=None, light_seq=None) -> ControlCmd:
         """Follows the lane every tick, capped by the speed band (ignores lights)."""
 
         if self.start_t <= 0.0:

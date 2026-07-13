@@ -24,6 +24,7 @@ setup(
          [p for p in glob('checkpoints/best_ncnn_model/*') if os.path.isfile(p)]),
     ],
     install_requires=['setuptools', 'PyYAML'],
+    tests_require=['pytest'],
     zip_safe=True,
     maintainer='topst',
     maintainer_email='topst@todo.todo',
@@ -32,6 +33,7 @@ setup(
     entry_points={
         'console_scripts': [
             'bisa_autonomous_node = bisa.autonomous_driving_node:main',
+            'bisa_detector_node = bisa.detector_node:main',
             'viz_node = bisa.viz_node:main',
             'power_gui_node = bisa.power_gui_node:main',
             'system_telemetry_node = bisa.system_telemetry_node:main',

@@ -53,29 +53,64 @@ class LanePerception:
         self.config = config
         self.prev_center_error = 0.0
         self.prev_near_center: Optional[float] = None
+        self._clahe_key = None
+        self._clahe = None
+        self._morph_kernels: dict[int, np.ndarray] = {}
         # Visualization scratch data, populated only when compute_lane_obs is
         # called with collect_viz=True (PC-side debug overlay). Kept off the hot
         # path so on-vehicle runs pay nothing for it.
         self.last_viz: dict = {}
 
-    def build_road_mask(self, frame_bgr: np.ndarray) -> np.ndarray:
+    def _get_clahe(self):
+        """Returns a cached CLAHE object, rebuilding only after live tuning."""
+
+        cfg = self.config.lane
+        key = (
+            max(float(cfg.lab_clahe_clip), 0.01),
+            max(1, int(cfg.lab_clahe_tile)),
+        )
+        if key != self._clahe_key:
+            self._clahe = cv2.createCLAHE(clipLimit=key[0], tileGridSize=(key[1], key[1]))
+            self._clahe_key = key
+        return self._clahe
+
+    def _get_morph_kernel(self, size: int) -> np.ndarray:
+        """Returns an immutable square morphology kernel from a tiny cache."""
+
+        size = max(1, int(size))
+        kernel = self._morph_kernels.get(size)
+        if kernel is None:
+            kernel = np.ones((size, size), dtype=np.uint8)
+            self._morph_kernels[size] = kernel
+        return kernel
+
+    def prepare_lane_lab(self, frame_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Returns one CLAHE-equalized LAB image and its L channel.
+
+        Road masking and Canny/Hough both consume the same enhanced L channel.
+        Preparing it once avoids a second BGR->LAB conversion, split, and CLAHE
+        pass for every camera frame.
+        """
+
+        lab = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2LAB)
+        l_channel = self._get_clahe().apply(lab[:, :, 0])
+        lab[:, :, 0] = l_channel
+        return lab, l_channel
+
+    def build_road_mask(
+        self, frame_bgr: np.ndarray, prepared_lab: np.ndarray | None = None
+    ) -> np.ndarray:
         """Extracts the drivable road area with LAB thresholding and morphology."""
 
         cfg = self.config.lane
-        lab = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2LAB)
-        l_ch, a_ch, b_ch = cv2.split(lab)
-        clahe = cv2.createCLAHE(
-            clipLimit=max(float(cfg.lab_clahe_clip), 0.01),
-            tileGridSize=(max(1, int(cfg.lab_clahe_tile)),) * 2,
-        )
-        lab = cv2.merge((clahe.apply(l_ch), a_ch, b_ch))
+        lab = prepared_lab
+        if lab is None:
+            lab, _ = self.prepare_lane_lab(frame_bgr)
         lower = np.array([cfg.lab_l_min, cfg.lab_a_min, cfg.lab_b_min], dtype=np.uint8)
         upper = np.array([cfg.lab_l_max, cfg.lab_a_max, cfg.lab_b_max], dtype=np.uint8)
         mask = cv2.inRange(lab, lower, upper)
-        open_size = max(1, int(self.config.lane.morph_open_kernel))
-        close_size = max(1, int(self.config.lane.morph_close_kernel))
-        open_kernel = np.ones((open_size, open_size), dtype=np.uint8)
-        close_kernel = np.ones((close_size, close_size), dtype=np.uint8)
+        open_kernel = self._get_morph_kernel(self.config.lane.morph_open_kernel)
+        close_kernel = self._get_morph_kernel(self.config.lane.morph_close_kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
         return mask
@@ -86,11 +121,7 @@ class LanePerception:
         try:
             lab = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2Lab)
             l_channel, _, _ = cv2.split(lab)
-            clahe = cv2.createCLAHE(
-                clipLimit=max(float(self.config.lane.lab_clahe_clip), 0.01),
-                tileGridSize=(max(1, int(self.config.lane.lab_clahe_tile)),) * 2,
-            )
-            return clahe.apply(l_channel)
+            return self._get_clahe().apply(l_channel)
         except cv2.error:
             return np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
 
@@ -152,7 +183,11 @@ class LanePerception:
         return ((float(x_top), int(top_y)), (float(x_bot), int(height)))
 
     def average_hough_lanes(
-        self, frame_bgr: np.ndarray, record: bool = False, viz_out: dict | None = None
+        self,
+        frame_bgr: np.ndarray,
+        record: bool = False,
+        viz_out: dict | None = None,
+        prepared_l_channel: np.ndarray | None = None,
     ) -> tuple[Optional[float], bool, bool]:
         """Computes lane center from Canny/Hough lines as in the ERP reference code."""
 
@@ -163,7 +198,9 @@ class LanePerception:
             viz_out["hough_right"] = None
             viz_out["hough_segments"] = []
             viz_out["hough_top_y"] = top_y
-        l_channel = self.get_l_channel(frame_bgr)
+        l_channel = prepared_l_channel
+        if l_channel is None:
+            l_channel = self.get_l_channel(frame_bgr)
         blur = cv2.GaussianBlur(l_channel, (5, 5), 0)
         edges = cv2.Canny(
             blur,
@@ -316,7 +353,12 @@ class LanePerception:
         # keeps using the full frame elsewhere in the pipeline.
         roi_frame = frame_bgr[y0:y0 + roi_h, x0:x0 + roi_w]
 
-        mask = self.build_road_mask(roi_frame)
+        try:
+            prepared_lab, prepared_l_channel = self.prepare_lane_lab(roi_frame)
+        except cv2.error:
+            prepared_lab = None
+            prepared_l_channel = np.zeros(roi_frame.shape[:2], dtype=np.uint8)
+        mask = self.build_road_mask(roi_frame, prepared_lab=prepared_lab)
         if collect_viz:
             # Shown in the lane mask debug view: the binarized road mask, so the
             # HSV/LAB threshold and morphology sliders have a visible effect.
@@ -331,7 +373,12 @@ class LanePerception:
         # average -> lane center from the left/right line x at the ROI top. This
         # always runs (the PC does the heavy compute), matching the reference which
         # is purely Hough-line based rather than road-mask based.
-        hough_center, _, _ = self.average_hough_lanes(roi_frame, record=collect_viz, viz_out=viz_tmp)
+        hough_center, _, _ = self.average_hough_lanes(
+            roi_frame,
+            record=collect_viz,
+            viz_out=viz_tmp,
+            prepared_l_channel=prepared_l_channel,
+        )
         near_center = hough_center
         if near_center is None:
             # Fall back to the black-road-mask centroid only when no lane line was

@@ -11,9 +11,9 @@ Contrast:
   onboard.launch.py  -> car computes everything itself (this file)
 
 YOLO runs via the NCNN backend with Vulkan GPU acceleration on the PowerVR
-GT9524 (TCC8050). The NCNN export is faster than PyTorch eager inference on
-the A72 CPU, and Vulkan offloads the work to the GPU, freeing CPU cores for
-the lane/control loop. The debug JPEG stream is off by default (headless car).
+GT9524 (TCC8050). Vehicle A/B measurements show Vulkan trades a little detector
+FPS for substantially lower CPU load, leaving cores for the lane/control loop.
+The debug JPEG stream is off by default (headless car).
 The sign-vote window is scaled from the 30 Hz PC baseline to match the GPU
 inference rate on this board.
 
@@ -47,9 +47,9 @@ def default_model_path():
     """Return the installed NCNN model dir (GPU-accelerated via Vulkan).
 
     The on-car launch runs YOLO through the NCNN backend with Vulkan GPU
-    acceleration on the PowerVR GT9524. The NCNN export is ~2.4x faster than
-    PyTorch eager on the A72 CPU, and Vulkan offloads inference to the GPU
-    so the CPU stays free for lane/control. PC launches keep using best.pt.
+    acceleration on the PowerVR GT9524. Vulkan leaves more CPU time for
+    lane/control; use device:=cpu for the measured CPU A/B baseline.
+    PC launches keep using best.pt.
     Note: this NCNN model is exported at imgsz=320 — keep imgsz:=320.
     """
 
@@ -64,6 +64,7 @@ def generate_launch_description():
     model_path = LaunchConfiguration("model_path")
     image_topic = LaunchConfiguration("image_topic")
     control_topic = LaunchConfiguration("control_topic")
+    detections_topic = LaunchConfiguration("detections_topic")
     enable_joystick = LaunchConfiguration("enable_joystick")
 
     # GPU-accelerated detector tuning (overridable on the command line). These
@@ -74,12 +75,18 @@ def generate_launch_description():
     # otherwise declare_parameter rejects the override on a type mismatch.
     imgsz = ParameterValue(LaunchConfiguration("imgsz"), value_type=int)
     inference_hz = ParameterValue(LaunchConfiguration("inference_hz"), value_type=float)
+    camera_hz = ParameterValue(LaunchConfiguration("camera_hz"), value_type=float)
+    ncnn_threads = ParameterValue(LaunchConfiguration("ncnn_threads"), value_type=int)
+    opencv_threads = ParameterValue(LaunchConfiguration("opencv_threads"), value_type=int)
     # Off by default (headless car saves CPU/GPU). Turn on to stream the
     # Detect / Lane-mask JPEGs so a PC on the same LAN can watch with
     # `ros2 run bisa viz_node`. Only useful while the WiFi dongle is still
     # in (tuning), not on the dongle-out competition run.
     publish_debug_image = ParameterValue(
         LaunchConfiguration("publish_debug_image"), value_type=bool
+    )
+    debug_image_hz = ParameterValue(
+        LaunchConfiguration("debug_image_hz"), value_type=float
     )
 
     return LaunchDescription([
@@ -88,17 +95,24 @@ def generate_launch_description():
         DeclareLaunchArgument("model_path", default_value=default_model_path()),
         DeclareLaunchArgument("image_topic", default_value="/camera/image/compressed"),
         DeclareLaunchArgument("control_topic", default_value="/control"),
+        DeclareLaunchArgument("detections_topic", default_value="/bisa/detections"),
         # Set false if no gamepad dongle is plugged into the car.
         DeclareLaunchArgument("enable_joystick", default_value="true"),
+        # All production loops use one 20 Hz time base. Debug rendering remains
+        # independently rate-limited because it is not part of vehicle control.
+        DeclareLaunchArgument("device", default_value="vulkan:0"),
+        DeclareLaunchArgument("camera_hz", default_value="20.0"),
+        DeclareLaunchArgument("ncnn_threads", default_value="2"),
+        DeclareLaunchArgument("opencv_threads", default_value="1"),
         # Detector input resolution. Must match the NCNN export resolution.
         # The NCNN model was exported at 320; override on CLI if re-exported.
         DeclareLaunchArgument("imgsz", default_value="320"),
-        # Inference-rate cap. With Vulkan GPU acceleration the PowerVR can
-        # sustain ~8+ Hz at imgsz=320. Tune down if thermal throttles.
-        DeclareLaunchArgument("inference_hz", default_value="8.0"),
+        # Inference-rate cap; effective FPS is reported from measured results.
+        DeclareLaunchArgument("inference_hz", default_value="20.0"),
         # Stream debug JPEGs for a PC viewer (tuning only; costs CPU). Default
         # off — the car is headless and normally runs dongle-out.
         DeclareLaunchArgument("publish_debug_image", default_value="false"),
+        DeclareLaunchArgument("debug_image_hz", default_value="20.0"),
 
         # --- camera (publishes /camera/image/compressed) ---------------------
         Node(
@@ -108,7 +122,11 @@ def generate_launch_description():
             output="screen",
             parameters=[{
                 "publish_topic": image_topic,
-                "publish_hz": 30.0,
+                "capture_hz": camera_hz,
+                "publish_hz": camera_hz,
+                "mjpg_passthrough": True,
+                "require_mjpg_passthrough": True,
+                "jpeg_quality": 90,
                 "debug_log": False,
             }],
         ),
@@ -122,7 +140,7 @@ def generate_launch_description():
             parameters=[{
                 "control_topic": control_topic,
                 "use_joystick_control": False,
-                "command_hz": 10.0,
+                "command_hz": 20.0,
                 # Board-priority voltage guard: motor + the D3-G 5V/5A regulator
                 # share one 2S pack, so a sag browns out the board's 5V rail and
                 # USB camera. The guard watches /battery/voltage and scales the
@@ -181,30 +199,46 @@ def generate_launch_description():
             }],
         ),
 
-        # --- perception + mission FSM + /control output (ON THE CAR) ---------
+        # --- NCNN detector (isolated Python process; no control-loop GIL) ------
         Node(
             package="bisa",
+            executable="bisa_detector_node",
+            name="bisa_detector_node",
+            output="screen",
+            parameters=[{
+                "config_file": config_file,
+                "model_path": model_path,
+                "image_topic": image_topic,
+                "detections_topic": detections_topic,
+                "opencv_num_threads": opencv_threads,
+                "detector.device": LaunchConfiguration("device"),
+                "detector.imgsz": imgsz,
+                "detector.inference_hz": inference_hz,
+                "detector.ncnn_threads": ncnn_threads,
+                "detector.warmup_enabled": True,
+            }],
+        ),
+
+        # --- C++ lane perception + mission FSM + deterministic 20 Hz control --
+        Node(
+            package="bisa_cpp",
             executable="bisa_autonomous_node",
             name="bisa_autonomous_node",
             output="screen",
             parameters=[{
                 "route_mode": route_mode,
                 "config_file": config_file,
-                "model_path": model_path,
                 "image_topic": image_topic,
                 "control_topic": control_topic,
-                # Headless car: off by default to save CPU/GPU; flip on with
-                # publish_debug_image:=true to watch from a PC on the same LAN.
+                "detections_topic": detections_topic,
                 "publish_debug_image": publish_debug_image,
-                "debug_log": True,
-                # --- GPU (Vulkan) detector overrides (flat dotted config params) -
-                "detector.device": "vulkan:0",
-                "detector.imgsz": imgsz,
-                "detector.inference_hz": inference_hz,
-                # Sign vote window re-scaled 30 Hz -> ~8 Hz to preserve wall-clock:
-                #   sign vote 9/15f@30Hz (~0.5s) -> 3/5f@8Hz (~0.625s)
-                "detector.sign_vote_k": 3,
-                "detector.sign_vote_n": 5,
+                "debug_image_hz": debug_image_hz,
+                "perception_hz": 20.0,
+                "control_hz": 20.0,
+                "detection_hz_target": 20.0,
+                "sign_vote_k": 6,
+                "sign_vote_n": 10,
+                "light_confirm_frames": 8,
             }],
         ),
     ])

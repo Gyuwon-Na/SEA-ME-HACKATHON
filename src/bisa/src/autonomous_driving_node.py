@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import threading
+import multiprocessing as mp
+import queue
 import time
-from dataclasses import replace
+from multiprocessing import shared_memory
 from pathlib import Path
 
 import cv2
@@ -22,9 +23,15 @@ from std_msgs.msg import Bool, String
 from . import traffic_light, visualization
 from .aruco_detector import ArucoDetector
 from .dracer_config import load_config, resolve_package_relative_path
+from .inference_process import run_inference_process
 from .lane_perception import LaneObs, LanePerception, clamp
-from .mission_controller import ControlCmd, LaneController, make_course_fsm
-from .object_detector import BestPthDetector, DetectionBuffer
+from .mission_controller import (
+    ControlCmd,
+    LaneController,
+    fresh_light_state,
+    make_course_fsm,
+)
+from .object_detector import DetectionBuffer
 
 
 def as_bool(value) -> bool:
@@ -75,6 +82,8 @@ class BisaAutonomousNode(Node):
         self.declare_parameter("publish_debug_image", True)
         self.declare_parameter("debug_image_topic", "/bisa/debug/image/compressed")
         self.declare_parameter("lane_mask_topic", "/bisa/debug/lane_mask/compressed")
+        self.declare_parameter("debug_image_hz", 20.0)
+        self.declare_parameter("opencv_num_threads", 1)
 
         config_file = str(self.get_parameter("config_file").value)
         route_mode = str(self.get_parameter("route_mode").value).strip()
@@ -85,6 +94,13 @@ class BisaAutonomousNode(Node):
         self.publish_debug_image = as_bool(self.get_parameter("publish_debug_image").value)
         self.debug_image_topic = str(self.get_parameter("debug_image_topic").value)
         self.lane_mask_topic = str(self.get_parameter("lane_mask_topic").value)
+        self.debug_image_hz = max(
+            0.1, float(self.get_parameter("debug_image_hz").value)
+        )
+        self.opencv_num_threads = max(
+            1, int(self.get_parameter("opencv_num_threads").value)
+        )
+        cv2.setNumThreads(self.opencv_num_threads)
 
         self.config = load_config(config_file)
         if route_mode:
@@ -92,12 +108,12 @@ class BisaAutonomousNode(Node):
         if model_path:
             self.config.detector.model_path = model_path
         resolved_model = resolve_package_relative_path(__file__, self.config.detector.model_path)
+        self.resolved_model = resolved_model
 
         self.lane_perception = LanePerception(self.config)
         # 30 Hz inference with up to 36-frame consecutive windows needs >36
         # frames of history; 90 frames = 3 s of headroom.
         self.det_buffer = DetectionBuffer(maxlen=90)
-        self.detector = BestPthDetector(self.config, resolved_model, logger=self.get_logger())
         self.aruco_detector = ArucoDetector(self.config)
         self.controller = LaneController(self.config)
         self.fsm = make_course_fsm(self.config, self.controller)
@@ -113,22 +129,35 @@ class BisaAutonomousNode(Node):
         # light boxes, ignoring mission phase — drives the /detect_green and
         # /detect_red monitor topics exactly as the tuner reports it.
         self.light_state = None
+        # Atomic tuple: (state, unique inference sequence, ROS timestamp sec).
+        # Consumers never observe a state from one inference with the sequence
+        # or timestamp from another.
+        self._light_snapshot = (None, 0, 0.0)
+        self._inference_seq = 0
+        # Atomic tuple: (ready, human-readable backend status).
+        self._detector_status = (False, "starting")
         self.latest_markers = []
         self.last_cmd = ControlCmd(0.0, 0.0)
         self.last_frame = None
         self.last_log_time = 0.0
+        self._next_viz_collect_time = 0.0
 
-        # YOLO is CPU-only on this vehicle and a single predict() can exceed the
-        # camera frame interval. Running it inside image_callback would block the
-        # single-threaded executor and freeze the camera/debug stream and control
-        # loop, so inference runs on a background thread that always processes the
-        # most recent frame and drops anything it could not keep up with.
-        self._infer_lock = threading.Lock()
-        self._infer_frame = None
-        self._infer_stop = False
-        self._infer_thread = threading.Thread(
-            target=self._inference_worker, name="bisa_inference", daemon=True
-        )
+        # NCNN's Python binding holds the GIL during the ~31 s first Vulkan build.
+        # A thread therefore freezes every ROS Python callback despite the
+        # MultiThreadedExecutor. Keep all model work in a spawned process and
+        # exchange only the newest frame through one fixed shared-memory slot.
+        self._mp_context = mp.get_context("spawn")
+        self._infer_process = None
+        self._infer_shm = None
+        self._infer_array = None
+        self._infer_shape = None
+        self._infer_frame_lock = None
+        self._infer_frame_sequence = None
+        self._infer_frame_stamp = None
+        self._infer_stop_event = None
+        self._infer_result_queue = None
+        self._infer_config_queue = None
+        self._infer_last_start = 0.0
 
         # Separate callback groups so image processing and control run in
         # parallel threads under MultiThreadedExecutor. Each group is
@@ -136,6 +165,7 @@ class BisaAutonomousNode(Node):
         # and likewise for control_loop — but image and control CAN overlap.
         self._cb_image = MutuallyExclusiveCallbackGroup()
         self._cb_control = MutuallyExclusiveCallbackGroup()
+        self._cb_debug = MutuallyExclusiveCallbackGroup()
 
         # BEST_EFFORT + shallow queue: always process the newest camera frame and
         # drop stale ones, matching the camera publisher and avoiding WiFi lag.
@@ -154,6 +184,12 @@ class BisaAutonomousNode(Node):
         self.detect_red_pub = self.create_publisher(Bool, "detect_red", 10)
         self.detect_sign_pub = self.create_publisher(String, "detect_sign", 10)
         self.detect_aruco_pub = self.create_publisher(String, "detect_aruco", 10)
+        self.detector_ready_pub = self.create_publisher(
+            Bool, "/bisa/detector/ready", 10
+        )
+        self.detector_status_pub = self.create_publisher(
+            String, "/bisa/detector/status", 10
+        )
         # Debug JPEG stream reuses the camera's BEST_EFFORT/depth-1 profile so it
         # drops stale frames instead of triggering RELIABLE retransmits, which
         # caused WiFi head-of-line blocking against the viz/monitor subscribers.
@@ -172,12 +208,18 @@ class BisaAutonomousNode(Node):
 
         self.timer = self.create_timer(1.0 / max(self.config.mission.control_hz, 1.0), self.control_loop,
                                        callback_group=self._cb_control)
-        self._infer_thread.start()
-
+        self.debug_timer = None
+        if self.publish_debug_image:
+            self.debug_timer = self.create_timer(
+                1.0 / self.debug_image_hz,
+                self.debug_loop,
+                callback_group=self._cb_debug,
+            )
         self.get_logger().info(
             "BISA autonomous node started: "
             f"route={self.config.mission.route_mode}, image_topic={self.image_topic}, "
-            f"control_topic={self.control_topic}, model={resolved_model}, config={config_file}"
+            f"control_topic={self.control_topic}, model={resolved_model}, config={config_file}, "
+            f"opencv_threads={cv2.getNumThreads()}"
         )
 
     def _flatten_config(self) -> list[tuple[str, object]]:
@@ -261,6 +303,16 @@ class BisaAutonomousNode(Node):
 
         for param in params:
             self._apply_tuning_value(param.name, param.value)
+        if self._infer_config_queue is not None:
+            try:
+                while True:
+                    self._infer_config_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._infer_config_queue.put_nowait(self.config)
+            except queue.Full:
+                pass
         return SetParametersResult(successful=True)
 
     @staticmethod
@@ -279,13 +331,27 @@ class BisaAutonomousNode(Node):
             return list(value)
         return value
 
-    def publish_detection_status(self) -> None:
+    def _fresh_light_snapshot(self, now_sec: float) -> tuple[str | None, int]:
+        """Returns the latest light verdict only while it is detector-fresh."""
+
+        return fresh_light_state(
+            self._light_snapshot,
+            now_sec,
+            self.config.detector.light_stale_sec,
+        )
+
+    def _set_detector_status(self, ready: bool, status: str) -> None:
+        """Atomically updates readiness consumed by the ROS status publishers."""
+
+        self._detector_status = (bool(ready), str(status))
+
+    def publish_detection_status(self, now_sec: float) -> None:
         """Publishes compact detection flags for PC-side echo monitoring."""
 
         # Traffic light: the raw classify_light state, mutually exclusive —
         # GREEN -> green=True/red=False, RED -> green=False/red=True, else both
         # False. Independent of the mission-phase gating used for driving.
-        state = self.light_state
+        state, _ = self._fresh_light_snapshot(now_sec)
         self.detect_green_pub.publish(Bool(data=(state == "green")))
         self.detect_red_pub.publish(Bool(data=(state == "red")))
         classes = {det.cls for det in self.fsm_detections}
@@ -294,6 +360,9 @@ class BisaAutonomousNode(Node):
         self.detect_sign_pub.publish(String(data=f"left={left} right={right}"))
         ids = sorted({m.id for m in self.latest_markers})
         self.detect_aruco_pub.publish(String(data=f"ids={ids}" if ids else "none"))
+        ready, status = self._detector_status
+        self.detector_ready_pub.publish(Bool(data=ready))
+        self.detector_status_pub.publish(String(data=status))
 
     def _publish_jpeg(self, publisher, image) -> None:
         """Encodes one BGR image as JPEG and publishes it on the given topic."""
@@ -344,7 +413,8 @@ class BisaAutonomousNode(Node):
         )
         # The live traffic-light state driving /detect_green|/detect_red, so the
         # operator can see exactly what the mission is reacting to.
-        state = self.light_state
+        now_sec = self.get_clock().now().nanoseconds / 1e9
+        state, _ = self._fresh_light_snapshot(now_sec)
         vtxt = {"green": "GREEN", "red": "RED"}.get(state, "none")
         vcolor = {"green": (0, 255, 0), "red": (0, 0, 255)}.get(state, (170, 170, 170))
         cv2.putText(overlay, f"light: {vtxt}", (8, overlay.shape[0] - 12),
@@ -375,107 +445,176 @@ class BisaAutonomousNode(Node):
         if frame is None:
             return
         self.last_frame = frame
-        self.latest_lane = self.lane_perception.compute_lane_obs(
-            frame, collect_viz=self.publish_debug_image
-        )
-        # Hand the newest frame to the background inference thread, replacing any
-        # frame it has not consumed yet so heavy YOLO never blocks this callback.
-        with self._infer_lock:
-            self._infer_frame = frame
-
         now_sec = self.get_clock().now().nanoseconds / 1e9
+        collect_viz = (
+            self.publish_debug_image and now_sec >= self._next_viz_collect_time
+        )
+        if collect_viz:
+            self._next_viz_collect_time = now_sec + 1.0 / self.debug_image_hz
+        self.latest_lane = self.lane_perception.compute_lane_obs(
+            frame, collect_viz=collect_viz
+        )
+        self._submit_inference_frame(frame, now_sec)
         self.latest_markers = self.aruco_detector.detect(frame, now_sec)
 
-    def _classify_and_gate(self, detections, frame):
-        """Classifies every light box once, returning ``(light_state, gated)``.
-
-        The YOLO class of a light box is unreliable (an unlit red lens still
-        looks red), so the model only localizes: :func:`classify_light` splits
-        the box into rows and the LIT row decides the class (top=red,
-        bottom=green), overriding the YOLO label. That single verdict feeds two
-        outputs so ``classify_light`` runs only once per box:
-
-        * ``light_state`` — the raw verdict ("green"/"red"/None) ignoring
-          mission phase, mirroring the tuner; drives /detect_green|/detect_red.
-          Red wins if both somehow appear (fail-safe toward "stop").
-        * ``gated`` — the FSM-facing detection list. Boxes with no clearly lit
-          row are dropped; green only survives while waiting to launch, red only
-          after the finish window opened, so mid-course false positives never
-          reach the vote buffer. Sign/other classes pass through untouched.
-
-        Reads FSM state from the inference thread; a one-frame-stale value is
-        harmless here.
-        """
+    def _gate_classified_detections(self, detections):
+        """Apply mission-phase gates to light labels classified in the child."""
 
         listen_green = self.fsm.state.endswith("WAIT_GREEN")
         listen_red = bool(self.fsm.finish_crossed)
-        seen_green = seen_red = False
         kept = []
-        for det in detections:
-            if det.cls in ("traffic_green", "traffic_red"):
-                row_cls, _scores = traffic_light.classify_light(
-                    frame, det.bbox, self.config
-                )
-                if row_cls is None:
-                    continue
-                seen_green = seen_green or row_cls == "traffic_green"
-                seen_red = seen_red or row_cls == "traffic_red"
-                det = replace(det, cls=row_cls)
-                if det.cls == "traffic_green" and not listen_green:
-                    continue
-                if det.cls == "traffic_red" and not listen_red:
-                    continue
-            kept.append(det)
-        light_state = "red" if seen_red else "green" if seen_green else None
-        return light_state, kept
-
-    def _inference_worker(self) -> None:
-        """Runs YOLO off the executor thread so camera/control stay responsive."""
-
-        # Latency accounting so the CPU-only vehicle's real YOLO throughput is
-        # visible in the log — the numbers to tune imgsz/inference_hz against.
-        infer_count = 0
-        infer_time_sum = 0.0
-        last_report = time.perf_counter()
-        while not self._infer_stop:
-            with self._infer_lock:
-                frame = self._infer_frame
-                self._infer_frame = None
-            if frame is None:
-                time.sleep(0.005)
+        for detection in detections:
+            if detection.cls == "traffic_green" and not listen_green:
                 continue
-            # Optional CLAHE/color-correction preprocessing shared by the YOLO
-            # detector and the HSV traffic-light analyzer (no-op when disabled).
-            proc = traffic_light.preprocess_frame(frame, self.config.color_correction)
-            now_sec = self.get_clock().now().nanoseconds / 1e9
-            previous_infer_time = self.detector.last_infer_time
-            infer_start = time.perf_counter()
-            detections = self.detector.infer(proc, now_sec)
-            if self.detector.last_infer_time != previous_infer_time:
-                # Inference actually ran; refresh buffer and status snapshot.
-                infer_count += 1
-                infer_time_sum += time.perf_counter() - infer_start
-                self.raw_detections = detections
-                # One classify_light pass yields both the raw monitor state and
-                # the phase-gated FSM detections.
-                self.light_state, gated = self._classify_and_gate(detections, proc)
-                self.det_buffer.push(gated)
-                self.fsm_detections = gated
-            # Report effective throughput every few seconds (debug_log only).
-            if self.debug_log and infer_count > 0:
-                report_elapsed = time.perf_counter() - last_report
-                if report_elapsed >= 3.0:
-                    avg_ms = 1000.0 * infer_time_sum / infer_count
-                    fps = infer_count / report_elapsed
+            if detection.cls == "traffic_red" and not listen_red:
+                continue
+            kept.append(detection)
+        return kept
+
+    def _create_inference_resources(self, frame: np.ndarray) -> None:
+        """Allocate one fixed latest-frame shared-memory slot and IPC controls."""
+
+        self._infer_shape = tuple(frame.shape)
+        self._infer_shm = shared_memory.SharedMemory(create=True, size=frame.nbytes)
+        self._infer_array = np.ndarray(
+            self._infer_shape, dtype=np.uint8, buffer=self._infer_shm.buf
+        )
+        self._infer_frame_lock = self._mp_context.Lock()
+        self._infer_frame_sequence = self._mp_context.Value("Q", 0, lock=False)
+        self._infer_frame_stamp = self._mp_context.Value("d", 0.0, lock=False)
+        self._infer_stop_event = self._mp_context.Event()
+        self._infer_result_queue = self._mp_context.Queue(maxsize=8)
+        self._infer_config_queue = self._mp_context.Queue(maxsize=1)
+
+    def _start_inference_process(self) -> None:
+        """Spawn or restart the isolated detector against existing shared memory."""
+
+        now = time.monotonic()
+        if now - self._infer_last_start < 2.0:
+            return
+        self._infer_last_start = now
+        if self._infer_stop_event.is_set():
+            self._infer_stop_event.clear()
+        self._infer_process = self._mp_context.Process(
+            target=run_inference_process,
+            name="bisa_inference",
+            daemon=True,
+            args=(
+                self._infer_shm.name,
+                self._infer_shape,
+                self._infer_frame_lock,
+                self._infer_frame_sequence,
+                self._infer_frame_stamp,
+                self._infer_stop_event,
+                self._infer_result_queue,
+                self._infer_config_queue,
+                self.config,
+                self.resolved_model,
+                self.opencv_num_threads,
+            ),
+        )
+        self._infer_process.start()
+        self._set_detector_status(
+            False, f"process starting pid={self._infer_process.pid}"
+        )
+
+    def _submit_inference_frame(self, frame: np.ndarray, stamp: float) -> None:
+        """Overwrite the shared slot and ensure a detector process is alive."""
+
+        if self._infer_shm is None:
+            self._create_inference_resources(frame)
+        elif tuple(frame.shape) != self._infer_shape:
+            self.shutdown_inference_process()
+            self._create_inference_resources(frame)
+        with self._infer_frame_lock:
+            np.copyto(self._infer_array, frame)
+            self._infer_frame_stamp.value = float(stamp)
+            self._infer_frame_sequence.value += 1
+        if self._infer_process is None or not self._infer_process.is_alive():
+            if self._infer_process is not None:
+                self._set_detector_status(
+                    False, f"process exited code={self._infer_process.exitcode}; restarting"
+                )
+            self._start_inference_process()
+
+    def _drain_inference_results(self) -> None:
+        """Consume detector status/results and monitor unexpected process exits."""
+
+        if self._infer_result_queue is not None:
+            while True:
+                try:
+                    message = self._infer_result_queue.get_nowait()
+                except queue.Empty:
+                    break
+                message_type = message.get("type")
+                if message_type == "status":
+                    self._set_detector_status(message["ready"], message["status"])
+                elif message_type == "metrics" and self.debug_log:
                     self.get_logger().info(
-                        f"YOLO infer: {avg_ms:.0f} ms/frame, {fps:.1f} FPS effective "
-                        f"(imgsz={self.config.detector.imgsz}, "
-                        f"hz_cap={self.config.detector.inference_hz}, "
-                        f"device={self.detector.device})"
+                        f"YOLO infer: {message['average_ms']:.0f} ms/frame, "
+                        f"{message['fps']:.1f} FPS effective "
+                        f"(imgsz={message['imgsz']}, hz_cap={message['hz_cap']}, "
+                        f"device={message['device']})"
                     )
-                    infer_count = 0
-                    infer_time_sum = 0.0
-                    last_report = time.perf_counter()
+                elif message_type == "result":
+                    self.raw_detections = message["raw_detections"]
+                    gated = self._gate_classified_detections(
+                        message["classified_detections"]
+                    )
+                    self.det_buffer.push(gated)
+                    self.fsm_detections = gated
+                    self.light_state = message["light_state"]
+                    self._inference_seq = int(message["sequence"])
+                    self._light_snapshot = (
+                        self.light_state,
+                        self._inference_seq,
+                        float(message["stamp"]),
+                    )
+        if (
+            self._infer_process is not None
+            and not self._infer_process.is_alive()
+            and self._infer_process.exitcode is not None
+        ):
+            self.light_state = None
+            self._light_snapshot = (None, self._inference_seq, 0.0)
+            self._set_detector_status(
+                False, f"process exited code={self._infer_process.exitcode}"
+            )
+
+    def shutdown_inference_process(self) -> None:
+        """Stop the detector process and release all shared-memory resources."""
+
+        if self._infer_stop_event is not None:
+            self._infer_stop_event.set()
+        if self._infer_process is not None:
+            self._infer_process.join(timeout=1.0)
+            if self._infer_process.is_alive():
+                self._infer_process.terminate()
+                self._infer_process.join(timeout=1.0)
+            if self._infer_process.is_alive():
+                self._infer_process.kill()
+                self._infer_process.join(timeout=1.0)
+            self._infer_process.close()
+        if self._infer_result_queue is not None:
+            self._infer_result_queue.close()
+        if self._infer_config_queue is not None:
+            self._infer_config_queue.close()
+        if self._infer_shm is not None:
+            self._infer_shm.close()
+            try:
+                self._infer_shm.unlink()
+            except FileNotFoundError:
+                pass
+        self._infer_process = None
+        self._infer_shm = None
+        self._infer_array = None
+        self._infer_shape = None
+        self._infer_frame_lock = None
+        self._infer_frame_sequence = None
+        self._infer_frame_stamp = None
+        self._infer_stop_event = None
+        self._infer_result_queue = None
+        self._infer_config_queue = None
 
     def publish_control(self, cmd: ControlCmd) -> None:
         """Publishes clamped normalized throttle/steering to the /control topic."""
@@ -498,11 +637,13 @@ class BisaAutonomousNode(Node):
         """Runs the mission FSM at a fixed rate and publishes one control command."""
 
         now_sec = self.get_clock().now().nanoseconds / 1e9
+        self._drain_inference_results()
         # Snapshot shared state written by image_callback on another thread.
         # Python reference assignment is atomic, so these reads are safe without
         # a lock — the worst case is reading the previous frame's value.
         lane = self.latest_lane
         markers = self.latest_markers
+        light_state, light_seq = self._fresh_light_snapshot(now_sec)
 
         if self._target_marker_visible(markers):
             # Target ArUco marker in view: stop immediately and hold the FSM in
@@ -511,18 +652,19 @@ class BisaAutonomousNode(Node):
             cmd = ControlCmd(0.0, self.last_cmd.steering)
         else:
             cmd = self.fsm.step(lane, self.det_buffer, now_sec,
-                                 light_state=self.light_state)
+                                 light_state=light_state, light_seq=light_seq)
         self.last_cmd = cmd
         self.publish_control(cmd)
-        # Status flags and the debug overlay are published here at control_hz,
-        # not once per camera frame. Detections/markers only refresh at
-        # inference/aruco rate, so per-frame publishing re-sent identical data
-        # (and re-encoded the overlay JPEG) ~3x, starving the single-threaded
-        # executor and the control loop.
-        self.publish_detection_status()
+        # Keep control deterministic: visualization and its two JPEG encodes run
+        # on a separate low-rate timer/callback group.
+        self.publish_detection_status(now_sec)
+        self.log_status(now_sec, cmd)
+
+    def debug_loop(self) -> None:
+        """Publishes tuning images without blocking the 20 Hz control loop."""
+
         if self.publish_debug_image:
             self.publish_debug_overlay()
-        self.log_status(now_sec, cmd)
 
     def log_status(self, now_sec: float, cmd: ControlCmd) -> None:
         """Logs compact state/perception/control diagnostics at debug_log_hz."""
@@ -542,11 +684,14 @@ class BisaAutonomousNode(Node):
         )
         green_streak = getattr(self.fsm, "_green_streak", 0)
         red_streak = getattr(self.fsm, "_red_streak", 0)
+        light_state, _ = self._fresh_light_snapshot(now_sec)
+        ready, detector_status = self._detector_status
         self.get_logger().info(
-            f"state={self.fsm.state} light={self.light_state} "
+            f"state={self.fsm.state} light={light_state} detector_ready={ready} "
             f"lights={n_light} g_streak={green_streak} r_streak={red_streak} "
             f"throttle={cmd.throttle:.2f} steering={cmd.steering:.2f} "
-            f"lane_valid={lane.valid} err={lane.center_error:.2f}"
+            f"lane_valid={lane.valid} err={lane.center_error:.2f} "
+            f"detector_status='{detector_status}'"
         )
 
 
@@ -559,16 +704,16 @@ def main(args=None) -> None:
     # threads so lane perception never blocks the 10 Hz control output.
     # Thread 1: _cb_image (decode + lane + ArUco)
     # Thread 2: _cb_control (FSM + /control publish + debug overlay)
-    # Thread 3: default callback group (parameter services, ROS internals)
-    executor = MultiThreadedExecutor(num_threads=3)
+    # Thread 3: _cb_debug (low-rate overlay + JPEG encode)
+    # Thread 4: default callback group (parameter services, ROS internals)
+    executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
     try:
         executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
-        node._infer_stop = True
-        node._infer_thread.join(timeout=1.0)
+        node.shutdown_inference_process()
         node.destroy_node()
         try:
             rclpy.shutdown()

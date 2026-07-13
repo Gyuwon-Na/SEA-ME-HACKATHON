@@ -52,6 +52,8 @@ detector:
   # GPU(RTX 4060)에서 imgsz 640 추론이 ~13ms(≈79Hz 여유) → 30Hz로 상향.
   # 아래 투표/연속 카운트는 30Hz 기준으로 스케일됨(프레임 수 = 시간 기준 유지).
   inference_hz: 30.0   # 추론 주기 상한(Hz) — 차량 CPU는 launch에서 4.0으로 낮춤
+  ncnn_threads: 2      # 차량 NCNN CPU 스레드(나머지 코어는 카메라/차선/ROS에 예약)
+  warmup_enabled: true # 시작 전에 NCNN/Vulkan 커널을 백그라운드에서 사전 생성
   # auto = CUDA GPU on the PC when available, else CPU. Force with cpu / cuda.
   device: auto         # auto=GPU 있으면 CUDA, 없으면 CPU
   # class_map은 fallback 전용 — 실제 클래스 이름은 모델 메타데이터에서 읽음.
@@ -71,9 +73,9 @@ detector:
   sign_vote_k: 9         # 최근 n프레임 중 k회 이상 잡히면 표지 방향 확정
   sign_vote_n: 15        # 표지 투표 창(프레임 수)
   # 신호등: classify_light verdict(튜너가 보여주는 값)로 green이면 출발/red면 정지.
-  # 한 프레임 글리치를 거르려고 같은 verdict가 이만큼 연속 제어틱 유지돼야 동작
-  # (control_hz=10 → 3틱=0.3s).
-  light_confirm_frames: 3  # 신호색이 이만큼 연속 확인돼야 출발/정지 실행
+  # 제어틱이 아니라 고유한 YOLO 추론 프레임으로만 계수한다.
+  light_confirm_frames: 3  # 신호색이 서로 다른 추론 프레임에서 연속 확인될 때 동작
+  light_stale_sec: 0.75    # 이 시간보다 오래된 신호 판정은 자동 해제
 
 throttle:
   # Moving speed band. Every throttle command (while not stopped) maps into
@@ -114,7 +116,7 @@ aruco:
   enabled: true              # ArUco 마커 검출 사용 여부
   dictionary: DICT_6X6_50    # ArUco 사전
   target_id: 3               # 이 ID 마커 보이면 즉시 정지/홀드
-  detect_hz: 10.0            # 마커 검출 주기(Hz)
+  detect_hz: 20.0            # 마커 검출 주기(Hz) — 온보드 루프와 통일
 
 # YOLO 검출 프레임 전처리(CLAHE→채도부스트→밝기/대비/감마). 레퍼런스처럼
 # 검출 전에 적용해 색을 또렷하게. enabled=true면 검출기·색분류가 보정본을 봄.
@@ -164,7 +166,7 @@ traffic_light:
 
 mission:
   route_mode: OUT               # 코스 모드(OUT=본선, LANE=차선전용 테스트)
-  control_hz: 10.0              # 제어 루프 주기(Hz)
+  control_hz: 20.0              # 제어 루프 주기(Hz)
   launch_min_sec: 1.0           # 출발(LAUNCH) 상태 최소 유지 시간(s)
   fork_commit_min_sec: 0.8      # 갈림길 커밋 최소 유지 시간(s)
   fork_commit_timeout_sec: 1.8  # 커밋 강제 종료 타임아웃(s)

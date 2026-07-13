@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import threading
 import time
+from functools import lru_cache
 from pathlib import Path
 
 import cv2
@@ -58,13 +59,37 @@ from .dracer_config import (
 from .object_detector import BestPthDetector
 
 
+_opencv_cache = threading.local()
+
+
+def _cached_clahe(clip: float, tile: int):
+    """Caches one CLAHE instance per thread and current tuning values."""
+
+    key = (max(float(clip), 0.01), max(1, int(tile)))
+    if getattr(_opencv_cache, "clahe_key", None) != key:
+        _opencv_cache.clahe = cv2.createCLAHE(
+            clipLimit=key[0], tileGridSize=(key[1], key[1])
+        )
+        _opencv_cache.clahe_key = key
+    return _opencv_cache.clahe
+
+
+@lru_cache(maxsize=32)
+def _gamma_lut(gamma: float) -> np.ndarray:
+    """Builds and caches the 256-entry gamma LUT used by live tuning."""
+
+    inv_gamma = 1.0 / max(float(gamma), 0.1)
+    return np.array(
+        [((i / 255.0) ** inv_gamma) * 255 for i in range(256)], dtype=np.uint8
+    )
+
+
 def apply_clahe(bgr: np.ndarray, clip: float = 2.0, tile: int = 8) -> np.ndarray:
     """Equalizes the LAB L-channel with CLAHE (reference apply_clahe)."""
 
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
     l_ch, a_ch, b_ch = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=float(clip), tileGridSize=(int(tile), int(tile)))
-    l_ch = clahe.apply(l_ch)
+    l_ch = _cached_clahe(clip, tile).apply(l_ch)
     return cv2.cvtColor(cv2.merge((l_ch, a_ch, b_ch)), cv2.COLOR_LAB2BGR)
 
 
@@ -96,9 +121,7 @@ def apply_color_correction(
         out = cv2.cvtColor(cv2.merge((h_ch, s_ch, v_ch)).astype(np.uint8), cv2.COLOR_HSV2BGR)
     gamma = max(float(gamma), 0.1)
     if abs(gamma - 1.0) >= 1e-3:
-        inv_gamma = 1.0 / gamma
-        table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in range(256)]).astype(np.uint8)
-        out = cv2.LUT(out, table)
+        out = cv2.LUT(out, _gamma_lut(round(gamma, 4)))
     return out
 
 

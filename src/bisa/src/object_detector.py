@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -76,6 +75,9 @@ class BestPthDetector:
         self.task = "detect"
         self.device = "cpu"
         self.last_infer_time = 0.0
+        self.ready = False
+        self.last_error = ""
+        self._runtime_config_key = None
 
     def _resolve_device(self) -> str:
         """Picks the inference device: CUDA GPU, Vulkan GPU, or CPU.
@@ -91,7 +93,8 @@ class BestPthDetector:
             return "cuda:0"
         if preference.startswith("vulkan"):
             # Accept 'vulkan', 'vulkan:0', 'vulkan:1', etc.
-            return preference if ":" in preference else "vulkan:0"
+            requested = preference if ":" in preference else "vulkan:0"
+            return requested if self._vulkan_device_available(requested) else "cpu"
         if preference in ("gpu", "0"):
             # Generic 'gpu' — try CUDA first, then Vulkan.
             try:
@@ -100,7 +103,7 @@ class BestPthDetector:
                     return "cuda:0"
             except Exception:
                 pass
-            return "vulkan:0"
+            return "vulkan:0" if self._vulkan_device_available("vulkan:0") else "cpu"
         # 'auto' — cascade CUDA → Vulkan → CPU.
         try:
             import torch
@@ -111,9 +114,37 @@ class BestPthDetector:
         # On embedded boards with Vulkan-capable GPUs (PowerVR, Mali, etc.),
         # NCNN can use Vulkan compute. Ultralytics NCNN models accept
         # device='vulkan:0' to offload inference to the GPU.
-        if self._is_ncnn_model():
+        if self._is_ncnn_model() and self._vulkan_device_available("vulkan:0"):
             return "vulkan:0"
         return "cpu"
+
+    def _vulkan_device_available(self, device: str) -> bool:
+        """Checks that NCNN sees a real Vulkan GPU at the requested index."""
+
+        if not self._is_ncnn_model():
+            self._log_warn("Vulkan requested for a non-NCNN model; falling back to CPU")
+            return False
+        try:
+            import ncnn
+
+            index = int(str(device).split(":", 1)[1]) if ":" in str(device) else 0
+            if index < 0 or index >= int(ncnn.get_gpu_count()):
+                self._log_warn(
+                    f"Vulkan GPU index {index} unavailable; falling back to CPU"
+                )
+                return False
+            name = str(ncnn.get_gpu_info(index).device_name())
+            if "llvmpipe" in name.lower():
+                self._log_warn(
+                    f"Vulkan device {index} is software renderer {name}; falling back to CPU"
+                )
+                return False
+            if self.logger is not None:
+                self.logger.info(f"Vulkan device verified: index={index}, name={name}")
+            return True
+        except Exception as exc:
+            self._log_warn(f"Vulkan runtime check failed: {exc}; falling back to CPU")
+            return False
 
     def _log_warn(self, message: str) -> None:
         """Writes warnings through ROS logger when available."""
@@ -145,15 +176,10 @@ class BestPthDetector:
             from ultralytics import YOLO
 
             self.device = self._resolve_device()
-            # Only cap CPU threads when falling back to CPU (e.g. the all-on-vehicle
-            # launch). On GPU paths the runtime manages the device itself.
-            if self.device == "cpu":
-                try:
-                    import torch
-                    torch.set_num_threads(max(1, min(4, (os.cpu_count() or 4) - 1)))
-                except ImportError:
-                    pass  # NCNN-only install may lack torch
-            self.model = YOLO(self.model_path)
+            self.model = YOLO(
+                self.model_path,
+                task="detect" if self._is_ncnn_model() else None,
+            )
             self.task = str(getattr(self.model, "task", "detect"))
             if self.logger is not None:
                 backend = "NCNN" if self._is_ncnn_model() else "PyTorch"
@@ -163,8 +189,98 @@ class BestPthDetector:
                 )
             return True
         except Exception as exc:  # pragma: no cover - depends on target vehicle env.
+            self.last_error = str(exc)
             self._log_warn(f"Failed to load detector model: {exc}")
             return False
+
+    def _configure_ncnn_runtime(self) -> None:
+        """Caps NCNN CPU workers after AutoBackend has created its Net."""
+
+        if not self._is_ncnn_model() or self.model is None:
+            return
+        predictor = getattr(self.model, "predictor", None)
+        backend = getattr(getattr(predictor, "model", None), "backend", None)
+        net = getattr(backend, "net", None)
+        if net is None:
+            return
+        threads = max(1, int(getattr(self.config.detector, "ncnn_threads", 2)))
+        key = (threads, bool(net.opt.use_vulkan_compute))
+        if self._runtime_config_key == key:
+            return
+        net.opt.num_threads = threads
+        self._runtime_config_key = key
+        if self.logger is not None:
+            self.logger.info(
+                f"NCNN runtime configured: threads={net.opt.num_threads}, "
+                f"vulkan={bool(net.opt.use_vulkan_compute)}"
+            )
+
+    def _predict(self, source):
+        """Run predict, configuring NCNN threads before its Net loads weights."""
+
+        kwargs = {
+            "source": source,
+            "imgsz": int(self.config.detector.imgsz),
+            "device": self.device,
+            "verbose": False,
+        }
+        # Ultralytics creates ncnn.Net lazily inside the first predict() and
+        # exposes no thread option. Setting net.opt afterwards is too late for
+        # convolution pipelines, which retain their load-time value. Temporarily
+        # wrap the constructor so num_threads is already set before load_param /
+        # load_model. The detector runs in its own process, so this module-local
+        # patch cannot race another model.
+        if self._is_ncnn_model() and getattr(self.model, "predictor", None) is None:
+            import ncnn
+
+            original_net = ncnn.Net
+            threads = max(1, int(getattr(self.config.detector, "ncnn_threads", 2)))
+
+            def configured_net(*args, **net_kwargs):
+                net = original_net(*args, **net_kwargs)
+                net.opt.num_threads = threads
+                return net
+
+            ncnn.Net = configured_net
+            try:
+                return self.model.predict(**kwargs)
+            finally:
+                ncnn.Net = original_net
+        return self.model.predict(**kwargs)
+
+    def warmup(self, frame_shape: tuple[int, int, int] = (480, 640, 3)) -> bool:
+        """Loads the backend and builds kernels before detector results are used."""
+
+        if not self.config.detector.enabled:
+            self.ready = True
+            return True
+        if not self.load_model():
+            return False
+        try:
+            if bool(getattr(self.config.detector, "warmup_enabled", True)):
+                dummy = np.zeros(frame_shape, dtype=np.uint8)
+                self._predict(dummy)
+            self._configure_ncnn_runtime()
+            self.ready = True
+            self.last_error = ""
+            # Warmup is not part of the detector-rate clock.
+            self.last_infer_time = 0.0
+            return True
+        except Exception as exc:  # pragma: no cover - target runtime dependent.
+            self.ready = False
+            self.last_error = str(exc)
+            self._log_warn(f"Detector warmup failed on {self.device}: {exc}")
+            return False
+
+    def reset_device(self, device: str) -> None:
+        """Drops the current backend and selects a safe device for retry."""
+
+        self.model = None
+        self.device = "cpu"
+        self.ready = False
+        self.last_infer_time = 0.0
+        self._runtime_config_key = None
+        self.config.detector.device = str(device)
 
     def should_run(self, now_sec: float) -> bool:
         """Rate-limits inference so lane following remains lightweight."""
@@ -178,17 +294,14 @@ class BestPthDetector:
     def infer(self, frame_bgr: np.ndarray, now_sec: float) -> list[Detection]:
         """Runs model inference and returns confidence/ROI-gated detections."""
 
-        if not self.should_run(now_sec):
-            return []
         if not self.load_model():
             return []
+        if not self.should_run(now_sec):
+            return []
 
-        results = self.model.predict(
-            source=frame_bgr,
-            imgsz=int(self.config.detector.imgsz),
-            device=self.device,
-            verbose=False,
-        )
+        results = self._predict(frame_bgr)
+        self._configure_ncnn_runtime()
+        self.ready = True
         if not results:
             return []
 

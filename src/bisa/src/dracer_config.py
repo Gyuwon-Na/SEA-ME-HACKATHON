@@ -21,10 +21,8 @@ class RoiConfig:
     mid_y1: float = 0.75
     far_y0: float = 0.32
     far_y1: float = 0.58
-    optional_birdeye_y0: float = 0.35
     detector_light: list[float] = field(default_factory=lambda: [0.20, 0.00, 0.80, 0.55])
     detector_sign: list[float] = field(default_factory=lambda: [0.10, 0.05, 0.90, 0.70])
-    detector_dynamic: list[float] = field(default_factory=lambda: [0.00, 0.35, 1.00, 1.00])
 
 
 @dataclass
@@ -52,14 +50,24 @@ class LaneRoiConfig:
 class LaneVisionConfig:
     """Stores tunable parameters for road mask and Hough fallback lane detection."""
 
-    black_hsv_lower: list[int] = field(default_factory=lambda: [0, 0, 0])
-    black_hsv_upper: list[int] = field(default_factory=lambda: [180, 90, 90])
+    # LAB road mask: the mask comes from cv2.inRange over the CLAHE-equalized
+    # LAB image using these per-channel min/max bounds. Tune them live from the
+    # "Lane ROI Mask" debug window; OpenCV 8-bit LAB ranges are L 0..255 and
+    # a/b 0..255 with 128 as the neutral (gray) point.
+    lab_l_min: int = 0
+    lab_l_max: int = 90
+    lab_a_min: int = 105
+    lab_a_max: int = 150
+    lab_b_min: int = 105
+    lab_b_max: int = 150
+    # CLAHE applied to the L channel before LAB thresholding AND before the
+    # Canny/Hough lane-line pass (previously hardcoded clip=2.0 tile=8).
+    lab_clahe_clip: float = 2.0
+    lab_clahe_tile: int = 8
     morph_open_kernel: int = 3
     morph_close_kernel: int = 5
     min_component_area_ratio: float = 0.006
     fork_area_ratio: float = 0.035
-    rotary_area_ratio: float = 0.08
-    rotary_circularity_min: float = 0.18
     hough_roi_top_ratio: float = 0.58
     hough_canny_low: int = 50
     hough_canny_high: int = 150
@@ -69,56 +77,42 @@ class LaneVisionConfig:
     hough_slope_min_abs: float = 0.40
     assumed_lane_width_ratio: float = 0.62
     max_center_jump: float = 0.45
-    # White/yellow lane-line detection (primary center source on this track:
-    # dark mat with bright boundary lines). White is thresholded adaptively so
-    # it survives lighting changes; yellow is a fixed HSV wedge.
-    white_v_min: int = 140          # absolute floor for "white" brightness (V)
-    white_v_percentile: float = 80.0  # adaptive floor: this percentile of ROI V
-    white_s_max: int = 90           # white lines have low saturation
-    line_yellow_h_lo: int = 15
-    line_yellow_h_hi: int = 42
-    line_yellow_s_min: int = 70
-    line_yellow_v_min: int = 80
-    line_col_row_frac: float = 0.10  # a column must be lit in >= this frac of band rows to count as a line
-    lane_half_width_ratio: float = 0.30  # single-line offset (frac of ROI width) toward the missing line
 
 
 @dataclass
 class DetectorConfig:
     """Stores model, class, confidence, ROI, and temporal filter parameters."""
 
-    model_path: str = "checkpoints/best.pth"
+    model_path: str = "checkpoints/best.pt"
     enabled: bool = True
-    imgsz: int = 320
-    inference_hz: float = 10.0
+    imgsz: int = 640
+    inference_hz: float = 30.0
     # Inference device: 'auto' uses CUDA when available (PC GPU) else CPU. The
     # heavy detector runs on the operator PC, so a GPU there offloads the weak
     # vehicle board entirely. Set 'cpu'/'cuda' to force one.
     device: str = "auto"
+    # Fallback only: class names normally come from the model's own metadata
+    # (BestPthDetector.NAME_ALIASES). Matches the 2026-07-07 detect model:
+    # 0=light_red, 1=light_green, 2=sign_left, 3=sign_right.
     class_map: dict[str, int] = field(default_factory=lambda: {
-        "traffic_green": 0,
-        "traffic_red": 1,
+        "traffic_red": 0,
+        "traffic_green": 1,
         "sign_left": 2,
         "sign_right": 3,
-        "dynamic_marker": 4,
-        "finish_line": 5,
     })
     conf: dict[str, float] = field(default_factory=lambda: {
-        "traffic_green": 0.60,
-        "traffic_red": 0.60,
+        "traffic_green": 0.40,
+        "traffic_red": 0.40,
         "sign_left": 0.65,
         "sign_right": 0.65,
-        "dynamic_marker": 0.60,
-        "finish_line": 0.55,
     })
-    green_consecutive: int = 3
-    green_vote_k: int = 3
-    green_vote_n: int = 6
-    sign_vote_k: int = 3
-    sign_vote_n: int = 5
-    dynamic_detect_consecutive: int = 2
-    dynamic_clear_consecutive: int = 12
-    red_consecutive_after_finish: int = 3
+    sign_vote_k: int = 9
+    sign_vote_n: int = 15
+    # Traffic light: the mission launches on green and stops on red directly from
+    # the classify_light verdict (the value the tuner shows). To reject a single
+    # glitch frame, the same verdict must hold for this many consecutive control
+    # ticks before it acts (control_hz=10 => 3 ticks = 0.3 s).
+    light_confirm_frames: int = 3
 
 
 @dataclass
@@ -140,11 +134,6 @@ class ThrottleConfig:
     fork_commit_cap: float = 0.25
     post_fork_cap: float = 0.30
     post_fork_min: float = 0.25
-    rotary_approach_cap: float = 0.20
-    rotary_inside_cap: float = 0.18
-    dynamic_approach_cap: float = 0.18
-    resume_cap: float = 0.30
-    finish_cap: float = 0.34
     ramp_up_per_cmd: float = 0.03
     steer_slowdown: float = 0.22
     curvature_slowdown: float = 0.08
@@ -152,37 +141,30 @@ class ThrottleConfig:
 
 @dataclass
 class SteeringConfig:
-    """Stores normalized steering gains, sign, and per-state clamp values."""
+    """Stores pure-pursuit steering geometry, sign, and per-state clamp values.
+
+    Steering is computed with pure pursuit: the normalized lane center error is
+    mapped to a lateral offset of ``lateral_scale_m`` meters (at error 1.0) at a
+    target point ``lookahead_m`` ahead, then the bicycle-model steering angle
+    ``atan2(2 * wheelbase_m * sin(alpha), lookahead_m)`` is normalized into the
+    [-1, 1] command range by ``max_steer_deg``. ``curve_blend`` shifts the aim
+    point along the road's bend using the signed curvature cue.
+    """
 
     steer_sign: int = 1
-    kp: float = 1.20
-    ki: float = 0.0
-    kd: float = 0.24
-    kcurv: float = 0.30
+    lookahead_m: float = 0.60
+    wheelbase_m: float = 0.16
+    lateral_scale_m: float = 0.30
+    max_steer_deg: float = 30.0
+    pp_gain: float = 1.0
+    curve_blend: float = 1.0
     rate_limit_per_cmd: float = 0.10
     straight_limit: float = 0.45
     s_curve_limit: float = 0.80
     fork_approach_limit: float = 0.55
     fork_limit: float = 0.85
     post_fork_limit: float = 0.65
-    dynamic_limit: float = 0.45
-    rotary_limit: float = 0.85
-    resume_limit: float = 0.60
-    finish_limit: float = 0.55
     lost_decay: float = 0.70
-
-
-@dataclass
-class RotaryConfig:
-    """Stores shortcut-course rotary progress and exit timing parameters."""
-
-    direction: str = "CCW"
-    min_rotation_time_sec: float = 4.5
-    progress_threshold: float = 0.22
-    exit_stable_frames: int = 3
-    enter_ff: float = 0.35
-    circulate_ff: float = 0.45
-    exit_bias: float = -0.18
 
 
 @dataclass
@@ -217,36 +199,52 @@ class ColorCorrectionConfig:
 
 @dataclass
 class TrafficLightConfig:
-    """HSV color analysis of the traffic-light ROI (traffic_light_processor.py parity).
+    """Red/green color classification of a YOLO-detected traffic-light box.
 
-    Off by default. When ``enabled`` the analyzer runs the same red/yellow/green
-    HSV masks (with HoughCircles confirmation for red/yellow) as the reference,
-    over the ``roi.detector_light`` region, and emits traffic_green/traffic_red
-    detections that feed the existing vote/FSM path. HSV bounds are stored as
-    scalars so each maps to one tuning slider.
+    The YOLO box is split into vertical thirds; the top (red) and bottom (green)
+    thirds are scored and the higher wins. The amber middle third is ignored
+    (mission is red/green only; the competition light tapes it over). HSV bounds
+    are scalars so each maps to one tuning slider.
     """
 
-    enabled: bool = False
     red_h1_hi: int = 10        # upper hue of the low-red band [0, red_h1_hi]
     red_h2_lo: int = 170       # lower hue of the high-red band [red_h2_lo, 180]
     red_s_min: int = 120
     red_v_min: int = 100
-    yellow_h_lo: int = 15
-    yellow_h_hi: int = 32
-    yellow_s_min: int = 30
-    yellow_v_min: int = 30
     green_h_lo: int = 40
     green_h_hi: int = 90
-    green_s_min: int = 40
-    green_v_min: int = 40
-    # Fraction of one vertical band (1/3 of the light ROI) that must match its
-    # color to count that lamp lit. Slider-tunable live.
-    min_on_ratio: float = 0.01
-    hough_min_dist: int = 20
-    hough_param1: int = 50
-    hough_param2: int = 10
-    hough_min_radius: int = 2
-    hough_max_radius: int = 30
+    green_s_min: int = 50
+    green_v_min: int = 50
+    # Winning third must have at least this fraction of its pixels match (color
+    # classifier) or lit (lit classifier), else the box is dropped.
+    row_min_ratio: float = 0.02
+    # Used only by the "lit" classifier: a pixel counts as lit when it is bright
+    # (V >= row_lit_v_min) AND inside the row color mask, or near-white
+    # (S <= row_white_s_max — an emitting lamp's blown-out core) next to such
+    # bright colored pixels, so a bright background wall never scores.
+    row_lit_v_min: int = 220
+    row_white_s_max: int = 80
+    # Used only by the "lab" classifier. OpenCV 8-bit LAB centers the green<->red
+    # ``a`` channel at 128: a >= lab_a_red_min is red, a <= lab_a_green_max is
+    # green; only pixels with L >= lab_l_min count (drops dark background).
+    lab_a_red_min: int = 150
+    lab_a_green_max: int = 110
+    lab_l_min: int = 40
+    # Which classifier the driving pipeline uses to read a light box:
+    #   "color" - reference pure per-row color-pixel ratio (no brightness gate).
+    #             DEFAULT: the competition light has its inactive lamps covered
+    #             with black tape, so the only colored region is the active lamp
+    #             and pure-color counting cannot be fooled by an unlit lens.
+    #             No strict brightness gate, so it also misses a dim / sun-washed
+    #             lamp less often. Field-proven outdoors.
+    #   "lit"   - brightness-gated emitting detection (V>=row_lit_v_min +
+    #             white-core-near-ring). Needed only when unlit lenses stay
+    #             colored (no tape); adds a strict V>=220 gate that can miss a
+    #             dim lamp.
+    #   "lab"   - LAB a-channel (red = a high, green = a low). No hue wraparound,
+    #             steadier under changing light, and catches a cyan-ish green
+    #             lamp the HSV green range can clip. Flip here for a venue A/B.
+    classifier: str = "color"
 
 
 @dataclass
@@ -258,10 +256,7 @@ class MissionConfig:
     launch_min_sec: float = 1.0
     fork_commit_min_sec: float = 0.8
     fork_commit_timeout_sec: float = 1.8
-    dynamic_stop_hold_sec: float = 0.2
-    resume_min_sec: float = 1.0
     finish_min_elapsed_sec: float = 8.0
-    dynamic_zone_elapsed_sec: float = 4.0
     debug_log_hz: float = 1.0
 
 
@@ -275,7 +270,6 @@ class AutonomousConfig:
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     throttle: ThrottleConfig = field(default_factory=ThrottleConfig)
     steering: SteeringConfig = field(default_factory=SteeringConfig)
-    rotary: RotaryConfig = field(default_factory=RotaryConfig)
     aruco: ArucoConfig = field(default_factory=ArucoConfig)
     color_correction: ColorCorrectionConfig = field(default_factory=ColorCorrectionConfig)
     traffic_light: TrafficLightConfig = field(default_factory=TrafficLightConfig)

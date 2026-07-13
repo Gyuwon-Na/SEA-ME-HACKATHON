@@ -10,6 +10,7 @@
   <exec_depend>rclpy</exec_depend>
   <exec_depend>control_msgs</exec_depend>
   <exec_depend>joystick_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
   <exec_depend>picamera2</exec_depend>
   <exec_depend>opencv-python</exec_depend>
   <exec_depend>launch</exec_depend>

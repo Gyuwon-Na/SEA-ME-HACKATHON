@@ -1,22 +1,23 @@
-description: Ultralytics YOLO26n model trained on dataset/data.yaml
+description: Ultralytics YOLO26n model trained on /Users/shin-isu/Desktop/Files/Git/kmu.study-1/D-Racer/signs.yaml
 author: Ultralytics
-date: '2026-07-08T10:39:43.211318'
-version: 8.4.82
+date: '2026-07-08T17:28:49.935312'
+version: 8.4.90
 license: AGPL-3.0 License (https://ultralytics.com/license)
 docs: https://docs.ultralytics.com
 stride: 32
 task: detect
+head: Detect
 batch: 1
 imgsz:
 - 320
 - 320
 names:
-  0: light_red
-  1: light_green
-  2: sign_left
-  3: sign_right
+  0: left_sign
+  1: right_sign
+  2: red_light
+  3: green_light
 args:
   batch: 1
-  quantize: null
+  quantize: 16
 channels: 3
 end2end: false

@@ -97,13 +97,13 @@ class DetectorConfig:
     # vehicle board entirely. Set 'cpu'/'cuda' to force one.
     device: str = "auto"
     # Fallback only: class names normally come from the model's own metadata
-    # (BestPthDetector.NAME_ALIASES). Matches the 2026-07-07 detect model:
-    # 0=light_red, 1=light_green, 2=sign_left, 3=sign_right.
+    # (BestPthDetector.NAME_ALIASES). Matches the deployed 2026-07-08 model:
+    # 0=left_sign, 1=right_sign, 2=red_light, 3=green_light.
     class_map: dict[str, int] = field(default_factory=lambda: {
-        "traffic_red": 0,
-        "traffic_green": 1,
-        "sign_left": 2,
-        "sign_right": 3,
+        "sign_left": 0,
+        "sign_right": 1,
+        "traffic_red": 2,
+        "traffic_green": 3,
     })
     conf: dict[str, float] = field(default_factory=lambda: {
         "traffic_green": 0.40,

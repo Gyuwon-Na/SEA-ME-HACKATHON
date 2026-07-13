@@ -928,3 +928,154 @@ Error ID: c30cee0a67a149e9a1f2f37e3e5ce2ea
 - 같은 수정 파일을 TOPST에 반영하고 `bisa` 패키지를 재빌드했다.
 - 액추에이터가 없는 별도 ROS domain에서 C++ 코어의 제어 출력을 `/test/control`로 격리하고 GUI의 실제 `send()` 경로를 시험했다. `lane.lab_l_max`를 `90 -> 1 -> 90`으로 전송했으며 서비스 응답은 모두 `ok`, 중간 `get_parameters` 조회값은 실제 `1`이었다.
 - 스모크 테스트 뒤 TOPST의 테스트용 `bisa_autonomous_node`와 GUI 테스트 프로세스가 남아 있지 않음을 확인했다. 실차 모터/조향 출력은 수행하지 않았다.
+
+---
+
+## 2026-07-13 — TOPST 현재 파이프라인 Hz 재측정
+
+### 측정 조건과 결과
+
+- 사용자가 실행한 `ROS_DOMAIN_ID=42` onboard는 확인 직후 전체 프로세스가 종료되어 해당 실행의 토픽을 직접 계측할 수 없었다.
+- 동일한 20 Hz 설정을 `ROS_DOMAIN_ID=87`, `enable_actuation:=false`, `enable_joystick:=false`, `control_topic:=/test/control`, `publish_debug_image:=true`로 임시 실행해 실제 USB 카메라와 NCNN/Vulkan detector를 12초간 동시 계측했다.
+- 수신 실측값은 camera `20.001 Hz`, detections `6.419 Hz`, control `19.986 Hz`, full debug `20.005 Hz`, lane mask `20.011 Hz`였다.
+- C++ 내부 로그의 새 차선 perception 처리율은 워밍업 후 약 `19.0~19.3 Hz`, 처리시간은 평균 `51.4~52.4 ms/frame`였다. 디버그 토픽은 20 Hz로 발행되지만 perception보다 빠른 순간에는 최신 처리 결과를 재사용한다.
+- detector 내부 추론은 약 `109~111 ms/frame`, 검출 패킷 실효 속도는 약 `6.4~7.0 Hz`였다. 현재 전체 인식 파이프라인의 병목은 객체 검출이다.
+- 측정용 launch와 모든 자식 프로세스를 종료했으며 최종 `pgrep`에서 잔류 프로세스가 없음을 확인했다. 모터/조향 출력은 수행하지 않았다.
+
+---
+
+## 2026-07-13 — 해커톤 배포 NCNN 모델 교체 및 TOPST 검증
+
+### 요청 및 입력
+
+- `/media/hyun/HYUNDO/2026해커톤/deploy/best_ncnn_model`의 YOLO26n NCNN 모델로 BISA 패키지 모델을 교체하고, 동봉 `README.md`와 `yolo_detector_node.py`에서 필요한 부분만 기존 차량 파이프라인에 반영했다.
+- 새 모델은 320x320 detect, FP16(`quantize: 16`), 약 4.7 MB이며 class metadata는 `0=left_sign`, `1=right_sign`, `2=red_light`, `3=green_light`다.
+
+### 변경 파일과 호환성 처리
+
+- `src/bisa/checkpoints/best_ncnn_model/model.ncnn.bin`
+- `src/bisa/checkpoints/best_ncnn_model/model.ncnn.param`
+- `src/bisa/checkpoints/best_ncnn_model/metadata.yaml`
+- `src/bisa/src/object_detector.py`
+- `src/bisa/src/dracer_config.py`
+- `src/bisa/config/dracer_params.yaml`
+- 런타임 필수 NCNN 3개 파일은 공급본과 SHA-256가 일치하게 교체했다. 공급본의 `model_ncnn.py`는 학습 PC의 절대 경로가 하드코딩된 생성용 예제이며 Ultralytics 런타임에서 사용하지 않으므로 덮어쓰지 않았다.
+- 새 `left_sign/right_sign` 이름을 내부 `sign_left/sign_right`로 변환하는 alias를 추가했다. metadata를 못 읽는 예외 상황의 `class_map` fallback 인덱스도 새 모델 순서로 갱신했다. `red_light/green_light` alias는 기존 구현이 이미 지원했다.
+- 공급 예제의 `/yolo/detections` JSON, RELIABLE depth-10 카메라 구독, 별도 annotated 토픽은 현재 BEST_EFFORT depth-1 camera와 timestamp 동기화된 `/bisa/detections`/C++ debug 구조에 맞지 않아 이식하지 않았다.
+- 기존 `preprocess_frame()`의 CLAHE, saturation boost, brightness, contrast, saturation, gamma와 YOLO box 후단 `color/lit/lab` 신호등 재분류는 변경하지 않고 그대로 유지했다.
+
+### 로컬 및 TOPST 검증
+
+- 교체 전 로컬 모델 백업은 `/tmp/bisa_old_ncnn_before_deploy_20260713.tar.gz`, TOPST 백업은 같은 경로에 코드/config와 함께 저장했다.
+- 로컬 Python `py_compile`, `bisa` 빌드, 회귀 테스트 `3 passed`, `git diff --check`를 통과했다.
+- 로컬과 TOPST 설치 경로에서 NCNN CPU warmup/1회 추론, metadata의 4개 클래스 이름, 내부 mission class 변환을 확인했다. 합성 red/green 램프로 `color`, `lit`, `lab` 세 분류기가 모두 올바른 결과를 냈으며 보정 설정은 `enabled=true`, `saturation_boost=1.5`, `classifier=lab`로 유지됐다.
+- TOPST 실제 USB 카메라 + PowerVR Vulkan 비구동 전체 런치에서 detector 상태가 `ready device=vulkan:0 ncnn_threads=2`가 됐고 실제 설치 모델 경로를 사용했다.
+- 12초 동시 계측 결과 camera `20.012 Hz`, detections `6.598 Hz`, control(`/test/control`) `20.006 Hz`, full debug `20.010 Hz`, lane mask `20.010 Hz`였다. detector 로그는 약 `108~114 ms/frame`, `6.0~7.1 FPS`였다. 구 모델의 직전 `6.419 Hz`와 큰 성능 차이는 없으며 정확도 향상은 실제 표지판/신호등 영상으로 별도 검증해야 한다.
+- `enable_actuation=false`로 PCA9685 control node를 실행하지 않았고 모터/조향 출력은 수행하지 않았다. 측정용 launch를 종료하고 잔류 프로세스가 없음을 확인했다.
+
+---
+
+## 2026-07-13 — TOPST YOLO bbox 미표시 원인 감사
+
+### 요청과 감사 방법
+
+- TOPST에 직접 접속해 실제 신호등 bbox가 디버그 영상에 보이지 않는 원인을 `YOLO 원시 출력 -> confidence -> ROI -> LAB -> detection packet -> C++ timestamp renderer` 단계별로 분리 확인했다.
+- `enable_actuation=false`, `control_topic=/test/control`의 별도 ROS domain에서 실제 USB 카메라·새 NCNN 모델·전체 디버그를 실행했다. 모터/조향 출력은 수행하지 않았다.
+
+### 확인 결과
+
+- PowerVR `vulkan:0` 실행에서 20초 동안 `/bisa/detections` 패킷은 133개 정상 발행됐지만 133개 모두 bbox record가 0개였다. 회수한 640x480 원본에는 중앙 ROI 안에 점등된 초록 신호등이 선명하게 있었고 C++ 디버그에는 `light=none`만 표시됐다.
+- 동일 JPEG를 새 모델의 원시 `conf=0.01`까지 내려 Vulkan에서 검사해도 실제 중앙 신호등 후보는 없었다. 화면 좌상단/우하단 배경에 `green_light 0.059/0.142` 오검출만 있었다. 따라서 `0.40` confidence, ROI, LAB 후처리가 실제 박스를 제거한 것이 아니었다.
+- 교체 전 NCNN 모델도 같은 TOPST Vulkan에서 중앙 신호등을 검출하지 못하고 같은 배경을 오검출했다. 새 모델 교체로 생긴 class-map 회귀는 아니다.
+- 같은 새 모델/동일 JPEG를 TOPST CPU에서 실행하면 실제 신호등을 `green_light 0.911`, bbox 약 `(265.6,120.3)-(316.0,210.7)`로 정확히 검출했다. confidence와 ROI를 통과하고 LAB 점수 red `0.1733`, green `0.2487`로 최종 `traffic_green` 판정이 됐다. 로컬 CPU도 confidence `0.918`과 거의 같은 결과였다.
+- TOPST CPU 전체 런치의 20초 감사에서는 115/115 detection 패킷에 안정적인 green bbox(confidence 약 `0.89~0.90`)가 있었고, C++ 디버그 JPEG에서 신호등 전체를 둘러싼 녹색 `traffic_green` bbox와 `light=GREEN`을 육안 확인했다. 초기 ROS discovery 이후 detection timestamp와 debug frame도 일치했다.
+- CPU detector는 전체 런치에서 대략 `5.8~6.5 FPS`, Vulkan은 약 `6.6~7.0 FPS`였다. 현재 PowerVR Vulkan은 속도 이점이 작으면서 검출 결과가 잘못되므로 correctness 기준으로 CPU가 안전한 경로다.
+- 로컬/차량 NCNN은 모두 `1.0.20260526`; 로컬 Ultralytics는 `8.4.90`, 차량은 `8.4.82`다. 차량 CPU가 정확하므로 모델 metadata/class decoding과 C++ bbox renderer는 정상이며, 문제 범위는 PowerVR Vulkan NCNN 수치 실행 경로로 좁혀진다.
+
+### 미변경 및 권고
+
+- 이번 요청은 검토/진단이어서 생산 launch의 기본 `device=vulkan:0`은 아직 바꾸지 않았다. 현재 설정으로 생산 실행하면 bbox가 계속 누락될 수 있다.
+- 즉시 정확한 검출이 필요하면 `device:=cpu`로 실행해야 한다. 영구 수정은 `onboard.launch.py`의 차량 기본 device를 CPU로 바꾸고, Vulkan은 별도 fp16 옵션/드라이버 검증이 끝난 뒤 다시 활성화하는 방식이 안전하다.
+- 모든 감사 launch와 자식 프로세스를 종료했고 최종 잔류 프로세스가 없음을 확인했다.
+
+### PowerVR GPU 우회 옵션 추가 감사
+
+- 현재 detector는 이미 `device=vulkan:0`으로 PowerVR GPU에 할당돼 있었다. GPU 미할당 문제가 아니라 CPU와 Vulkan의 출력 불일치 문제다.
+- 동일 신호등 JPEG와 동일 새 모델로 다음 NCNN Vulkan 프로필을 TOPST에서 각각 새로 로드해 비교했다: 기본값, FP16 packed/storage/arithmetic off, FP32+subgroup off, FP32+subgroup+packing off, 그리고 FP32 상태에서 subgroup/packing/SGEMM/Winograd/INT8 최적화를 모두 끈 보수 프로필.
+- 기본 Vulkan은 실제 신호등을 놓쳤다. FP16을 모두 끄자 class confidence는 CPU와 같은 `0.911~0.918`로 복구됐지만 bbox는 CPU의 `(265,120)-(316,211)` 대신 `(151,34)-(179,85)`로 계속 잘못 나왔다.
+- subgroup, packing layout, SGEMM, 모든 Winograd, INT8 최적화까지 추가로 꺼도 잘못된 bbox 좌표가 완전히 동일했다. 현재 ncnn/PowerVR 드라이버 조합에서 옵션 조절만으로 정확한 GPU bbox를 얻을 수 없었다.
+- D3-G GPU는 공식 사양상 Vulkan/OpenCL을 지원하지만 현재 Python NCNN backend는 Vulkan 경로를 사용한다. CPU와 Vulkan 속도 차이가 약 0.5~1 FPS뿐이고 CPU는 전체 카메라/차선/디버그 20 Hz를 유지했으므로 현장 운용은 CPU detector가 합리적이다.
+- GPU를 다시 쓰려면 Telechips/Imagination PowerVR Vulkan 드라이버 업데이트 또는 ncnn에 재현 프레임·모델을 첨부한 upstream 이슈/패치가 필요하다. YOLO head 일부를 CPU로 분할하는 custom NCNN graph도 가능성은 있으나 현재 작은 속도 이득에 비해 구현·검증 위험이 크다.
+
+---
+
+## 2026-07-13 — YOLO26n NCNN CPU를 차량 운영 기본값으로 확정
+
+### 요청 및 변경
+
+- 사용자가 검출 정확도가 확인된 `현재 YOLO26n NCNN + CPU` 구성을 차량 기본안으로 선택했다.
+- `src/bisa/launch/onboard.launch.py`의 `device` launch 기본값을 `vulkan:0`에서 `cpu`로 변경했다. PowerVR Vulkan은 명시적인 `device:=vulkan:0` 실험에서만 선택할 수 있도록 유지했다.
+- `src/bisa/src/detector_node.py`의 독립 실행 기본 파라미터 `detector.device`도 `cpu`로 변경했다.
+- `src/bisa/config/dracer_params.yaml`의 공용 detector device를 `auto`에서 `cpu`로 변경해 launch, 독립 detector 및 YAML 직접 로드 경로가 모두 같은 backend를 사용하게 했다.
+- YOLO26n NCNN 모델 파일, 320 입력 크기, 2개 NCNN CPU 스레드, CLAHE/saturation/brightness 전처리와 color/lit/LAB 신호등 후처리는 변경하지 않았다.
+
+### 로컬 검증
+
+- Python `py_compile`과 `git diff --check`를 통과했다.
+- `colcon build --symlink-install --packages-select bisa`를 완료했다.
+- `onboard.launch.py --show-args`에서 `device` 기본값이 `cpu`, `imgsz=320`, `ncnn_threads=2`임을 확인했다.
+- pytest plugin 자동 로드를 끈 회귀 시험은 `3 passed`였고, NCNN CPU warmup/클래스 alias/전처리 및 color·lit·LAB 합성 신호등 스모크 시험도 통과했다.
+- 첫 launch 인자 조회는 샌드박스의 읽기 전용 `~/.ros/log` 때문에 실패했으나 `ROS_LOG_DIR=/tmp/...`로 재실행해 통과했다. 첫 pytest는 사용자 영역의 오래된 `anyio` plugin과 시스템 pytest 불일치로 실패했으나 plugin 자동 로드를 끈 기존 검증 방식으로 재실행해 통과했다.
+
+### TOPST 직접 반영 및 비구동 검증
+
+- 변경 전 차량 백업: `/tmp/bisa_pre_cpu_default_20260713.tar.gz`.
+- 세 변경 파일을 `/home/topst/D-Racer-Kit`에 전송했고 로컬/차량 SHA-256 일치를 확인했다. 차량의 Python 문법 검사와 `bisa` 빌드는 정상 완료됐다.
+- 차량 설치본의 launch 인자와 독립 `bisa_detector_node` 파라미터 모두 기본 장치가 `cpu`임을 확인했다.
+- 기존 실제 초록 신호등 정지 프레임을 CPU로 재추론한 결과 `green_light` confidence `0.91097`, bbox `(265.60, 120.26)-(315.98, 210.71)`였고 ROI/confidence/LAB 후처리를 통과해 최종 `green`이 됐다.
+- 별도 ROS domain에서 `enable_actuation=false`, `enable_joystick=false`, `control_topic=/test/control`로 전체 기본 launch를 실행했다. 노드는 camera, battery, telemetry, CPU detector, C++ autonomous만 존재했고 `control_node`는 없었다. `/test/control`은 publisher 1/subscriber 0으로 액추에이터에 전달되지 않았다.
+- 전체 안전 실행에서 detector 상태는 `ready device=cpu ncnn_threads=2`, detection 토픽은 약 `6.0 Hz`, `/test/control`은 약 `20.0 Hz`, 카메라는 로그상 `20.0 Hz`였다. C++ perception은 디버그를 켠 짧은 구간에서 약 `15.6~20.1 Hz`로 변동했다.
+- timeout SIGINT 종료 시 Python detector의 `KeyboardInterrupt`와 기존 보호 경로인 battery node의 중복 `rclpy.shutdown()` traceback이 기록됐지만, 이는 정상 처리 구간이 아니라 강제 시간 제한 종료 중 발생했다. 실행 중 CPU detector, camera, C++ core에는 기능 오류가 없었다.
+- 앞선 독립 노드 확인 명령의 백그라운드 셸 범위 오류로 detector 자식 프로세스 하나가 대기 상태로 남았으나 즉시 종료했다. 마지막 확인에서 BISA/camera/control 관련 시험 프로세스가 남아 있지 않았다.
+- 실제 모터 및 조향 출력은 수행하지 않았다.
+
+---
+
+## 2026-07-13 — CPU 기본 온보드 전체 시스템 유기적 통합 검증
+
+### 요청 및 범위
+
+- 현재 YOLO26n NCNN CPU 구성을 포함한 전체 온보드 시스템이 카메라부터 검출, 차선/FSM, 제어 명령, 디버그, 배터리/시스템 상태 및 실시간 GUI까지 유기적으로 연결되는지 TOPST에서 다시 확인했다.
+- 실제 액추에이터 출력은 안전상 제외했다. 별도 `ROS_DOMAIN_ID=95`에서 `enable_actuation=false`, `enable_joystick=false`, `control_topic=/test/control`, `publish_debug_image=true`, `debug_image_hz=20.0`으로 실행했다. 따라서 PCA9685를 여는 `control_node`와 joystick node는 시작하지 않았다.
+- 제품 코드는 변경하지 않았고 종합 감사용 임시 스크립트는 `/tmp/bisa_full_integration_audit.py`에만 만들었다.
+
+### 노드, 토픽 및 QoS 연결
+
+- 실행 노드는 `camera_node`, `battery_node`, `system_telemetry_node`, `bisa_detector_node`, `bisa_autonomous_node`였고 모두 측정 구간 동안 생존했다.
+- 카메라 `/camera/image/compressed`는 publisher 1, detector/C++ subscriber 2였고 세 endpoint 모두 BEST_EFFORT + VOLATILE이었다.
+- `/bisa/detections`는 detector publisher 1, C++ subscriber 1이며 양쪽 모두 RELIABLE + VOLATILE이었다. 측정 중 잘못된 길이의 detection packet은 0개였고 sequence는 중복 없이 증가했다. 측정 창의 카메라 source timestamp 연계 기준도 통과했다.
+- `/test/control`은 C++ publisher 1, subscriber 0이었다. 458개 command sample의 steering/throttle은 모두 finite 및 `[-1, 1]` 범위였다. 실제 actuator로 전달되지 않았다.
+- battery status/voltage/current/power, system CPU/max-core/temp/memory, detect green/red/sign/ArUco, 두 debug JPEG 토픽이 모두 존재했다.
+- 정적 연결 확인상 생산 `control_node`는 RELIABLE depth 10의 `/control`과 `/battery/voltage`를 구독하고 20 Hz command timer, 0.5초 command watchdog, voltage guard 및 종료 시 throttle 0 안전 정지를 갖는다. 단 이 노드를 실제 실행하는 것은 곧 PCA9685 출력이므로 이번 시험에서는 실행하지 않았다.
+
+### 실측 성능 및 데이터 유효성
+
+- TOPST 안에서 감사 노드가 세 JPEG를 추가로 구독하고 lane mask를 매 프레임 디코딩한 스트레스 조건의 실측은 camera `20.003 Hz`, detections `4.742 Hz`, `/test/control` `20.020 Hz`, full debug `19.989 Hz`, lane mask `19.975 Hz`였다.
+- 배터리 voltage는 `4.995 Hz`, system CPU/max-core는 `2.007 Hz`, memory는 `1.999 Hz`, detect green/red는 약 `20.02 Hz`였다. 측정 시 배터리는 `7.272 V`, 마지막 CPU overall/max-core는 `96.5%/98.0%`, memory는 `17.0%`였다. 높은 CPU 값에는 차량 안에서 수행한 감사 JPEG 디코딩 부하가 포함된다.
+- 감사 노드가 끝난 뒤 차량 자체 파이프라인만 남은 구간에서는 camera가 계속 `20.0 Hz`, C++ perception이 약 `19.7~20.1 Hz`, CPU NCNN detector가 약 `5.8~6.5 Hz`로 회복했다. detector는 설정 cap 20 Hz보다 느리므로 C++가 `detector input below target` 경고를 내는 것이 현재의 확인된 성능 한계다.
+- detector 상태는 `ready device=cpu ncnn_threads=2`였다.
+
+### 실제 디버그 프레임과 GUI 반영
+
+- 회수한 실제 카메라에는 녹색 신호등과 차선이 보였고, full debug에는 신호등 전체에 맞는 `traffic_green 0.44` bbox, `light=GREEN`, `state=OUT_S_CURVE`, `thr=0.20`, `steer=-0.16`가 표시됐다. 즉 `camera -> CPU YOLO/LAB -> C++ FSM -> control command` 연결이 실제 데이터로 동작했다.
+- full debug의 640x240 차선 ROI, 좌/우 차선, 차선/차량 중심, 조향 화살표와 lane mask의 LAB mask, Hough/band 중심 및 조향 오버레이를 육안 확인했다. 세 JPEG는 모두 정상 디코딩됐다.
+- 실제 `ParamGuiNode.send()` 경로로 `lane.lab_l_max`를 `90 -> 1 -> 90` 변경했다. lane mask 밝은 픽셀 비율이 `0.0945 -> 0.0285 -> 0.0946`으로 다음 프레임부터 변하고 원복돼 트랙바 값이 실제 C++ 연산에 반영됨을 확인했다.
+- detector 전용 `detector.conf.traffic_green`은 `0.40 -> 0.41 -> 0.40`, 양쪽 노드 공통 `color_correction.brightness`는 `0 -> 1 -> 0`으로 서비스 성공 및 실제 get 값 일치를 확인했다.
+- 최종 원복값은 detector device `cpu`, lane L max `90`, green confidence `0.4`, C++/detector brightness 모두 `0`이다.
+
+### 실패/제한 및 정리
+
+- 첫 원격 장시간 명령은 도구가 실제 원격 프로세스보다 먼저 반환해 로그를 별도로 폴링했다. 감사 자체는 모든 assertion을 통과했다.
+- 비대화형 SSH 백그라운드 launch가 셸에서 보낸 SIGINT를 무시해 종료 대기 상태가 됐다. launch 부모에 SIGTERM을 보낸 뒤 남은 detector/C++ 시험 자식에도 SIGTERM을 보내 정리했다. 이는 실행 기능 오류가 아니라 시험 셸의 백그라운드 signal 상속 문제이며, 측정 구간의 launch 로그에는 ERROR/Traceback/process died가 없었다.
+- 최종 확인에서 관련 launch, camera, detector, C++ core 및 control 프로세스가 남아 있지 않았다.
+- 실제 `control_node -> PCA9685 -> 서보/ESC`와 joystick 수동 전환/E-stop은 물리 출력이 수반되므로 검증하지 않았다. 완전한 실차 최종 검증에는 바퀴를 지면에서 띄운 상태에서 사용자 명시 확인 후 별도 시험이 필요하다.

@@ -61,6 +61,8 @@ class BestPthDetector:
         "red_light": "traffic_red",
         "light_green": "traffic_green",
         "light_red": "traffic_red",
+        "left_sign": "sign_left",
+        "right_sign": "sign_right",
         "left_turn": "sign_left",
         "right_turn": "sign_right",
     }

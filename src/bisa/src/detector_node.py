@@ -81,7 +81,9 @@ class BisaDetectorNode(Node):
         self.declare_parameter("model_path", _default_model())
         self.declare_parameter("image_topic", "/camera/image/compressed")
         self.declare_parameter("detections_topic", "/bisa/detections")
-        self.declare_parameter("detector.device", "vulkan:0")
+        # CPU is the verified production backend on TOPST. The PowerVR Vulkan
+        # path remains opt-in because same-frame tests returned wrong boxes.
+        self.declare_parameter("detector.device", "cpu")
         self.declare_parameter("detector.imgsz", 320)
         self.declare_parameter("detector.inference_hz", 20.0)
         self.declare_parameter("detector.ncnn_threads", 2)

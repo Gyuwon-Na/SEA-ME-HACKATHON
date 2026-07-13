@@ -10,11 +10,11 @@ Contrast:
   vehicle.launch.py  -> car streams camera to the PC, PC computes (driving.launch)
   onboard.launch.py  -> car computes everything itself (this file)
 
-YOLO runs via the NCNN backend with Vulkan GPU acceleration on the PowerVR
-GT9524 (TCC8050). Vehicle A/B measurements show Vulkan trades a little detector
-FPS for substantially lower CPU load, leaving cores for the lane/control loop.
+YOLO runs via the NCNN backend on the TOPST CPU. Vehicle same-frame A/B tests
+showed that the PowerVR Vulkan path produced incorrect bounding-box coordinates,
+while CPU inference produced stable detections with only a small FPS penalty.
 The debug JPEG stream is off by default (headless car).
-The sign-vote window is scaled from the 30 Hz PC baseline to match the GPU
+The sign-vote window is scaled from the 30 Hz PC baseline to match the CPU
 inference rate on this board.
 
 Watch the log line "YOLO infer: N ms/frame, M FPS effective" and tune imgsz /
@@ -44,11 +44,11 @@ def default_config_path():
 
 
 def default_model_path():
-    """Return the installed NCNN model dir (GPU-accelerated via Vulkan).
+    """Return the installed NCNN model directory.
 
-    The on-car launch runs YOLO through the NCNN backend with Vulkan GPU
-    acceleration on the PowerVR GT9524. Vulkan leaves more CPU time for
-    lane/control; use device:=cpu for the measured CPU A/B baseline.
+    The on-car launch runs YOLO through the NCNN CPU backend because the tested
+    PowerVR Vulkan path returned incorrect bounding boxes. ``device:=vulkan:0``
+    remains available only for explicit backend experiments.
     PC launches keep using best.pt.
     Note: this NCNN model is exported at imgsz=320 — keep imgsz:=320.
     """
@@ -68,9 +68,9 @@ def generate_launch_description():
     enable_joystick = LaunchConfiguration("enable_joystick")
     enable_actuation = LaunchConfiguration("enable_actuation")
 
-    # GPU-accelerated detector tuning (overridable on the command line). These
+    # CPU detector tuning (overridable on the command line). These
     # become flat dotted ROS parameters that override the shared YAML at launch
-    # — dracer_params.yaml stays PC/GPU-tuned and is untouched. The config
+    # so every onboard entry point selects the same verified backend. The config
     # fields are typed (imgsz int, inference_hz float), and a LaunchConfiguration
     # resolves to a string, so wrap with ParameterValue to coerce the type —
     # otherwise declare_parameter rejects the override on a type mismatch.
@@ -108,7 +108,7 @@ def generate_launch_description():
         # watchdog share one time base by default. The NCNN detector gets the same
         # cap but may run slower when inference time exceeds the period.
         DeclareLaunchArgument("pipeline_hz", default_value="20.0"),
-        DeclareLaunchArgument("device", default_value="vulkan:0"),
+        DeclareLaunchArgument("device", default_value="cpu"),
         DeclareLaunchArgument(
             "camera_hz", default_value=LaunchConfiguration("pipeline_hz")
         ),

@@ -55,14 +55,14 @@ detector:
   ncnn_threads: 2      # 차량 NCNN CPU 스레드(나머지 코어는 카메라/차선/ROS에 예약)
   warmup_enabled: true # 시작 전에 NCNN/Vulkan 커널을 백그라운드에서 사전 생성
   # auto = CUDA GPU on the PC when available, else CPU. Force with cpu / cuda.
-  device: auto         # auto=GPU 있으면 CUDA, 없으면 CPU
+  device: cpu          # TOPST 검증 기본값; PowerVR Vulkan은 bbox 좌표 오류로 실험 시에만 명시 사용
   # class_map은 fallback 전용 — 실제 클래스 이름은 모델 메타데이터에서 읽음.
-  # 2026-07-07 detect 모델: 0=light_red, 1=light_green, 2=sign_left, 3=sign_right
+  # 배포 모델: 0=left_sign, 1=right_sign, 2=red_light, 3=green_light
   class_map:
-    traffic_red: 0     # (fallback) red 클래스 인덱스
-    traffic_green: 1   # (fallback) green 클래스 인덱스
-    sign_left: 2       # (fallback) 좌회전 표지 인덱스
-    sign_right: 3      # (fallback) 우회전 표지 인덱스
+    sign_left: 0       # (fallback) 좌회전 표지 인덱스
+    sign_right: 1      # (fallback) 우회전 표지 인덱스
+    traffic_red: 2     # (fallback) red 클래스 인덱스
+    traffic_green: 3   # (fallback) green 클래스 인덱스
   # 신호등 conf를 낮추면 멀리/작게 잡히는 불도 미리 감지. 행 분할 재분류(row_*)
   # + 상태 게이팅 + 연속 투표가 오탐을 걸러주므로 낮춰도 비교적 안전.
   conf:

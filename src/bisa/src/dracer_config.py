@@ -89,8 +89,14 @@ class LaneVisionConfig:
     hough_min_line_length: int = 45
     hough_max_line_gap: int = 290
     hough_slope_min_abs: float = 0.40
+    hough_curve_top_ratio: float = 0.62
+    hough_curvature_smoothing: float = 0.25
     assumed_lane_width_ratio: float = 0.62
-    max_center_jump: float = 0.45
+    lane_width_min_ratio: float = 0.10
+    lane_width_max_ratio: float = 0.70
+    lane_width_smoothing: float = 0.20
+    single_lane_switch_margin_ratio: float = 0.08
+    max_center_jump: float = 0.35
 
 
 @dataclass
@@ -174,17 +180,20 @@ class SteeringConfig:
 
     steer_sign: int = 1
     lookahead_m: float = 0.60
+    curve_lookahead_min_m: float = 0.38
+    curve_response_power: float = 0.50
+    curve_steer_boost: float = 0.35
     wheelbase_m: float = 0.16
     lateral_scale_m: float = 0.30
     max_steer_deg: float = 30.0
     pp_gain: float = 1.0
     curve_blend: float = 1.0
-    rate_limit_per_cmd: float = 0.10
-    straight_limit: float = 0.45
-    s_curve_limit: float = 0.80
-    fork_approach_limit: float = 0.55
-    fork_limit: float = 0.85
-    post_fork_limit: float = 0.65
+    rate_limit_per_cmd: float = 0.12
+    straight_limit: float = 0.60
+    s_curve_limit: float = 0.95
+    fork_approach_limit: float = 0.75
+    fork_limit: float = 0.95
+    post_fork_limit: float = 0.90
     lost_decay: float = 0.70
 
 

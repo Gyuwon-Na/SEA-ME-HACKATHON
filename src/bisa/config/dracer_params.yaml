@@ -54,8 +54,16 @@ lane:
   hough_min_line_length: 30    # was 45: 급커브에서 조각난 짧은 선분도 살림
   hough_max_line_gap: 290      # 선분 사이 이 간격(px) 이하면 하나로 연결
   hough_slope_min_abs: 0.22    # was 0.40: 커브에서 수평에 가까워진 차선이 버려지는 문제 해결(핵심)
-  assumed_lane_width_ratio: 0.62   # 한쪽 차선만 보일 때 가정하는 차폭(프레임 대비 비율)
-  max_center_jump: 0.70        # was 0.45: 급커브의 정상적인 중심 이동을 "튐"으로 오인해 되돌리지 않도록
+  # 직선에서는 위의 top=0.45(하단 55%)를 쓰고, 곡률이 커지면 top=0.62
+  # (하단 38%)까지 짧게 피팅한다. 38%보다 작아지지 않아 급커브에서도 점 수를 확보한다.
+  hough_curve_top_ratio: 0.62
+  hough_curvature_smoothing: 0.25  # 곡률/피팅 길이 프레임간 EMA 계수
+  assumed_lane_width_ratio: 0.62   # 추적 이력 없는 최초 단일 차선의 안전 fallback
+  lane_width_min_ratio: 0.10       # 양차선 관측 차폭 학습 허용 하한(ROI 폭 대비)
+  lane_width_max_ratio: 0.70       # 양차선 관측 차폭 학습 허용 상한
+  lane_width_smoothing: 0.20       # 원근 차폭 EMA(양쪽 보일 때만 갱신)
+  single_lane_switch_margin_ratio: 0.08  # ID 반전 전 필요한 점수 우위(히스테리시스)
+  max_center_jump: 0.35            # ID 필터 뒤 남는 비정상 중심 점프의 최종 안전망
 
 detector:
   model_path: checkpoints/best.pt  # YOLO 가중치 경로(패키지 상대)
@@ -112,18 +120,21 @@ throttle:
 # curve_blend 는 도로 굽어짐(signed curvature)만큼 목표점을 이동시킴.
 steering:
   steer_sign: 1              # 조향 부호(좌우 반대로 나가면 -1)
-  lookahead_m: 0.60          # 순수추종 전방주시 거리(m)
+  lookahead_m: 0.60          # 직선 순수추종 전방주시 거리(m)
+  curve_lookahead_min_m: 0.38 # 최대 곡률에서의 최소 전방주시(짧은 맵 코너용)
+  curve_response_power: 0.50  # sqrt(curvature): 중간 커브부터 보정을 빠르게 키움
+  curve_steer_boost: 0.35     # 커브에서만 최대 35% 조향 증폭(직선=0% 증폭)
   wheelbase_m: 0.16          # 차축 거리(자전거 모델, m)
   lateral_scale_m: 0.30      # 오차 1.0을 몇 m 횡오프셋으로 볼지
   max_steer_deg: 30.0        # 조향각 정규화 기준(풀락 각도)
   pp_gain: 1.0               # 순수추종 조향 게인
   curve_blend: 1.0           # 곡률로 목표점 이동시키는 정도
-  rate_limit_per_cmd: 0.10   # 명령당 조향 변화 한도(급조향 방지)
-  straight_limit: 0.45       # 직진 상태 조향 클램프
-  s_curve_limit: 0.80        # S자 상태 조향 클램프
-  fork_approach_limit: 0.55  # 갈림길 접근 조향 클램프
-  fork_limit: 0.85           # 갈림길 커밋 조향 클램프
-  post_fork_limit: 0.65      # 갈림길 이후 조향 클램프
+  rate_limit_per_cmd: 0.12   # 20Hz 기준 풀 조향까지 약 0.4s, 급커브 응답 개선
+  straight_limit: 0.60       # 출발 직후 완만한 상단 커브 허용
+  s_curve_limit: 0.95        # 원형교차로/S자 최대 조향(1.0 풀락은 여유로 보존)
+  fork_approach_limit: 0.75  # 갈림길 접근 조향 클램프
+  fork_limit: 0.95           # 갈림길 커밋 조향 클램프
+  post_fork_limit: 0.90      # 우측 연속 S자/헤어핀용
   lost_decay: 0.70           # 차선 놓치면 직전 조향을 이 비율로 감쇠
 
 aruco:

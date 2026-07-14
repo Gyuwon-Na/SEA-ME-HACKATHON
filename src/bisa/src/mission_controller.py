@@ -62,10 +62,22 @@ class LaneController:
                 lane.center_error + cfg.curve_blend * lane.signed_curvature, -1.0, 1.0
             )
             lateral = target_error * cfg.lateral_scale_m
-            lookahead = max(cfg.lookahead_m, 1e-3)
+            curvature = clamp(lane.curvature, 0.0, 1.0)
+            curve_strength = curvature ** max(cfg.curve_response_power, 1e-3)
+            minimum = min(cfg.lookahead_m, cfg.curve_lookahead_min_m)
+            lookahead = max(
+                cfg.lookahead_m + curve_strength * (minimum - cfg.lookahead_m),
+                1e-3,
+            )
             alpha = math.atan2(lateral, lookahead)
             delta = math.atan2(2.0 * cfg.wheelbase_m * math.sin(alpha), lookahead)
-            raw = cfg.pp_gain * delta / math.radians(max(cfg.max_steer_deg, 1.0))
+            curve_gain = 1.0 + max(cfg.curve_steer_boost, 0.0) * curve_strength
+            raw = (
+                cfg.pp_gain
+                * curve_gain
+                * delta
+                / math.radians(max(cfg.max_steer_deg, 1.0))
+            )
 
         raw = clamp(raw, -steer_limit, steer_limit)
         steer = self.rate_limit(raw, self.prev_steer, cfg.rate_limit_per_cmd)

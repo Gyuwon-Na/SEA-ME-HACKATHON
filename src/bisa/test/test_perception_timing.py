@@ -134,6 +134,93 @@ def test_hough_keeps_one_sided_driving(monkeypatch):
     assert center == pytest.approx(expected, abs=1.0)
 
 
+def test_single_lane_keeps_tracked_right_identity_across_camera_center(monkeypatch):
+    """A right boundary crossing image center must not become a left lane."""
+
+    config = AutonomousConfig()
+    perception = LanePerception(config)
+    frame = np.zeros((240, 640, 3), dtype=np.uint8)
+    lane_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+    both_lines = np.array([
+        [[210, 239, 280, 108]],
+        [[550, 239, 370, 108]],
+    ], dtype=np.int32)
+    monkeypatch.setattr(cv2, "HoughLinesP", lambda *args, **kwargs: both_lines)
+    first_center, _, _ = perception.average_hough_lanes(
+        frame, prepared_l_channel=lane_mask, vehicle_x=320.0
+    )
+
+    # Bottom reference x=300 is camera-left, but the curve target remains near
+    # the previously tracked right boundary.  Old code classified it as left.
+    single_right = np.array([[[300, 239, 350, 108]]], dtype=np.int32)
+    monkeypatch.setattr(cv2, "HoughLinesP", lambda *args, **kwargs: single_right)
+    center, left_present, right_present = perception.average_hough_lanes(
+        frame,
+        prepared_l_channel=lane_mask,
+        vehicle_x=320.0,
+        previous_center=first_center,
+    )
+
+    assert not left_present and right_present
+    assert perception.tracked_lane_width == pytest.approx(90.0, abs=1.0)
+    assert center == pytest.approx(305.0, abs=1.0)
+
+
+def test_hough_fit_range_shortens_with_curvature(monkeypatch):
+    """Maximum curvature keeps only the configured lower fitting region."""
+
+    config = AutonomousConfig()
+    perception = LanePerception(config)
+    frame = np.zeros((240, 640, 3), dtype=np.uint8)
+    lines = np.array([[[210, 239, 280, 108]]], dtype=np.int32)
+    monkeypatch.setattr(cv2, "HoughLinesP", lambda *args, **kwargs: lines)
+    viz = {}
+
+    perception.average_hough_lanes(
+        frame,
+        record=True,
+        viz_out=viz,
+        prepared_l_channel=np.zeros(frame.shape[:2], dtype=np.uint8),
+        vehicle_x=320.0,
+        curvature_hint=1.0,
+    )
+
+    assert viz["hough_top_y"] == int(config.lane.hough_curve_top_ratio * 240)
+
+
+def test_curve_shortens_controller_lookahead_for_more_steering():
+    """Equal lateral error must command more steering on a sharp curve."""
+
+    config = AutonomousConfig()
+    config.steering.rate_limit_per_cmd = 1.0
+    straight_controller = LaneController(config)
+    curve_controller = LaneController(config)
+
+    straight = straight_controller.steering_from_lane(
+        LaneObs(valid=True, center_error=0.6, curvature=0.0), steer_limit=1.0
+    )
+    curve = curve_controller.steering_from_lane(
+        LaneObs(valid=True, center_error=0.6, curvature=1.0), steer_limit=1.0
+    )
+
+    assert abs(curve) > abs(straight)
+
+    no_boost_config = AutonomousConfig()
+    no_boost_config.steering.rate_limit_per_cmd = 1.0
+    no_boost_config.steering.curve_steer_boost = 0.0
+    no_boost = LaneController(no_boost_config).steering_from_lane(
+        LaneObs(valid=True, center_error=0.6, curvature=1.0), steer_limit=1.0
+    )
+    assert abs(curve) > abs(no_boost)
+
+    full_curve_controller = LaneController(config)
+    full_curve = full_curve_controller.steering_from_lane(
+        LaneObs(valid=True, center_error=1.0, curvature=1.0),
+        steer_limit=config.steering.s_curve_limit,
+    )
+    assert 0.85 <= abs(full_curve) <= config.steering.s_curve_limit
+
+
 def test_hough_curve_fit_is_second_order():
     """The selected lane model must retain measurable quadratic curvature."""
 

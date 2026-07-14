@@ -105,19 +105,23 @@ struct Config {
   double min_area_ratio{0.006};
   double fork_area_ratio{0.035};
   double near_y0{0.70}, mid_y0{0.52}, mid_y1{0.75}, far_y0{0.32}, far_y1{0.58};
-  double hough_top{0.45};
+  double hough_top{0.45}, hough_curve_top{0.62}, hough_curvature_smoothing{0.25};
   int canny_low{50}, canny_high{150}, hough_threshold{38};
   int hough_min_length{30}, hough_max_gap{290};
-  double hough_slope_min{0.22}, assumed_lane_width{0.62}, max_center_jump{0.70};
+  double hough_slope_min{0.22}, assumed_lane_width{0.62};
+  double lane_width_min{0.10}, lane_width_max{0.70}, lane_width_smoothing{0.20};
+  double single_lane_switch_margin{0.08}, max_center_jump{0.35};
   double speed_min{0.20}, speed_max{0.22};
   double launch_cap{0.32}, s_curve_cap{0.24}, fork_approach_cap{0.20};
   double fork_commit_cap{0.25}, post_fork_cap{0.30}, post_fork_min{0.25};
   double ramp_up{0.015}, steer_slowdown{0.22}, curvature_slowdown{0.08};
   int steer_sign{1};
-  double lookahead{0.60}, wheelbase{0.16}, lateral_scale{0.30};
+  double lookahead{0.60}, curve_lookahead_min{0.38};
+  double curve_response_power{0.50}, curve_steer_boost{0.35};
+  double wheelbase{0.16}, lateral_scale{0.30};
   double max_steer_deg{30.0}, pp_gain{1.0}, curve_blend{1.0};
-  double steer_rate{0.10}, straight_limit{0.45}, s_curve_limit{0.80};
-  double fork_approach_limit{0.55}, fork_limit{0.85}, post_fork_limit{0.65};
+  double steer_rate{0.12}, straight_limit{0.60}, s_curve_limit{0.95};
+  double fork_approach_limit{0.75}, fork_limit{0.95}, post_fork_limit{0.90};
   double lost_decay{0.70};
   bool color_enabled{true};
   double color_clahe_clip{2.0};
@@ -169,12 +173,18 @@ Config load_config(const std::string & path) {
   read_value(lane, "min_component_area_ratio", c.min_area_ratio);
   read_value(lane, "fork_area_ratio", c.fork_area_ratio);
   read_value(lane, "hough_roi_top_ratio", c.hough_top);
+  read_value(lane, "hough_curve_top_ratio", c.hough_curve_top);
+  read_value(lane, "hough_curvature_smoothing", c.hough_curvature_smoothing);
   read_value(lane, "hough_canny_low", c.canny_low); read_value(lane, "hough_canny_high", c.canny_high);
   read_value(lane, "hough_threshold", c.hough_threshold);
   read_value(lane, "hough_min_line_length", c.hough_min_length);
   read_value(lane, "hough_max_line_gap", c.hough_max_gap);
   read_value(lane, "hough_slope_min_abs", c.hough_slope_min);
   read_value(lane, "assumed_lane_width_ratio", c.assumed_lane_width);
+  read_value(lane, "lane_width_min_ratio", c.lane_width_min);
+  read_value(lane, "lane_width_max_ratio", c.lane_width_max);
+  read_value(lane, "lane_width_smoothing", c.lane_width_smoothing);
+  read_value(lane, "single_lane_switch_margin_ratio", c.single_lane_switch_margin);
   read_value(lane, "max_center_jump", c.max_center_jump);
   const auto detector = root["detector"];
   read_value(detector, "sign_vote_k", c.sign_vote_k); read_value(detector, "sign_vote_n", c.sign_vote_n);
@@ -190,6 +200,9 @@ Config load_config(const std::string & path) {
   read_value(throttle, "curvature_slowdown", c.curvature_slowdown);
   const auto steering = root["steering"];
   read_value(steering, "steer_sign", c.steer_sign); read_value(steering, "lookahead_m", c.lookahead);
+  read_value(steering, "curve_lookahead_min_m", c.curve_lookahead_min);
+  read_value(steering, "curve_response_power", c.curve_response_power);
+  read_value(steering, "curve_steer_boost", c.curve_steer_boost);
   read_value(steering, "wheelbase_m", c.wheelbase); read_value(steering, "lateral_scale_m", c.lateral_scale);
   read_value(steering, "max_steer_deg", c.max_steer_deg); read_value(steering, "pp_gain", c.pp_gain);
   read_value(steering, "curve_blend", c.curve_blend); read_value(steering, "rate_limit_per_cmd", c.steer_rate);
@@ -272,12 +285,32 @@ public:
       debug->mask = lane_mask.clone();
     }
 
-    const double vehicle_x = frame.cols / 2.0 - x0;
-    auto hough_center = hough(lane_mask, vehicle_x, debug ? &debug->hough : nullptr);
-    auto near_center = hough_center;
-    if (!near_center) near_center = contour_center(road_mask, c_.near_y0, 1.0);
+    const auto road_near_center = contour_center(road_mask, c_.near_y0, 1.0);
     const auto mid_center = contour_center(road_mask, c_.mid_y0, c_.mid_y1);
     const auto far_center = contour_center(road_mask, c_.far_y0, c_.far_y1);
+    double rough_curvature = filtered_curvature_;
+    if (road_near_center) {
+      rough_curvature = 0.0;
+      if (far_center) {
+        rough_curvature = std::max(rough_curvature,
+          clamp(std::abs(*far_center - *road_near_center) / frame.cols * 2.5, 0.0, 1.0));
+      }
+      if (mid_center) {
+        rough_curvature = std::max(rough_curvature,
+          clamp(std::abs(*mid_center - *road_near_center) / frame.cols * 2.0, 0.0, 1.0));
+      }
+    }
+    const double smoothing = clamp(c_.hough_curvature_smoothing, 0.0, 1.0);
+    filtered_curvature_ += smoothing * (rough_curvature - filtered_curvature_);
+
+    const double vehicle_x = frame.cols / 2.0 - x0;
+    const std::optional<double> previous_center_local = previous_center_ ?
+      std::optional<double>(*previous_center_ - x0) : std::nullopt;
+    auto hough_center = hough(
+      lane_mask, vehicle_x, filtered_curvature_, previous_center_local,
+      debug ? &debug->hough : nullptr);
+    auto near_center = hough_center;
+    if (!near_center) near_center = road_near_center;
     if (debug) {
       debug->bands = {
         make_range(road_mask.rows, c_.near_y0, 1.0),
@@ -352,12 +385,18 @@ private:
   }
 
   std::optional<double> hough(
-    const cv::Mat & lane_mask, double vehicle_x, HoughDebug * debug) const
+    const cv::Mat & lane_mask, double vehicle_x, double curvature_hint,
+    std::optional<double> previous_center, HoughDebug * debug)
   {
     cv::Mat blur, edges;
     cv::GaussianBlur(lane_mask, blur, cv::Size(5, 5), 0.0);
     cv::Canny(blur, edges, c_.canny_low, c_.canny_high);
-    const int top = std::clamp(static_cast<int>(c_.hough_top * edges.rows), 0, edges.rows - 1);
+    const double base_top = c_.hough_top;
+    const double curve_top = std::max(base_top, c_.hough_curve_top);
+    const double adaptive_top = base_top +
+      (curve_top - base_top) * clamp(curvature_hint, 0.0, 1.0);
+    const int top = std::clamp(
+      static_cast<int>(clamp(adaptive_top, 0.0, 0.90) * edges.rows), 0, edges.rows - 1);
     const int bottom = edges.rows - 1;
     edges.rowRange(0, top).setTo(0);
     std::vector<cv::Vec4i> lines;
@@ -486,15 +525,88 @@ private:
     const auto target = [top, bottom](const cv::Vec3d & curve) {
       return evaluate_curve(curve, top, top, bottom);
     };
-    if (left_curve && right_curve) return (target(*left_curve) + target(*right_curve)) / 2.0;
-    if (left_curve) return target(*left_curve) + lane_mask.cols * c_.assumed_lane_width / 2.0;
-    return target(*right_curve) - lane_mask.cols * c_.assumed_lane_width / 2.0;
+    const std::optional<double> left_target = left_curve ?
+      std::optional<double>(target(*left_curve)) : std::nullopt;
+    const std::optional<double> right_target = right_curve ?
+      std::optional<double>(target(*right_curve)) : std::nullopt;
+    double lane_width = tracked_lane_width_.value_or(
+      lane_mask.cols * c_.assumed_lane_width);
+    if (left_target && right_target) {
+      const double observed_width = *right_target - *left_target;
+      const double minimum = lane_mask.cols * c_.lane_width_min;
+      const double maximum = lane_mask.cols * c_.lane_width_max;
+      if (observed_width >= minimum && observed_width <= maximum) {
+        if (tracked_lane_width_) {
+          *tracked_lane_width_ += clamp(c_.lane_width_smoothing, 0.0, 1.0) *
+            (observed_width - *tracked_lane_width_);
+        } else {
+          tracked_lane_width_ = observed_width;
+        }
+        lane_width = *tracked_lane_width_;
+      }
+      previous_left_target_ = *left_target;
+      previous_right_target_ = *right_target;
+      previous_single_is_left_.reset();
+      return (*left_target + *right_target) / 2.0;
+    }
+
+    // A sole boundary may cross the camera center in a hairpin.  Evaluate both
+    // left/right center hypotheses against the previous boundary tracks and
+    // previous lane center; the image half is only the no-history fallback.
+    const double detected = left_target.value_or(*right_target);
+    const bool raw_is_left = left_target.has_value();
+    const double left_center = detected + lane_width / 2.0;
+    const double right_center = detected - lane_width / 2.0;
+    auto identity_score = [&](bool is_left) -> std::optional<double> {
+      double score = 0.0;
+      int evidence = 0;
+      const auto & boundary = is_left ? previous_left_target_ : previous_right_target_;
+      if (boundary) { score += std::abs(detected - *boundary); ++evidence; }
+      if (previous_center) {
+        score += std::abs((is_left ? left_center : right_center) - *previous_center);
+        ++evidence;
+      }
+      if (evidence == 0) return std::nullopt;
+      return score / evidence;
+    };
+    const auto left_score = identity_score(true);
+    const auto right_score = identity_score(false);
+    bool is_left = raw_is_left;
+    if (left_score && right_score) {
+      is_left = *left_score <= *right_score;
+      const double margin = lane_mask.cols * c_.single_lane_switch_margin;
+      if (previous_single_is_left_ && is_left != *previous_single_is_left_) {
+        const double previous_score = *previous_single_is_left_ ? *left_score : *right_score;
+        const double alternative_score = *previous_single_is_left_ ? *right_score : *left_score;
+        if (previous_score <= alternative_score + margin) {
+          is_left = *previous_single_is_left_;
+        }
+      }
+    }
+    if (debug && is_left != raw_is_left) {
+      const auto moved_curve = raw_is_left ? debug->left_curve : debug->right_curve;
+      if (is_left) {
+        debug->left_curve = moved_curve;
+        debug->right_curve.reset();
+      } else {
+        debug->right_curve = moved_curve;
+        debug->left_curve.reset();
+      }
+    }
+    previous_single_is_left_ = is_left;
+    if (is_left) previous_left_target_ = detected;
+    else previous_right_target_ = detected;
+    return is_left ? left_center : right_center;
   }
 
   Config c_;
   cv::Ptr<cv::CLAHE> clahe_;
   cv::Mat open_kernel_, close_kernel_;
   std::optional<double> previous_center_;
+  std::optional<double> previous_left_target_, previous_right_target_;
+  std::optional<double> tracked_lane_width_;
+  std::optional<bool> previous_single_is_left_;
+  double filtered_curvature_{0.0};
   double previous_error_{0.0};
 };
 
@@ -530,9 +642,16 @@ private:
   }
   double steering(const LaneObs & lane, double limit) {
     const double target = clamp(lane.center_error + c_.curve_blend * lane.signed_curvature, -1.0, 1.0);
-    const double alpha = std::atan2(target * c_.lateral_scale, std::max(c_.lookahead, 1e-3));
-    const double delta = std::atan2(2.0 * c_.wheelbase * std::sin(alpha), std::max(c_.lookahead, 1e-3));
-    double raw = c_.pp_gain * delta / (std::max(c_.max_steer_deg, 1.0) * CV_PI / 180.0);
+    const double curve_strength = std::pow(
+      clamp(lane.curvature, 0.0, 1.0), std::max(c_.curve_response_power, 1e-3));
+    const double minimum = std::min(c_.lookahead, c_.curve_lookahead_min);
+    const double lookahead = std::max(
+      c_.lookahead + curve_strength * (minimum - c_.lookahead), 1e-3);
+    const double alpha = std::atan2(target * c_.lateral_scale, lookahead);
+    const double delta = std::atan2(2.0 * c_.wheelbase * std::sin(alpha), lookahead);
+    const double curve_gain = 1.0 + std::max(c_.curve_steer_boost, 0.0) * curve_strength;
+    double raw = c_.pp_gain * curve_gain * delta /
+      (std::max(c_.max_steer_deg, 1.0) * CV_PI / 180.0);
     raw = clamp(raw, -limit, limit);
     previous_steer_ = rate(raw, previous_steer_, c_.steer_rate);
     return c_.steer_sign * previous_steer_;
@@ -663,6 +782,10 @@ private:
       "lane.min_component_area_ratio", config_.min_area_ratio);
     config_.fork_area_ratio = declare_parameter<double>("lane.fork_area_ratio", config_.fork_area_ratio);
     config_.hough_top = declare_parameter<double>("lane.hough_roi_top_ratio", config_.hough_top);
+    config_.hough_curve_top = declare_parameter<double>(
+      "lane.hough_curve_top_ratio", config_.hough_curve_top);
+    config_.hough_curvature_smoothing = declare_parameter<double>(
+      "lane.hough_curvature_smoothing", config_.hough_curvature_smoothing);
     config_.canny_low = declare_parameter<int>("lane.hough_canny_low", config_.canny_low);
     config_.canny_high = declare_parameter<int>("lane.hough_canny_high", config_.canny_high);
     config_.hough_threshold = declare_parameter<int>("lane.hough_threshold", config_.hough_threshold);
@@ -671,8 +794,26 @@ private:
     config_.hough_max_gap = declare_parameter<int>("lane.hough_max_line_gap", config_.hough_max_gap);
     config_.hough_slope_min = declare_parameter<double>(
       "lane.hough_slope_min_abs", config_.hough_slope_min);
+    config_.assumed_lane_width = declare_parameter<double>(
+      "lane.assumed_lane_width_ratio", config_.assumed_lane_width);
+    config_.lane_width_min = declare_parameter<double>(
+      "lane.lane_width_min_ratio", config_.lane_width_min);
+    config_.lane_width_max = declare_parameter<double>(
+      "lane.lane_width_max_ratio", config_.lane_width_max);
+    config_.lane_width_smoothing = declare_parameter<double>(
+      "lane.lane_width_smoothing", config_.lane_width_smoothing);
+    config_.single_lane_switch_margin = declare_parameter<double>(
+      "lane.single_lane_switch_margin_ratio", config_.single_lane_switch_margin);
+    config_.max_center_jump = declare_parameter<double>(
+      "lane.max_center_jump", config_.max_center_jump);
 
     config_.lookahead = declare_parameter<double>("steering.lookahead_m", config_.lookahead);
+    config_.curve_lookahead_min = declare_parameter<double>(
+      "steering.curve_lookahead_min_m", config_.curve_lookahead_min);
+    config_.curve_response_power = declare_parameter<double>(
+      "steering.curve_response_power", config_.curve_response_power);
+    config_.curve_steer_boost = declare_parameter<double>(
+      "steering.curve_steer_boost", config_.curve_steer_boost);
     config_.wheelbase = declare_parameter<double>("steering.wheelbase_m", config_.wheelbase);
     config_.lateral_scale = declare_parameter<double>("steering.lateral_scale_m", config_.lateral_scale);
     config_.max_steer_deg = declare_parameter<double>("steering.max_steer_deg", config_.max_steer_deg);
@@ -680,6 +821,11 @@ private:
     config_.curve_blend = declare_parameter<double>("steering.curve_blend", config_.curve_blend);
     config_.straight_limit = declare_parameter<double>("steering.straight_limit", config_.straight_limit);
     config_.s_curve_limit = declare_parameter<double>("steering.s_curve_limit", config_.s_curve_limit);
+    config_.fork_approach_limit = declare_parameter<double>(
+      "steering.fork_approach_limit", config_.fork_approach_limit);
+    config_.fork_limit = declare_parameter<double>("steering.fork_limit", config_.fork_limit);
+    config_.post_fork_limit = declare_parameter<double>(
+      "steering.post_fork_limit", config_.post_fork_limit);
     config_.steer_rate = declare_parameter<double>("steering.rate_limit_per_cmd", config_.steer_rate);
     config_.steer_sign = declare_parameter<int>("steering.steer_sign", config_.steer_sign);
 
@@ -744,13 +890,34 @@ private:
         else if (name == "lane.min_component_area_ratio") next.min_area_ratio = parameter.as_double();
         else if (name == "lane.fork_area_ratio") next.fork_area_ratio = parameter.as_double();
         else if (name == "lane.hough_roi_top_ratio") next.hough_top = parameter.as_double();
+        else if (name == "lane.hough_curve_top_ratio") next.hough_curve_top = parameter.as_double();
+        else if (name == "lane.hough_curvature_smoothing") {
+          next.hough_curvature_smoothing = parameter.as_double();
+        }
         else if (name == "lane.hough_canny_low") next.canny_low = parameter.as_int();
         else if (name == "lane.hough_canny_high") next.canny_high = parameter.as_int();
         else if (name == "lane.hough_threshold") next.hough_threshold = parameter.as_int();
         else if (name == "lane.hough_min_line_length") next.hough_min_length = parameter.as_int();
         else if (name == "lane.hough_max_line_gap") next.hough_max_gap = parameter.as_int();
         else if (name == "lane.hough_slope_min_abs") next.hough_slope_min = parameter.as_double();
+        else if (name == "lane.assumed_lane_width_ratio") next.assumed_lane_width = parameter.as_double();
+        else if (name == "lane.lane_width_min_ratio") next.lane_width_min = parameter.as_double();
+        else if (name == "lane.lane_width_max_ratio") next.lane_width_max = parameter.as_double();
+        else if (name == "lane.lane_width_smoothing") next.lane_width_smoothing = parameter.as_double();
+        else if (name == "lane.single_lane_switch_margin_ratio") {
+          next.single_lane_switch_margin = parameter.as_double();
+        }
+        else if (name == "lane.max_center_jump") next.max_center_jump = parameter.as_double();
         else if (name == "steering.lookahead_m") next.lookahead = parameter.as_double();
+        else if (name == "steering.curve_lookahead_min_m") {
+          next.curve_lookahead_min = parameter.as_double();
+        }
+        else if (name == "steering.curve_response_power") {
+          next.curve_response_power = parameter.as_double();
+        }
+        else if (name == "steering.curve_steer_boost") {
+          next.curve_steer_boost = parameter.as_double();
+        }
         else if (name == "steering.wheelbase_m") next.wheelbase = parameter.as_double();
         else if (name == "steering.lateral_scale_m") next.lateral_scale = parameter.as_double();
         else if (name == "steering.max_steer_deg") next.max_steer_deg = parameter.as_double();
@@ -758,6 +925,11 @@ private:
         else if (name == "steering.curve_blend") next.curve_blend = parameter.as_double();
         else if (name == "steering.straight_limit") next.straight_limit = parameter.as_double();
         else if (name == "steering.s_curve_limit") next.s_curve_limit = parameter.as_double();
+        else if (name == "steering.fork_approach_limit") {
+          next.fork_approach_limit = parameter.as_double();
+        }
+        else if (name == "steering.fork_limit") next.fork_limit = parameter.as_double();
+        else if (name == "steering.post_fork_limit") next.post_fork_limit = parameter.as_double();
         else if (name == "steering.rate_limit_per_cmd") next.steer_rate = parameter.as_double();
         else if (name == "steering.steer_sign") next.steer_sign = parameter.as_int();
         else if (name == "throttle.speed_min") next.speed_min = parameter.as_double();
@@ -785,7 +957,15 @@ private:
       next.yellow_b_min <= next.yellow_b_max;
     const bool geometry_valid = next.lane_width >= 1 && next.lane_height >= 1 && next.clahe_tile >= 1 &&
       next.morph_open >= 1 && next.morph_close >= 1 && next.lookahead > 0.0 && next.wheelbase > 0.0 &&
-      next.max_steer_deg > 0.0 && next.gamma > 0.0;
+      next.curve_lookahead_min > 0.0 && next.curve_lookahead_min <= next.lookahead &&
+      next.curve_response_power > 0.0 && next.curve_steer_boost >= 0.0 &&
+      next.max_steer_deg > 0.0 && next.gamma > 0.0 &&
+      next.hough_top >= 0.0 && next.hough_top < 0.90 &&
+      next.hough_curve_top >= next.hough_top && next.hough_curve_top <= 0.90 &&
+      next.hough_curvature_smoothing >= 0.0 && next.hough_curvature_smoothing <= 1.0 &&
+      next.lane_width_min > 0.0 && next.lane_width_min < next.lane_width_max &&
+      next.lane_width_max <= 1.0 && next.lane_width_smoothing >= 0.0 &&
+      next.lane_width_smoothing <= 1.0 && next.single_lane_switch_margin >= 0.0;
     const bool speed_valid = next.speed_min >= 0.0 && next.speed_min <= next.speed_max && next.speed_max <= 1.0;
     if (!lab_valid || !geometry_valid || !speed_valid || std::abs(next.steer_sign) != 1) {
       return rcl_interfaces::msg::SetParametersResult().set__successful(false).set__reason(
@@ -1232,7 +1412,9 @@ private:
       cv::Point(8, 20));
     std::ostringstream status;
     status.setf(std::ios::fixed); status.precision(2);
-    status << "err=" << std::showpos << lane.center_error << " steer=" << cmd.steering;
+    status << "err=" << std::showpos << lane.center_error <<
+      " curv=" << std::noshowpos << lane.curvature <<
+      " steer=" << std::showpos << cmd.steering;
     put_outlined_text(view, status.str(), cv::Point(8, 42));
     return view;
   }
@@ -1291,7 +1473,8 @@ private:
     put_outlined_text(frame, "state=" + state, cv::Point(8, 22));
     std::ostringstream command_text;
     command_text.setf(std::ios::fixed); command_text.precision(2);
-    command_text << "thr=" << cmd.throttle << " steer=" << std::showpos << cmd.steering;
+    command_text << "thr=" << cmd.throttle << " curv=" << lane.curvature <<
+      " steer=" << std::showpos << cmd.steering;
     put_outlined_text(frame, command_text.str(), cv::Point(8, 44));
     put_outlined_text(frame, "light=" + std::string(light == 1 ? "GREEN" : light == 2 ? "RED" : "none"),
       cv::Point(8, frame.rows - 12), 0.65,

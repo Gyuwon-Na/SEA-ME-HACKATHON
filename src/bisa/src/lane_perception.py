@@ -53,6 +53,11 @@ class LanePerception:
         self.config = config
         self.prev_center_error = 0.0
         self.prev_near_center: Optional[float] = None
+        self.prev_left_target: Optional[float] = None
+        self.prev_right_target: Optional[float] = None
+        self.tracked_lane_width: Optional[float] = None
+        self.prev_single_is_left: Optional[bool] = None
+        self.filtered_curvature = 0.0
         self._clahe_key = None
         self._clahe = None
         self._morph_kernels: dict[int, np.ndarray] = {}
@@ -252,11 +257,21 @@ class LanePerception:
         viz_out: dict | None = None,
         prepared_l_channel: np.ndarray | None = None,
         vehicle_x: float | None = None,
+        curvature_hint: float = 0.0,
+        previous_center: float | None = None,
     ) -> tuple[Optional[float], bool, bool]:
-        """Selects one camera-left/right lane and fits each as a quadratic curve."""
+        """Fits lane curves and preserves their left/right identity over time.
+
+        A tight bend can move the only visible boundary across the camera center,
+        so image-half classification is only an initial hint.  When one curve is
+        left, the previous boundary tracks and lane center choose its identity.
+        """
 
         height, width = frame_bgr.shape[:2]
-        top_y = int(self.config.lane.hough_roi_top_ratio * height)
+        base_top = float(self.config.lane.hough_roi_top_ratio)
+        curve_top = max(base_top, float(self.config.lane.hough_curve_top_ratio))
+        adaptive_top = base_top + (curve_top - base_top) * clamp(curvature_hint, 0.0, 1.0)
+        top_y = int(clamp(adaptive_top, 0.0, 0.90) * height)
         if record and viz_out is not None:
             viz_out["hough_left_curve"] = None
             viz_out["hough_right_curve"] = None
@@ -366,13 +381,66 @@ class LanePerception:
             if left_curve is not None else None
         right_target = self._evaluate_curve(right_curve, top_y, top_y, bottom_y) \
             if right_curve is not None else None
-        assumed_width = width * self.config.lane.assumed_lane_width_ratio
+        fallback_width = width * self.config.lane.assumed_lane_width_ratio
+        lane_width = self.tracked_lane_width or fallback_width
         if left_target is not None and right_target is not None:
+            observed_width = right_target - left_target
+            minimum = width * self.config.lane.lane_width_min_ratio
+            maximum = width * self.config.lane.lane_width_max_ratio
+            if minimum <= observed_width <= maximum:
+                smoothing = clamp(self.config.lane.lane_width_smoothing, 0.0, 1.0)
+                if self.tracked_lane_width is None:
+                    self.tracked_lane_width = observed_width
+                else:
+                    self.tracked_lane_width += smoothing * (
+                        observed_width - self.tracked_lane_width
+                    )
+                lane_width = self.tracked_lane_width
+            self.prev_left_target = left_target
+            self.prev_right_target = right_target
+            self.prev_single_is_left = None
             center_x = (left_target + right_target) / 2.0
-        elif left_target is not None:
-            center_x = left_target + assumed_width / 2.0
         else:
-            center_x = right_target - assumed_width / 2.0
+            target = left_target if left_target is not None else right_target
+            raw_is_left = left_target is not None
+            left_center = target + lane_width / 2.0
+            right_center = target - lane_width / 2.0
+
+            def identity_score(is_left: bool) -> float | None:
+                evidence = []
+                previous_boundary = self.prev_left_target if is_left else self.prev_right_target
+                if previous_boundary is not None:
+                    evidence.append(abs(target - previous_boundary))
+                if previous_center is not None:
+                    hypothesis = left_center if is_left else right_center
+                    evidence.append(abs(hypothesis - previous_center))
+                return sum(evidence) / len(evidence) if evidence else None
+
+            left_score = identity_score(True)
+            right_score = identity_score(False)
+            if left_score is None or right_score is None:
+                is_left = raw_is_left
+            else:
+                is_left = left_score <= right_score
+                margin = width * self.config.lane.single_lane_switch_margin_ratio
+                if self.prev_single_is_left is not None and is_left != self.prev_single_is_left:
+                    previous_score = left_score if self.prev_single_is_left else right_score
+                    alternative_score = right_score if self.prev_single_is_left else left_score
+                    if previous_score <= alternative_score + margin:
+                        is_left = self.prev_single_is_left
+
+            center_x = left_center if is_left else right_center
+            self.prev_single_is_left = is_left
+            if record and viz_out is not None and is_left != raw_is_left:
+                points_key = "hough_left_curve" if raw_is_left else "hough_right_curve"
+                moved_points = viz_out.get(points_key)
+                viz_out[points_key] = None
+                viz_out["hough_left_curve" if is_left else "hough_right_curve"] = moved_points
+            if is_left:
+                self.prev_left_target = target
+            else:
+                self.prev_right_target = target
+            left_present, right_present = is_left, not is_left
         return center_x, left_present, right_present
 
     def detect_fork_candidates(self, mask: np.ndarray) -> tuple[bool, Optional[PathCandidate], Optional[PathCandidate]]:
@@ -463,8 +531,32 @@ class LanePerception:
             viz_tmp["lane_mask"] = lane_mask
             viz_tmp["frame_size"] = (int(full_width), int(full_height))
         height, width = road_mask.shape[:2]
+        near = self.region_of_interest(road_mask, self.config.roi.near_y0, 1.0)
         mid = self.region_of_interest(road_mask, self.config.roi.mid_y0, self.config.roi.mid_y1)
         far = self.region_of_interest(road_mask, self.config.roi.far_y0, self.config.roi.far_y1)
+
+        # The road mask supplies a cheap curvature hint before Hough runs.  Its
+        # EMA controls how much of the far fit is discarded on a tight bend.
+        road_near_center = self.contour_center_x(
+            near, self.config.lane.min_component_area_ratio
+        )
+        mid_center = self.contour_center_x(mid, self.config.lane.min_component_area_ratio)
+        far_center = self.contour_center_x(far, self.config.lane.min_component_area_ratio)
+        rough_curvature = self.filtered_curvature
+        if road_near_center is not None:
+            rough_curvature = 0.0
+            if far_center is not None:
+                rough_curvature = max(
+                    rough_curvature,
+                    clamp(abs(far_center - road_near_center) / max(float(full_width), 1.0) * 2.5, 0.0, 1.0),
+                )
+            if mid_center is not None:
+                rough_curvature = max(
+                    rough_curvature,
+                    clamp(abs(mid_center - road_near_center) / max(float(full_width), 1.0) * 2.0, 0.0, 1.0),
+                )
+        smoothing = clamp(self.config.lane.hough_curvature_smoothing, 0.0, 1.0)
+        self.filtered_curvature += smoothing * (rough_curvature - self.filtered_curvature)
 
         # Primary lane center uses the color-gated white|yellow paint mask. This
         # rejects unrelated brightness edges (people, arms, furniture) before
@@ -475,18 +567,16 @@ class LanePerception:
             viz_out=viz_tmp,
             prepared_l_channel=lane_mask,
             vehicle_x=full_width / 2.0 - x0,
+            curvature_hint=self.filtered_curvature,
+            previous_center=(
+                self.prev_near_center - x0 if self.prev_near_center is not None else None
+            ),
         )
         near_center = hough_center
         if near_center is None:
             # Fall back to the black-road-mask centroid only when no lane line was
             # found, so a fully black frame still yields a usable center.
-            near = self.region_of_interest(road_mask, self.config.roi.near_y0, 1.0)
-            near_center = self.contour_center_x(near, self.config.lane.min_component_area_ratio)
-
-        # Far/mid centroids stay mask-based; they feed curvature and fork cues
-        # the reference never computes but the mission FSM depends on.
-        mid_center = self.contour_center_x(mid, self.config.lane.min_component_area_ratio)
-        far_center = self.contour_center_x(far, self.config.lane.min_component_area_ratio)
+            near_center = road_near_center
 
         if near_center is None:
             if collect_viz:

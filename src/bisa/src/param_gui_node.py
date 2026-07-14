@@ -38,6 +38,9 @@ SPEC = {
     ],
     "Steering (PP)": [
         ("lookahead (m)", "steering.lookahead_m", "f", 0.1, 2.0),
+        ("curve min lookahead", "steering.curve_lookahead_min_m", "f", 0.1, 1.0),
+        ("curve response pow", "steering.curve_response_power", "f", 0.1, 2.0),
+        ("curve steer boost", "steering.curve_steer_boost", "f", 0.0, 1.0),
         ("wheelbase (m)", "steering.wheelbase_m", "f", 0.05, 0.5),
         ("lateral scale (m)", "steering.lateral_scale_m", "f", 0.05, 1.0),
         ("max steer (deg)", "steering.max_steer_deg", "f", 5.0, 60.0),

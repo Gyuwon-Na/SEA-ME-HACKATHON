@@ -39,8 +39,55 @@ DET_COLORS = {
 MAX_STEER_DEG = 50.0
 
 
-def _ipt(value) -> int:
-    return int(round(value))
+def _finite(value) -> bool:
+    try:
+        return np.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _ipt(value) -> int | None:
+    if not _finite(value):
+        return None
+    return int(round(float(value)))
+
+
+def _clip(value, upper: int) -> int | None:
+    ivalue = _ipt(value)
+    if ivalue is None:
+        return None
+    return max(0, min(ivalue, max(int(upper) - 1, 0)))
+
+
+def _point(x, y, width: int, height: int):
+    px = _clip(x, width)
+    py = _clip(y, height)
+    if px is None or py is None:
+        return None
+    return (px, py)
+
+
+def _rect(frame, bbox):
+    height, width = frame.shape[:2]
+    if len(bbox) != 4 or not all(_finite(v) for v in bbox):
+        return None
+    x1, y1, x2, y2 = bbox
+    p0 = _point(min(x1, x2), min(y1, y2), width, height)
+    p1 = _point(max(x1, x2), max(y1, y2), width, height)
+    if p0 is None or p1 is None or p0 == p1:
+        return None
+    return p0, p1
+
+
+def _poly(points, ox=0, oy=0):
+    safe = []
+    for x, y in points:
+        px = _ipt(x)
+        py = _ipt(y)
+        if px is None or py is None:
+            return None
+        safe.append([px + int(ox), py + int(oy)])
+    return np.array(safe, dtype=np.int32)
 
 
 def draw_lane_roi(frame, lane_viz) -> None:
@@ -51,9 +98,12 @@ def draw_lane_roi(frame, lane_viz) -> None:
     rect = lane_viz.get("roi_rect")
     if not rect:
         return
-    x0, y0, w, h = rect
-    cv2.rectangle(frame, (x0, y0), (x0 + w, y0 + h), COLOR_ROI, 2)
-    cv2.putText(frame, f"lane ROI {w}x{h}", (x0 + 4, max(14, y0 + 18)),
+    safe = _rect(frame, (rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3]))
+    if safe is None:
+        return
+    (x0, y0), (x1, y1) = safe
+    cv2.rectangle(frame, (x0, y0), (x1, y1), COLOR_ROI, 2)
+    cv2.putText(frame, f"lane ROI {x1 - x0}x{y1 - y0}", (x0 + 4, max(14, y0 + 18)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_ROI, 1, cv2.LINE_AA)
 
 
@@ -77,18 +127,18 @@ def draw_lanes(frame, lane_viz) -> None:
     for key in ("hough_left_curve", "hough_right_curve"):
         curve = lane_viz.get(key)
         if curve:
-            curves.append(np.array(
-                [[_ipt(x) + ox, _ipt(y) + oy] for x, y in curve], dtype=np.int32
-            ))
+            poly = _poly(curve, ox, oy)
+            if poly is not None:
+                curves.append(poly)
     # Backward compatibility for visualization dictionaries recorded before
     # quadratic fitting was introduced.
     if not curves:
         for key in ("hough_left", "hough_right"):
             line = lane_viz.get(key)
             if line:
-                curves.append(np.array(
-                    [[_ipt(x) + ox, _ipt(y) + oy] for x, y in line], dtype=np.int32
-                ))
+                poly = _poly(line, ox, oy)
+                if poly is not None:
+                    curves.append(poly)
     if curves:
         layer = np.zeros_like(frame)
         for curve in curves:
@@ -99,10 +149,14 @@ def draw_lanes(frame, lane_viz) -> None:
     near_band = lane_viz.get("near_band")
     near_center = lane_viz.get("near_center")
     if near_band is not None:
-        y_marker = (near_band[0] + near_band[1]) // 2 + oy
+        y_marker = _clip((near_band[0] + near_band[1]) / 2 + oy, height_f)
+        if y_marker is None:
+            return
         cv2.circle(frame, (width_f // 2, y_marker), 8, COLOR_VEHICLE_CENTER, -1)
         if near_center is not None:
-            cv2.circle(frame, (_ipt(near_center) + ox, y_marker), 8, COLOR_LANE_CENTER, -1)
+            point = _point(float(near_center) + ox, y_marker, width_f, height_f)
+            if point is not None:
+                cv2.circle(frame, point, 8, COLOR_LANE_CENTER, -1)
 
 
 def draw_light_roi(frame, light_roi) -> None:
@@ -112,8 +166,10 @@ def draw_light_roi(frame, light_roi) -> None:
         return
     height, width = frame.shape[:2]
     x0, y0, x1, y1 = light_roi
-    p0 = (_ipt(x0 * width), _ipt(y0 * height))
-    p1 = (_ipt(x1 * width), _ipt(y1 * height))
+    p0 = _point(x0 * width, y0 * height, width, height)
+    p1 = _point(x1 * width, y1 * height, width, height)
+    if p0 is None or p1 is None or p0 == p1:
+        return
     cv2.rectangle(frame, p0, p1, COLOR_LIGHT_ROI, 2)
     cv2.putText(frame, "light ROI", (p0[0] + 4, max(14, p0[1] + 18)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_LIGHT_ROI, 1, cv2.LINE_AA)
@@ -132,8 +188,9 @@ def draw_center_and_steering(frame, steering: float) -> None:
 
     theta = math.radians(max(-1.0, min(1.0, steering)) * MAX_STEER_DEG)
     length = int(height * 0.5)
-    tip = (_ipt(cx - length * math.sin(theta)), _ipt(height - length * math.cos(theta)))
-    cv2.arrowedLine(frame, (cx, height - 1), tip, COLOR_STEER, 3, tipLength=0.15)
+    tip = _point(cx - length * math.sin(theta), height - length * math.cos(theta), width, height)
+    if tip is not None:
+        cv2.arrowedLine(frame, (cx, height - 1), tip, COLOR_STEER, 3, tipLength=0.15)
 
 
 def draw_detections(frame, detections, accepted_ids=None, light_verdicts=None) -> None:
@@ -149,7 +206,10 @@ def draw_detections(frame, detections, accepted_ids=None, light_verdicts=None) -
 
     light_verdicts = light_verdicts or {}
     for det in detections or []:
-        x1, y1, x2, y2 = (int(v) for v in det.bbox)
+        rect = _rect(frame, det.bbox)
+        if rect is None:
+            continue
+        (x1, y1), (x2, y2) = rect
         if det.cls in ("traffic_green", "traffic_red"):
             verdict = light_verdicts.get(id(det))
             color = {"traffic_green": (0, 255, 0), "traffic_red": (0, 0, 255)}.get(
@@ -170,7 +230,10 @@ def draw_aruco(frame, markers, target_id: int) -> None:
     """Draws a bounding box and ID label for each detected ArUco marker."""
 
     for marker in markers or []:
-        x1, y1, x2, y2 = (int(v) for v in marker.bbox)
+        rect = _rect(frame, marker.bbox)
+        if rect is None:
+            continue
+        (x1, y1), (x2, y2) = rect
         is_target = marker.id == target_id
         color = COLOR_ARUCO_TARGET if is_target else COLOR_ARUCO
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
@@ -228,53 +291,79 @@ def draw_lane_mask_view(lane_viz, cmd):
         if not band:
             continue
         y0, y1 = band
-        cv2.line(view, (0, y0), (width, y0), color, 1)
-        cv2.line(view, (0, y1 - 1), (width, y1 - 1), color, 1)
+        y0 = _clip(y0, height)
+        y1 = _clip(y1 - 1, height)
+        if y0 is None or y1 is None:
+            continue
+        cv2.line(view, (0, y0), (width - 1, y0), color, 1)
+        cv2.line(view, (0, y1), (width - 1, y1), color, 1)
         center = lane_viz.get(center_key)
         if center is not None:
-            cv2.circle(view, (_ipt(center), (y0 + y1) // 2), 6, color, -1)
+            point = _point(center, (y0 + y1) / 2, width, height)
+            if point is not None:
+                cv2.circle(view, point, 6, color, -1)
 
     # Raw proposals (faint), selected clusters (amber), then fitted curves (bold).
     for x1, y1, x2, y2 in lane_viz.get("hough_segments") or []:
-        cv2.line(view, (x1, y1), (x2, y2), COLOR_LANE_RAW, 1)
+        p0 = _point(x1, y1, width, height)
+        p1 = _point(x2, y2, width, height)
+        if p0 is not None and p1 is not None:
+            cv2.line(view, p0, p1, COLOR_LANE_RAW, 1)
     for x1, y1, x2, y2 in lane_viz.get("hough_selected_segments") or []:
-        cv2.line(view, (x1, y1), (x2, y2), COLOR_LANE_SELECTED, 2)
+        p0 = _point(x1, y1, width, height)
+        p1 = _point(x2, y2, width, height)
+        if p0 is not None and p1 is not None:
+            cv2.line(view, p0, p1, COLOR_LANE_SELECTED, 2)
     curves = []
     for key in ("hough_left_curve", "hough_right_curve"):
         curve = lane_viz.get(key)
         if curve:
-            curves.append(np.array([[_ipt(x), _ipt(y)] for x, y in curve], dtype=np.int32))
+            poly = _poly(curve)
+            if poly is not None:
+                curves.append(poly)
     if not curves:
         for key in ("hough_left", "hough_right"):
             line = lane_viz.get(key)
             if line:
-                curves.append(np.array([[_ipt(x), _ipt(y)] for x, y in line], dtype=np.int32))
+                poly = _poly(line)
+                if poly is not None:
+                    curves.append(poly)
     for curve in curves:
         cv2.polylines(view, [curve], False, COLOR_LANE, 2, cv2.LINE_AA)
     top_y = lane_viz.get("hough_top_y")
     if top_y is not None:
-        cv2.line(view, (0, top_y), (width, top_y), COLOR_LANE_RAW, 1)
+        top_y = _clip(top_y, height)
+        if top_y is not None:
+            cv2.line(view, (0, top_y), (width - 1, top_y), COLOR_LANE_RAW, 1)
 
     # Vehicle center (full-frame center translated into ROI coordinates) and
     # the lane-center marker the controller actually steers against.
     ox, _ = lane_viz.get("roi_offset", (0, 0))
     frame_w = lane_viz.get("frame_size", (width, height))[0]
     vehicle_x = frame_w // 2 - ox
-    cv2.line(view, (vehicle_x, 0), (vehicle_x, height), COLOR_CENTER_LINE, 1)
+    vehicle_x = _clip(vehicle_x, width)
+    if vehicle_x is None:
+        return view
+    cv2.line(view, (vehicle_x, 0), (vehicle_x, height - 1), COLOR_CENTER_LINE, 1)
     near_band = lane_viz.get("near_band")
     near_center = lane_viz.get("near_center")
     if near_band and near_center is not None:
-        y_marker = (near_band[0] + near_band[1]) // 2
+        y_marker = _clip((near_band[0] + near_band[1]) / 2, height)
+        if y_marker is None:
+            return view
         cv2.circle(view, (vehicle_x, y_marker), 6, COLOR_VEHICLE_CENTER, -1)
-        cv2.circle(view, (_ipt(near_center), y_marker), 6, COLOR_LANE_CENTER, -1)
+        point = _point(near_center, y_marker, width, height)
+        if point is not None:
+            cv2.circle(view, point, 6, COLOR_LANE_CENTER, -1)
 
     # Steering arrow from the bottom of the ROI. Pipeline convention: positive
     # steering steers LEFT, so the arrow tips toward -x (same as the full view).
     steering = float(getattr(cmd, "steering", 0.0))
     theta = math.radians(max(-1.0, min(1.0, steering)) * MAX_STEER_DEG)
     length = int(height * 0.45)
-    tip = (_ipt(vehicle_x - length * math.sin(theta)), _ipt(height - length * math.cos(theta)))
-    cv2.arrowedLine(view, (vehicle_x, height - 1), tip, COLOR_STEER, 2, tipLength=0.2)
+    tip = _point(vehicle_x - length * math.sin(theta), height - length * math.cos(theta), width, height)
+    if tip is not None:
+        cv2.arrowedLine(view, (vehicle_x, height - 1), tip, COLOR_STEER, 2, tipLength=0.2)
 
     err = lane_viz.get("center_error", 0.0)
     draw_hud(view, [

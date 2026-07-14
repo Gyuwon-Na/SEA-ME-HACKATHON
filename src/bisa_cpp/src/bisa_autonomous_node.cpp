@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -59,17 +60,12 @@ enum class MissionState {
   OUT_TO_FORK,
   OUT_FORK_SIGN_ADVANCE,
   OUT_FORK_COMMIT,
-  OUT_TO_ARUCO,
-  OUT_ARUCO_STOP,
   OUT_RESUME,
-  OUT_FINISH_STOP,
   IN_WAIT_GREEN,
   IN_ENTRY,
   IN_LAP,
   IN_EXIT,
-  IN_ARUCO_STOP,
   IN_RESUME,
-  IN_FINISH_STOP,
 };
 
 const char * state_name(MissionState state) {
@@ -79,17 +75,12 @@ const char * state_name(MissionState state) {
     case MissionState::OUT_TO_FORK: return "OUT_TO_FORK";
     case MissionState::OUT_FORK_SIGN_ADVANCE: return "OUT_FORK_SIGN_ADVANCE";
     case MissionState::OUT_FORK_COMMIT: return "OUT_FORK_COMMIT";
-    case MissionState::OUT_TO_ARUCO: return "OUT_TO_ARUCO";
-    case MissionState::OUT_ARUCO_STOP: return "OUT_ARUCO_STOP";
     case MissionState::OUT_RESUME: return "OUT_RESUME";
-    case MissionState::OUT_FINISH_STOP: return "OUT_FINISH_STOP";
     case MissionState::IN_WAIT_GREEN: return "IN_WAIT_GREEN";
     case MissionState::IN_ENTRY: return "IN_ENTRY";
     case MissionState::IN_LAP: return "IN_LAP";
     case MissionState::IN_EXIT: return "IN_EXIT";
-    case MissionState::IN_ARUCO_STOP: return "IN_ARUCO_STOP";
     case MissionState::IN_RESUME: return "IN_RESUME";
-    case MissionState::IN_FINISH_STOP: return "IN_FINISH_STOP";
   }
   return "UNKNOWN";
 }
@@ -908,6 +899,7 @@ public:
     state_ = route_mode_ == RouteMode::LANE ? MissionState::LANE_TEST :
       route_mode_ == RouteMode::IN ? MissionState::IN_WAIT_GREEN :
       MissionState::OUT_WAIT_GREEN;
+    has_started_ = route_mode_ == RouteMode::LANE;
     performance_started_ = std::chrono::steady_clock::now();
     RCLCPP_INFO(
       get_logger(),
@@ -1346,7 +1338,13 @@ private:
       d.class_id = static_cast<int>(msg->data[base]);
       d.confidence = msg->data[base + 1];
       const float x1 = msg->data[base + 2], y1 = msg->data[base + 3];
-      d.box = cv::Rect2f(x1, y1, msg->data[base + 4] - x1, msg->data[base + 5] - y1);
+      const float x2 = msg->data[base + 4], y2 = msg->data[base + 5];
+      if (!std::isfinite(d.confidence) || !std::isfinite(x1) || !std::isfinite(y1) ||
+        !std::isfinite(x2) || !std::isfinite(y2) || x2 <= x1 || y2 <= y1)
+      {
+        continue;
+      }
+      d.box = cv::Rect2f(x1, y1, x2 - x1, y2 - y1);
       left = left || d.class_id == 2; right = right || d.class_id == 3;
       detections.push_back(d);
     }
@@ -1410,24 +1408,6 @@ private:
     entered_ = now_sec;
   }
 
-  void update_marker(bool visible) {
-    if (visible) {
-      marker_seen_streak_ = std::min(marker_seen_streak_ + 1, config_.aruco_confirm_frames);
-      marker_clear_streak_ = 0;
-    } else {
-      marker_clear_streak_ = std::min(marker_clear_streak_ + 1, config_.aruco_clear_frames);
-      marker_seen_streak_ = 0;
-    }
-  }
-
-  bool marker_confirmed() const {
-    return marker_seen_streak_ >= config_.aruco_confirm_frames;
-  }
-
-  bool marker_cleared() const {
-    return marker_clear_streak_ >= config_.aruco_clear_frames;
-  }
-
   Command step_out(const LaneObs & lane, double now_sec) {
     switch (state_) {
       case MissionState::OUT_WAIT_GREEN:
@@ -1474,37 +1454,14 @@ private:
             reacquired ? "true" : "false",
             now_sec - entered_ >= config_.fork_commit_timeout_sec ? "true" : "false");
           lane_reset_requested_.store(true);
-          transition(MissionState::OUT_TO_ARUCO, now_sec);
+          transition(MissionState::OUT_RESUME, now_sec);
         }
         return cmd;
       }
 
-      case MissionState::OUT_TO_ARUCO:
-        if (marker_confirmed()) {
-          controller_.stop();
-          transition(MissionState::OUT_ARUCO_STOP, now_sec);
-          return {};
-        }
-        return controller_.follow(
-          lane, config_.post_fork_cap, config_.post_fork_limit, config_.post_fork_min);
-
-      case MissionState::OUT_ARUCO_STOP:
-        controller_.stop();
-        if (marker_cleared()) transition(MissionState::OUT_RESUME, now_sec);
-        return {};
-
       case MissionState::OUT_RESUME:
-        if (red_streak_ >= config_.light_confirm_frames) {
-          controller_.stop();
-          transition(MissionState::OUT_FINISH_STOP, now_sec);
-          return {};
-        }
         return controller_.follow(
           lane, config_.post_fork_cap, config_.post_fork_limit, config_.post_fork_min);
-
-      case MissionState::OUT_FINISH_STOP:
-        controller_.stop();
-        return {};
 
       default:
         controller_.stop();
@@ -1526,24 +1483,8 @@ private:
       case MissionState::IN_LAP:
         return controller_.follow(lane, config_.s_curve_cap, config_.s_curve_limit);
       case MissionState::IN_EXIT:
-        if (marker_confirmed()) {
-          controller_.stop();
-          transition(MissionState::IN_ARUCO_STOP, now_sec);
-          return {};
-        }
-        return controller_.follow(lane, config_.post_fork_cap, config_.post_fork_limit);
-      case MissionState::IN_ARUCO_STOP:
-        controller_.stop();
-        if (marker_cleared()) transition(MissionState::IN_RESUME, now_sec);
-        return {};
       case MissionState::IN_RESUME:
-        if (red_streak_ >= config_.light_confirm_frames) {
-          controller_.stop();
-          transition(MissionState::IN_FINISH_STOP, now_sec);
-          return {};
-        }
         return controller_.follow(lane, config_.post_fork_cap, config_.post_fork_limit);
-      case MissionState::IN_FINISH_STOP:
       default:
         controller_.stop();
         return {};
@@ -1570,10 +1511,39 @@ private:
       const double now_sec = now().seconds();
       update_light(now_sec);
       lane = latest_lane_; marker = target_marker_; markers = marker_ids_;
-      update_marker(marker);
       const double light_age = (now() - light_received_).seconds();
       light = light_age >= 0.0 && light_age <= config_.light_stale_sec ? light_state_ : 0;
-      cmd = step(lane, now_sec);
+
+      // Safety/mission stops are global control overrides, not FSM states.
+      // The marker is intentionally level-triggered: stop on the first camera
+      // frame that contains the target and resume on the first frame without
+      // it.  Pausing entered_ prevents a timed fork state from expiring while
+      // the vehicle is held stationary.
+      if (marker && !aruco_stop_active_) {
+        aruco_stop_active_ = true;
+        aruco_pause_started_ = now_sec;
+        RCLCPP_INFO(get_logger(), "global ArUco stop active (target id=%d)", config_.aruco_target_id);
+      } else if (!marker && aruco_stop_active_) {
+        aruco_stop_active_ = false;
+        entered_ += std::max(0.0, now_sec - aruco_pause_started_);
+        RCLCPP_INFO(get_logger(), "global ArUco stop cleared; resume mission");
+      }
+      if (has_started_ && light == 2 && !red_stop_latched_) {
+        red_stop_latched_ = true;
+        RCLCPP_WARN(get_logger(), "global red-light stop latched");
+      }
+
+      if (red_stop_latched_ || aruco_stop_active_) {
+        controller_.stop();
+        cmd = {};
+      } else {
+        cmd = step(lane, now_sec);
+        if (!has_started_ && state_ != MissionState::OUT_WAIT_GREEN &&
+          state_ != MissionState::IN_WAIT_GREEN)
+        {
+          has_started_ = true;
+        }
+      }
       last_command_ = cmd;
       decision = sign_decision();
       speed_max = config_.speed_max;
@@ -1786,6 +1756,20 @@ private:
   }
 
   void debug_loop() {
+    try {
+      debug_loop_impl();
+    } catch (const cv::Exception & error) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "skip invalid debug frame after OpenCV error: %s", error.what());
+    } catch (const std::exception & error) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "skip invalid debug frame: %s", error.what());
+    }
+  }
+
+  void debug_loop_impl() {
     cv::Mat frame;
     LaneDebug lane_debug;
     LaneObs lane;
@@ -1831,10 +1815,25 @@ private:
     for (std::size_t i = 0; i < marker_corners.size(); ++i) {
       const bool target = i < markers.size() && markers[i] == config.aruco_target_id;
       const cv::Scalar color = target ? cv::Scalar(0, 255, 255) : cv::Scalar(255, 0, 255);
-      cv::polylines(frame, marker_corners[i], true, color, target ? 3 : 2, cv::LINE_AA);
-      if (!marker_corners[i].empty() && i < markers.size()) {
-        put_outlined_text(frame, "ID " + std::to_string(markers[i]), marker_corners[i][0], 0.55, color);
+      // OpenCV's polylines overload used here requires integer points. Passing
+      // detectMarkers' Point2f vector raises an exception as soon as a marker
+      // appears and used to terminate the whole C++ node. camera-freeze drew a
+      // simple integer bounding box; keep that safe behavior in this path.
+      std::vector<cv::Point> safe_corners;
+      safe_corners.reserve(marker_corners[i].size());
+      for (const auto & point : marker_corners[i]) {
+        if (!std::isfinite(point.x) || !std::isfinite(point.y)) continue;
+        safe_corners.emplace_back(
+          std::clamp(cvRound(point.x), 0, std::max(0, frame.cols - 1)),
+          std::clamp(cvRound(point.y), 0, std::max(0, frame.rows - 1)));
       }
+      if (safe_corners.empty() || i >= markers.size()) continue;
+      const cv::Rect marker_box = cv::boundingRect(safe_corners);
+      if (marker_box.width <= 0 || marker_box.height <= 0) continue;
+      cv::rectangle(frame, marker_box, color, target ? 3 : 2, cv::LINE_AA);
+      put_outlined_text(
+        frame, "ID " + std::to_string(markers[i]),
+        cv::Point(marker_box.x, std::max(14, marker_box.y - 6)), 0.55, color);
     }
     put_outlined_text(frame, "state=" + state, cv::Point(8, 22));
     std::ostringstream command_text;
@@ -1867,8 +1866,9 @@ private:
   std::deque<int> sign_history_;
   Command last_command_;
   bool target_marker_{false}, publish_debug_{false};
+  bool has_started_{false}, aruco_stop_active_{false}, red_stop_latched_{false};
+  double aruco_pause_started_{0.0};
   int light_state_{0}, green_streak_{0}, red_streak_{0};
-  int marker_seen_streak_{0}, marker_clear_streak_{0};
   std::atomic<bool> lane_reset_requested_{false};
   uint64_t detection_sequence_{0}, last_light_sequence_{0};
   int32_t detection_source_sec_{0};

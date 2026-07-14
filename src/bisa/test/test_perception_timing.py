@@ -165,14 +165,12 @@ class _SignDetector:
         return 99 if name == self.direction else 0
 
 
-def test_out_fsm_curve_follows_until_sign_then_orders_fork_and_finish():
+def test_out_fsm_curve_follows_until_sign_then_resumes_after_fork():
     config = AutonomousConfig()
     config.detector.light_confirm_frames = 1
     config.mission.fork_sign_advance_sec = 0.2
     config.mission.fork_commit_min_sec = 0.1
     config.mission.fork_commit_timeout_sec = 0.3
-    config.aruco.confirm_frames = 2
-    config.aruco.clear_frames = 3
     controller = LaneController(config)
     fsm = make_course_fsm(config, controller)
     lane = LaneObs(valid=True)
@@ -203,20 +201,16 @@ def test_out_fsm_curve_follows_until_sign_then_orders_fork_and_finish():
     assert cmd.steering > 0.0
     for now in (20.6, 20.7, 20.8):
         fsm.step(lane, left, now)
-    assert fsm.state == "OUT_TO_ARUCO"
+    assert fsm.state == "OUT_RESUME"
     assert fsm.consume_lane_reset_request()
 
-    # Red is ignored until the ordered ArUco stop/release has completed.
+    # ArUco pause and final red stop are handled above the FSM by the autonomous
+    # node, so these observations must not create hidden mission-state stops.
     fsm.step(lane, no_sign, 20.9, light_state="red", light_seq=2)
-    assert fsm.state == "OUT_TO_ARUCO"
+    assert fsm.state == "OUT_RESUME"
     fsm.step(lane, no_sign, 21.0, marker_visible=True)
     fsm.step(lane, no_sign, 21.1, marker_visible=True)
-    assert fsm.state == "OUT_ARUCO_STOP"
-    for now in (21.2, 21.3, 21.4):
-        fsm.step(lane, no_sign, now, marker_visible=False)
     assert fsm.state == "OUT_RESUME"
-    fsm.step(lane, no_sign, 21.5, light_state="red", light_seq=3)
-    assert fsm.state == "OUT_FINISH_STOP"
 
 
 @pytest.mark.parametrize(

@@ -195,8 +195,6 @@ class BaseCourseFSM:
         self._green_streak = 0
         self._red_streak = 0
         self._last_light_seq = None
-        self._marker_seen_streak = 0
-        self._marker_clear_streak = 0
 
     def update_light(self, light_state, light_seq=None) -> None:
         """Counts consecutive verdicts from distinct detector frames only.
@@ -237,26 +235,6 @@ class BaseCourseFSM:
         """Returns seconds elapsed in the current state."""
 
         return now - self.enter_t
-
-    def update_marker(self, visible: bool) -> None:
-        """Debounces ArUco appearance and disappearance."""
-
-        if visible:
-            self._marker_seen_streak = min(
-                self._marker_seen_streak + 1, self.config.aruco.confirm_frames
-            )
-            self._marker_clear_streak = 0
-        else:
-            self._marker_clear_streak = min(
-                self._marker_clear_streak + 1, self.config.aruco.clear_frames
-            )
-            self._marker_seen_streak = 0
-
-    def marker_confirmed(self) -> bool:
-        return self._marker_seen_streak >= self.config.aruco.confirm_frames
-
-    def marker_cleared(self) -> bool:
-        return self._marker_clear_streak >= self.config.aruco.clear_frames
 
     def single_lane_reacquired(self, lane: LaneObs) -> bool:
         """Checks whether branch geometry has returned to one stable lane."""
@@ -326,7 +304,6 @@ class OutCourseFSM(BaseCourseFSM):
         marker_visible: bool = False,
     ) -> ControlCmd:
         self.update_light(light_state, light_seq)
-        self.update_marker(marker_visible)
 
         if self.state == "OUT_WAIT_GREEN":
             if self.green_confirmed():
@@ -364,32 +341,10 @@ class OutCourseFSM(BaseCourseFSM):
                 and self.elapsed(now) >= self.config.mission.fork_commit_min_sec
             ) or self.elapsed(now) >= self.config.mission.fork_commit_timeout_sec:
                 self.lane_reset_requested = True
-                self.transition("OUT_TO_ARUCO", now)
+                self.transition("OUT_RESUME", now)
             return cmd
 
-        if self.state == "OUT_TO_ARUCO":
-            if self.marker_confirmed():
-                self.controller.prev_throttle = 0.0
-                self.transition("OUT_ARUCO_STOP", now)
-                return ControlCmd(0.0, 0.0)
-            return self.controller.lane_follow(
-                lane,
-                self.config.throttle.post_fork_cap,
-                self.config.steering.post_fork_limit,
-                section_min=self.config.throttle.post_fork_min,
-            )
-
-        if self.state == "OUT_ARUCO_STOP":
-            self.controller.prev_throttle = 0.0
-            if self.marker_cleared():
-                self.transition("OUT_RESUME", now)
-            return ControlCmd(0.0, 0.0)
-
         if self.state == "OUT_RESUME":
-            if self.red_confirmed():
-                self.controller.prev_throttle = 0.0
-                self.transition("OUT_FINISH_STOP", now)
-                return ControlCmd(0.0, 0.0)
             return self.controller.lane_follow(
                 lane,
                 self.config.throttle.post_fork_cap,
@@ -418,7 +373,6 @@ class InCourseFSM(BaseCourseFSM):
         marker_visible: bool = False,
     ) -> ControlCmd:
         self.update_light(light_state, light_seq)
-        self.update_marker(marker_visible)
         if self.state == "IN_WAIT_GREEN":
             if self.green_confirmed():
                 self.transition("IN_ENTRY", now)
@@ -428,22 +382,13 @@ class InCourseFSM(BaseCourseFSM):
                 lane, self.config.throttle.s_curve_cap, self.config.steering.s_curve_limit
             )
         if self.state == "IN_EXIT":
-            if self.marker_confirmed():
-                self.transition("IN_ARUCO_STOP", now)
-                return ControlCmd(0.0, 0.0)
-            return self.controller.lane_follow(
-                lane, self.config.throttle.post_fork_cap, self.config.steering.post_fork_limit
-            )
-        if self.state == "IN_ARUCO_STOP":
-            if self.marker_cleared():
-                self.transition("IN_RESUME", now)
-            return ControlCmd(0.0, 0.0)
-        if self.state == "IN_RESUME" and not self.red_confirmed():
             return self.controller.lane_follow(
                 lane, self.config.throttle.post_fork_cap, self.config.steering.post_fork_limit
             )
         if self.state == "IN_RESUME":
-            self.transition("IN_FINISH_STOP", now)
+            return self.controller.lane_follow(
+                lane, self.config.throttle.post_fork_cap, self.config.steering.post_fork_limit
+            )
         self.controller.prev_throttle = 0.0
         return ControlCmd(0.0, 0.0)
 

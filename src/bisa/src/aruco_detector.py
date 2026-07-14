@@ -39,6 +39,7 @@ class ArucoDetector:
         self.config = config
         self._dict_name = config.aruco.dictionary
         self.last_detect_time = 0.0
+        self.last_sequence = 0
         self.last_markers: list[ArucoMarker] = []
         self._build_detector()
 
@@ -92,8 +93,11 @@ class ArucoDetector:
         if ids is not None and len(ids) > 0:
             for marker_id, corner in zip(ids.flatten(), corners):
                 pts = corner.reshape(4, 2).astype(float)
+                if not np.isfinite(pts).all():
+                    continue
                 x1, y1 = float(pts[:, 0].min()), float(pts[:, 1].min())
                 x2, y2 = float(pts[:, 0].max()), float(pts[:, 1].max())
                 markers.append(ArucoMarker(id=int(marker_id), bbox=(x1, y1, x2, y2)))
+        self.last_sequence += 1
         self.last_markers = markers
         return markers

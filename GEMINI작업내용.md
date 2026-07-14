@@ -1238,3 +1238,43 @@ Error ID: c30cee0a67a149e9a1f2f37e3e5ce2ea
 
 - 실제 바닥 주행은 수행하지 않았다. 새 차선 진입 직후의 중앙 복귀 속도는 기존 `steering.rate_limit_per_cmd=0.12`의 영향을 계속 받는다.
 - 사용자가 실행한 기존 온보드 프로세스는 중지하지 않았다. 새 디스크 바이너리는 다음 안전한 온보드 재시작부터 적용된다.
+
+---
+
+## 2026-07-15 — C++ debug ArUco 프리즈와 전역 ArUco/red 정지 override
+
+### 요청과 원인
+
+- 작업 대상은 TOPST `/home/topst/D-Racer-Kit`의 `fork` 브랜치로 한정했고, 로컬 `codex/navy-lane-id` 변경은 반영하지 않았다.
+- `onboard.launch.py`는 미커밋 Python `autonomous_driving_node.py`가 아니라 C++ `bisa_cpp/bisa_autonomous_node`를 실행한다. 따라서 Python에만 있던 정지 override는 실제 차량 제어에 적용되지 않았다.
+- C++ debug loop가 `cv::aruco::detectMarkers`의 `vector<Point2f>`를 정수 점을 요구하는 `cv::polylines` 경로에 직접 넘겼다. 마커가 처음 보이면 OpenCV 예외가 timer callback 밖으로 나가 C++ node 전체와 토픽이 중단될 수 있는 구조였다.
+- 최초 빌드는 보드 clock skew로 새 소스의 mtime이 기존 object보다 과거로 잡혀, `colcon build`가 성공으로 끝나도 바이너리가 재컴파일되지 않았다. CMake target clean 후 강제 재빌드했고 install 바이너리에 신규 로그 문자열이 포함된 것을 확인했다.
+
+### 변경
+
+- 실제 생산 C++ 제어 루프 최상단에 ArUco/red override를 추가했다.
+- target ArUco ID 3은 상태 전이가 아니라 현재 카메라 level을 직접 사용한다. 보이는 첫 perception 프레임에서 throttle 0, 제거된 첫 프레임에서 기존 FSM 위치로 복귀한다. 정지 동안 시간 기반 fork state가 넘어가지 않도록 `entered_`도 pause 시간만큼 보정한다.
+- 출발 후 fresh red를 첫 받는 즉시 전역 정지를 latch한다. 기존 `OUT/IN_*ARUCO_STOP`, `OUT/IN_*FINISH_STOP`, `OUT_TO_ARUCO` 미션 state와 관련 debounce를 제거했다.
+- `camera-freeze` 브랜치의 단순 bbox 시각화를 기준으로 ArUco float corner를 finite 확인·화면 클립·정수 변환한 후 bounding rectangle만 그린다. debug loop 전체에 OpenCV/std 예외 경계를 두어 잘못된 한 프레임이 node를 종료하지 않게 했다.
+- detector bbox의 confidence/좌표에 NaN/Inf가 있거나 넓이·높이가 0 이하인 경우 debug 저장 전에 버린다.
+
+### 변경 파일과 보존
+
+- 이번에 실제로 추가 수정한 소스는 `src/bisa_cpp/src/bisa_autonomous_node.cpp` 하나다.
+- 작업 전부터 dirty였던 Python 5개 파일(`aruco_detector.py`, `autonomous_driving_node.py`, `mission_controller.py`, `visualization.py`, `test_perception_timing.py`)은 삭제·reset·덮어쓰지 않았다.
+- 원본 C++ 백업은 TOPST `/tmp/bisa_autonomous_node.before_global_stop.cpp`에 보존했다.
+
+### 도메인 2 비구동 검증
+
+- 모든 ROS 실행은 `ROS_DOMAIN_ID=2`로 수행했다. C++ 단독 node를 `/test/camera`, `/test/detections`, `/test/control`로 격리했고 control node/PCA9685/모터/서보는 사용하지 않았다.
+- `publish_debug_image=true`: throttle `0.20 -> ArUco 0.00 -> 제거 후 0.20 -> red 0.00 -> red 제거 후에도 0.00 latch`를 확인했다. 마커 정지 구간 debug image 6프레임, 제거 후 6프레임, lane mask 총 30프레임이 계속 발행됐다.
+- 사용자 launch의 정확한 기본값 `debug_image_hz=20.0`으로도 재검증했다. 마커 정지/제거 구간에 debug image가 각각 24프레임 발행됐고 lane mask는 총 118프레임이었으며, 정지·재출발·red latch가 모두 통과했다.
+- `publish_debug_image=false`에서도 동일하게 `0.20 -> 0.00 -> 0.20 -> 0.00 latch`를 확인했다.
+- C++ 빌드, `git diff --check`, 기존 Python 회귀 21개가 통과했다. `bisa_cpp` CTest는 현재 등록된 test가 없어 0 tests로 종료했다.
+- 처음 Python 회귀 실행은 `PYTHONPATH`를 수동으로 덮어써 install package를 숨긴 탓에 `ModuleNotFoundError` 수집 실패했다. install environment만 source해 동일 회귀 21개 통과로 재확인했다.
+
+### 남은 안전 사항
+
+- 검증 종료 후 시험용 autonomous node/probe는 모두 종료했다.
+- 작업 중 이번 시험과 무관한 기존 고아 `control_node`, `joystick_node`, `bisa_detector_node`가 각각 2개씩 보였다. 사용자 기존 실행으로 판단해 임의로 종료하지 않았고, 최종 확인 시점에는 autonomous/probe/bag/control/joystick/detector 관련 프로세스가 남지 않았다.
+- 실제 바닥 주행과 액추에이터 시험은 수행하지 않았다.

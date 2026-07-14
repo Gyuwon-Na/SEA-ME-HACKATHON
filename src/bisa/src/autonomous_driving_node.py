@@ -82,7 +82,8 @@ class BisaAutonomousNode(Node):
         self.declare_parameter("publish_debug_image", True)
         self.declare_parameter("debug_image_topic", "/bisa/debug/image/compressed")
         self.declare_parameter("lane_mask_topic", "/bisa/debug/lane_mask/compressed")
-        self.declare_parameter("debug_image_hz", 20.0)
+        self.declare_parameter("debug_image_hz", 5.0)
+        self.declare_parameter("debug_jpeg_quality", 70)
         self.declare_parameter("opencv_num_threads", 1)
 
         config_file = str(self.get_parameter("config_file").value)
@@ -94,8 +95,11 @@ class BisaAutonomousNode(Node):
         self.publish_debug_image = as_bool(self.get_parameter("publish_debug_image").value)
         self.debug_image_topic = str(self.get_parameter("debug_image_topic").value)
         self.lane_mask_topic = str(self.get_parameter("lane_mask_topic").value)
-        self.debug_image_hz = max(
-            0.1, float(self.get_parameter("debug_image_hz").value)
+        self.debug_image_hz = min(
+            5.0, max(0.1, float(self.get_parameter("debug_image_hz").value))
+        )
+        self.debug_jpeg_quality = max(
+            1, min(100, int(self.get_parameter("debug_jpeg_quality").value))
         )
         self.opencv_num_threads = max(
             1, int(self.get_parameter("opencv_num_threads").value)
@@ -141,7 +145,18 @@ class BisaAutonomousNode(Node):
         self.last_cmd = ControlCmd(0.0, 0.0)
         self.last_frame = None
         self.last_log_time = 0.0
+        self.last_debug_error_log_time = 0.0
         self._next_viz_collect_time = 0.0
+        self.has_started = False
+        self.final_red_stop_latched = False
+        self._final_red_streak = 0
+        self._last_final_red_seq = None
+        self.aruco_target_visible = False
+        self.aruco_seen_streak = 0
+        self.aruco_clear_streak = 0
+        self.aruco_stop_active = False
+        self._last_aruco_seq = 0
+        self._aruco_pause_start = None
 
         # NCNN's Python binding holds the GIL during the ~31 s first Vulkan build.
         # A thread therefore freezes every ROS Python callback despite the
@@ -191,6 +206,7 @@ class BisaAutonomousNode(Node):
         self.detector_status_pub = self.create_publisher(
             String, "/bisa/detector/status", 10
         )
+        self.status_pub = self.create_publisher(String, "/bisa/status", 10)
         # Debug JPEG stream reuses the camera's BEST_EFFORT/depth-1 profile so it
         # drops stale frames instead of triggering RELIABLE retransmits, which
         # caused WiFi head-of-line blocking against the viz/monitor subscribers.
@@ -364,11 +380,16 @@ class BisaAutonomousNode(Node):
         ready, status = self._detector_status
         self.detector_ready_pub.publish(Bool(data=ready))
         self.detector_status_pub.publish(String(data=status))
+        self.status_pub.publish(String(data=self._status_text(now_sec, self.last_cmd)))
 
     def _publish_jpeg(self, publisher, image) -> None:
         """Encodes one BGR image as JPEG and publishes it on the given topic."""
 
-        ok, encoded = cv2.imencode(".jpg", image)
+        ok, encoded = cv2.imencode(
+            ".jpg",
+            image,
+            [int(cv2.IMWRITE_JPEG_QUALITY), self.debug_jpeg_quality],
+        )
         if not ok:
             return
         msg = CompressedImage()
@@ -465,7 +486,7 @@ class BisaAutonomousNode(Node):
         """Apply mission-phase gates to light labels classified in the child."""
 
         listen_green = self.fsm.state.endswith("WAIT_GREEN")
-        listen_red = bool(self.fsm.finish_crossed)
+        listen_red = self.has_started and not self.final_red_stop_latched
         kept = []
         for detection in detections:
             if detection.cls == "traffic_green" and not listen_green:
@@ -637,6 +658,53 @@ class BisaAutonomousNode(Node):
         target = self.config.aruco.target_id
         return any(marker.id == target for marker in markers)
 
+    def update_global_aruco_stop(self, markers, marker_seq: int, now_sec: float) -> bool:
+        """Debounces target-marker visibility into a global pause command."""
+
+        visible = self._target_marker_visible(markers)
+        self.aruco_target_visible = visible
+        if marker_seq != self._last_aruco_seq:
+            self._last_aruco_seq = marker_seq
+            if visible:
+                self.aruco_seen_streak = min(
+                    self.aruco_seen_streak + 1, self.config.aruco.confirm_frames
+                )
+                self.aruco_clear_streak = 0
+            else:
+                self.aruco_clear_streak = min(
+                    self.aruco_clear_streak + 1, self.config.aruco.clear_frames
+                )
+                self.aruco_seen_streak = 0
+
+        if not self.aruco_stop_active and self.aruco_seen_streak >= self.config.aruco.confirm_frames:
+            self.aruco_stop_active = True
+            self._aruco_pause_start = now_sec
+        elif self.aruco_stop_active and self.aruco_clear_streak >= self.config.aruco.clear_frames:
+            self.aruco_stop_active = False
+            if self._aruco_pause_start is not None:
+                self.fsm.enter_t += max(0.0, now_sec - self._aruco_pause_start)
+            self._aruco_pause_start = None
+        return self.aruco_stop_active
+
+    def update_final_red_stop(self, light_state, light_seq) -> bool:
+        """Latches a final red stop after the vehicle has started once."""
+
+        if self.final_red_stop_latched:
+            return True
+        if not self.has_started:
+            self._final_red_streak = 0
+            return False
+        if light_state != "red":
+            self._final_red_streak = 0
+            return False
+        if light_seq == self._last_final_red_seq:
+            return False
+        self._last_final_red_seq = light_seq
+        self._final_red_streak += 1
+        if self._final_red_streak >= self.config.detector.light_confirm_frames:
+            self.final_red_stop_latched = True
+        return self.final_red_stop_latched
+
     def control_loop(self) -> None:
         """Runs the mission FSM at a fixed rate and publishes one control command."""
 
@@ -648,15 +716,22 @@ class BisaAutonomousNode(Node):
         lane = self.latest_lane
         markers = self.latest_markers
         light_state, light_seq = self._fresh_light_snapshot(now_sec)
+        final_red_stop = self.update_final_red_stop(light_state, light_seq)
+        aruco_stop = self.update_global_aruco_stop(
+            markers, self.aruco_detector.last_sequence, now_sec
+        )
 
-        if self._target_marker_visible(markers):
-            # Target ArUco marker in view: stop immediately and hold the FSM in
-            # place. The mission resumes from the same state once it disappears.
+        if final_red_stop:
+            self.controller.prev_throttle = 0.0
+            cmd = ControlCmd(0.0, self.last_cmd.steering)
+        elif aruco_stop:
             self.controller.prev_throttle = 0.0
             cmd = ControlCmd(0.0, self.last_cmd.steering)
         else:
             cmd = self.fsm.step(lane, self.det_buffer, now_sec,
                                  light_state=light_state, light_seq=light_seq)
+            if not self.has_started and not self.fsm.state.endswith("WAIT_GREEN"):
+                self.has_started = True
             if self.fsm.consume_lane_reset_request():
                 self._lane_reset_requested = True
         self.last_cmd = cmd
@@ -670,7 +745,15 @@ class BisaAutonomousNode(Node):
         """Publishes tuning images without blocking the 20 Hz control loop."""
 
         if self.publish_debug_image:
-            self.publish_debug_overlay()
+            try:
+                self.publish_debug_overlay()
+            except (cv2.error, TypeError, ValueError) as exc:
+                now_sec = self.get_clock().now().nanoseconds / 1e9
+                if now_sec - self.last_debug_error_log_time >= 2.0:
+                    self.last_debug_error_log_time = now_sec
+                    self.get_logger().warning(
+                        f"Skipping debug frame after visualization error: {exc}"
+                    )
 
     def log_status(self, now_sec: float, cmd: ControlCmd) -> None:
         """Logs compact state/perception/control diagnostics at debug_log_hz."""
@@ -688,16 +771,27 @@ class BisaAutonomousNode(Node):
             1 for d in self.raw_detections
             if d.cls in ("traffic_green", "traffic_red")
         )
-        green_streak = getattr(self.fsm, "_green_streak", 0)
-        red_streak = getattr(self.fsm, "_red_streak", 0)
         light_state, _ = self._fresh_light_snapshot(now_sec)
         ready, detector_status = self._detector_status
         self.get_logger().info(
-            f"state={self.fsm.state} light={light_state} detector_ready={ready} "
-            f"lights={n_light} g_streak={green_streak} r_streak={red_streak} "
-            f"throttle={cmd.throttle:.2f} steering={cmd.steering:.2f} "
+            f"{self._status_text(now_sec, cmd)} detector_ready={ready} "
+            f"lights={n_light} "
             f"lane_valid={lane.valid} err={lane.center_error:.2f} "
             f"detector_status='{detector_status}'"
+        )
+
+    def _status_text(self, now_sec: float, cmd: ControlCmd) -> str:
+        light_state, _ = self._fresh_light_snapshot(now_sec)
+        return (
+            f"current_fsm_state={self.fsm.state} "
+            f"aruco_target_visible={self.aruco_target_visible} "
+            f"aruco_seen_streak={self.aruco_seen_streak} "
+            f"aruco_clear_streak={self.aruco_clear_streak} "
+            f"aruco_stop_active={self.aruco_stop_active} "
+            f"traffic_light_state={light_state} "
+            f"final_red_stop_latched={self.final_red_stop_latched} "
+            f"last_control_throttle={cmd.throttle:.2f} "
+            f"last_control_steering={cmd.steering:.2f}"
         )
 
 

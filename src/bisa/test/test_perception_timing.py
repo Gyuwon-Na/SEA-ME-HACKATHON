@@ -192,6 +192,7 @@ def test_curve_shortens_controller_lookahead_for_more_steering():
     """Equal lateral error must command more steering on a sharp curve."""
 
     config = AutonomousConfig()
+    assert config.steering.wheelbase_m == pytest.approx(0.17)
     config.steering.rate_limit_per_cmd = 1.0
     straight_controller = LaneController(config)
     curve_controller = LaneController(config)
@@ -219,6 +220,33 @@ def test_curve_shortens_controller_lookahead_for_more_steering():
         steer_limit=config.steering.s_curve_limit,
     )
     assert 0.85 <= abs(full_curve) <= config.steering.s_curve_limit
+
+
+def test_fork_curve_scale_prevents_false_curvature_cancellation():
+    """Fork far-ROI curvature must not cancel a strong near-center error."""
+
+    config = AutonomousConfig()
+    config.steering.rate_limit_per_cmd = 1.0
+    lane = LaneObs(
+        valid=True,
+        center_error=0.60,
+        curvature=1.0,
+        signed_curvature=-0.60,
+    )
+
+    unscaled = LaneController(config).steering_from_lane(
+        lane,
+        steer_limit=1.0,
+        curve_scale=1.0,
+    )
+    fork_scaled = LaneController(config).steering_from_lane(
+        lane,
+        steer_limit=1.0,
+        curve_scale=config.steering.fork_curve_scale,
+    )
+
+    assert unscaled == pytest.approx(0.0, abs=1e-6)
+    assert fork_scaled > 0.0
 
 
 def test_hough_curve_fit_is_second_order():

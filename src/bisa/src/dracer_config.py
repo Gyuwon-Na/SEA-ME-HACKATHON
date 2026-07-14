@@ -60,8 +60,6 @@ class LaneVisionConfig:
     lab_a_max: int = 145
     lab_b_min: int = 122
     lab_b_max: int = 148
-    # Steering mask is the union of a neutral bright-white band and a high-b
-    # yellow band. It intentionally stays separate from the road mask above.
     white_l_min: int = 200
     white_l_max: int = 255
     white_a_min: int = 115
@@ -83,14 +81,14 @@ class LaneVisionConfig:
     min_component_area_ratio: float = 0.006
     fork_area_ratio: float = 0.035
     hough_roi_top_ratio: float = 0.45
-    hough_canny_low: int = 50
-    hough_canny_high: int = 150
-    hough_threshold: int = 45
-    hough_min_line_length: int = 45
-    hough_max_line_gap: int = 290
-    hough_slope_min_abs: float = 0.40
     hough_curve_top_ratio: float = 0.62
     hough_curvature_smoothing: float = 0.25
+    hough_canny_low: int = 50
+    hough_canny_high: int = 150
+    hough_threshold: int = 38
+    hough_min_line_length: int = 30
+    hough_max_line_gap: int = 290
+    hough_slope_min_abs: float = 0.22
     assumed_lane_width_ratio: float = 0.62
     lane_width_min_ratio: float = 0.10
     lane_width_max_ratio: float = 0.70
@@ -181,9 +179,10 @@ class SteeringConfig:
     steer_sign: int = 1
     lookahead_m: float = 0.60
     curve_lookahead_min_m: float = 0.38
-    curve_response_power: float = 0.50
-    curve_steer_boost: float = 0.35
-    wheelbase_m: float = 0.16
+    curve_response_power: float = 0.65
+    curve_steer_boost: float = 0.20
+    fork_curve_scale: float = 0.25
+    wheelbase_m: float = 0.17
     lateral_scale_m: float = 0.30
     max_steer_deg: float = 30.0
     pp_gain: float = 1.0

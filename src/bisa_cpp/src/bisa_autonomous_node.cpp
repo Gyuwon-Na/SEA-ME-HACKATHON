@@ -117,8 +117,8 @@ struct Config {
   double ramp_up{0.015}, steer_slowdown{0.22}, curvature_slowdown{0.08};
   int steer_sign{1};
   double lookahead{0.60}, curve_lookahead_min{0.38};
-  double curve_response_power{0.50}, curve_steer_boost{0.35};
-  double wheelbase{0.16}, lateral_scale{0.30};
+  double curve_response_power{0.65}, curve_steer_boost{0.20}, fork_curve_scale{0.25};
+  double wheelbase{0.17}, lateral_scale{0.30};
   double max_steer_deg{30.0}, pp_gain{1.0}, curve_blend{1.0};
   double steer_rate{0.12}, straight_limit{0.60}, s_curve_limit{0.95};
   double fork_approach_limit{0.75}, fork_limit{0.95}, post_fork_limit{0.90};
@@ -203,6 +203,7 @@ Config load_config(const std::string & path) {
   read_value(steering, "curve_lookahead_min_m", c.curve_lookahead_min);
   read_value(steering, "curve_response_power", c.curve_response_power);
   read_value(steering, "curve_steer_boost", c.curve_steer_boost);
+  read_value(steering, "fork_curve_scale", c.fork_curve_scale);
   read_value(steering, "wheelbase_m", c.wheelbase); read_value(steering, "lateral_scale_m", c.lateral_scale);
   read_value(steering, "max_steer_deg", c.max_steer_deg); read_value(steering, "pp_gain", c.pp_gain);
   read_value(steering, "curve_blend", c.curve_blend); read_value(steering, "rate_limit_per_cmd", c.steer_rate);
@@ -616,13 +617,16 @@ public:
 
   void update_config(const Config & config) { c_ = config; }
 
-  Command follow(const LaneObs & lane, double cap, double steer_limit, std::optional<double> floor = std::nullopt) {
+  Command follow(
+    const LaneObs & lane, double cap, double steer_limit,
+    std::optional<double> floor = std::nullopt, double curve_scale = 1.0)
+  {
     if (!lane.valid) {
       previous_steer_ = rate(previous_steer_ * c_.lost_decay, previous_steer_, c_.steer_rate);
       previous_throttle_ = std::min(previous_throttle_, c_.speed_min);
       return {previous_throttle_, previous_steer_};
     }
-    const double steer = steering(lane, steer_limit);
+    const double steer = steering(lane, steer_limit, curve_scale);
     return {throttle(cap, steer, lane.curvature, floor), steer};
   }
 
@@ -630,7 +634,7 @@ public:
     LaneObs virtual_lane = lane;
     if (decision == "LEFT") virtual_lane.center_error = lane.left_target.value_or(lane.center_error + 0.18);
     if (decision == "RIGHT") virtual_lane.center_error = lane.right_target.value_or(lane.center_error - 0.18);
-    const double steer = steering(virtual_lane, c_.fork_limit);
+    const double steer = steering(virtual_lane, c_.fork_limit, c_.fork_curve_scale);
     return {throttle(c_.fork_commit_cap, steer, lane.curvature), steer};
   }
 
@@ -640,10 +644,13 @@ private:
   static double rate(double target, double previous, double delta) {
     return previous + clamp(target - previous, -delta, delta);
   }
-  double steering(const LaneObs & lane, double limit) {
-    const double target = clamp(lane.center_error + c_.curve_blend * lane.signed_curvature, -1.0, 1.0);
+  double steering(const LaneObs & lane, double limit, double curve_scale = 1.0) {
+    curve_scale = clamp(curve_scale, 0.0, 1.0);
+    const double target = clamp(
+      lane.center_error + c_.curve_blend * curve_scale * lane.signed_curvature, -1.0, 1.0);
     const double curve_strength = std::pow(
-      clamp(lane.curvature, 0.0, 1.0), std::max(c_.curve_response_power, 1e-3));
+      clamp(lane.curvature * curve_scale, 0.0, 1.0),
+      std::max(c_.curve_response_power, 1e-3));
     const double minimum = std::min(c_.lookahead, c_.curve_lookahead_min);
     const double lookahead = std::max(
       c_.lookahead + curve_strength * (minimum - c_.lookahead), 1e-3);
@@ -814,6 +821,8 @@ private:
       "steering.curve_response_power", config_.curve_response_power);
     config_.curve_steer_boost = declare_parameter<double>(
       "steering.curve_steer_boost", config_.curve_steer_boost);
+    config_.fork_curve_scale = declare_parameter<double>(
+      "steering.fork_curve_scale", config_.fork_curve_scale);
     config_.wheelbase = declare_parameter<double>("steering.wheelbase_m", config_.wheelbase);
     config_.lateral_scale = declare_parameter<double>("steering.lateral_scale_m", config_.lateral_scale);
     config_.max_steer_deg = declare_parameter<double>("steering.max_steer_deg", config_.max_steer_deg);
@@ -918,6 +927,9 @@ private:
         else if (name == "steering.curve_steer_boost") {
           next.curve_steer_boost = parameter.as_double();
         }
+        else if (name == "steering.fork_curve_scale") {
+          next.fork_curve_scale = parameter.as_double();
+        }
         else if (name == "steering.wheelbase_m") next.wheelbase = parameter.as_double();
         else if (name == "steering.lateral_scale_m") next.lateral_scale = parameter.as_double();
         else if (name == "steering.max_steer_deg") next.max_steer_deg = parameter.as_double();
@@ -959,6 +971,7 @@ private:
       next.morph_open >= 1 && next.morph_close >= 1 && next.lookahead > 0.0 && next.wheelbase > 0.0 &&
       next.curve_lookahead_min > 0.0 && next.curve_lookahead_min <= next.lookahead &&
       next.curve_response_power > 0.0 && next.curve_steer_boost >= 0.0 &&
+      next.fork_curve_scale >= 0.0 && next.fork_curve_scale <= 1.0 &&
       next.max_steer_deg > 0.0 && next.gamma > 0.0 &&
       next.hough_top >= 0.0 && next.hough_top < 0.90 &&
       next.hough_curve_top >= next.hough_top && next.hough_curve_top <= 0.90 &&
@@ -1173,7 +1186,9 @@ private:
       return cmd;
     }
     if (state_ == "OUT_FORK_APPROACH") {
-      auto cmd = controller_.follow(lane, config_.fork_approach_cap, config_.fork_approach_limit);
+      auto cmd = controller_.follow(
+        lane, config_.fork_approach_cap, config_.fork_approach_limit,
+        std::nullopt, config_.fork_curve_scale);
       if (auto decision = sign_decision()) { fork_decision_ = *decision; transition("OUT_FORK_COMMIT", now_sec); }
       return cmd;
     }
@@ -1473,8 +1488,10 @@ private:
     put_outlined_text(frame, "state=" + state, cv::Point(8, 22));
     std::ostringstream command_text;
     command_text.setf(std::ios::fixed); command_text.precision(2);
-    command_text << "thr=" << cmd.throttle << " curv=" << lane.curvature <<
-      " steer=" << std::showpos << cmd.steering;
+    command_text << "thr=" << cmd.throttle << " err=" << std::showpos << lane.center_error <<
+      " curv=" << std::noshowpos << lane.curvature <<
+      " scurv=" << std::showpos << lane.signed_curvature <<
+      " steer=" << cmd.steering;
     put_outlined_text(frame, command_text.str(), cv::Point(8, 44));
     put_outlined_text(frame, "light=" + std::string(light == 1 ? "GREEN" : light == 2 ? "RED" : "none"),
       cv::Point(8, frame.rows - 12), 0.65,

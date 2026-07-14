@@ -45,7 +45,12 @@ class LaneController:
 
         return previous + clamp(target - previous, -max_delta, max_delta)
 
-    def steering_from_lane(self, lane: LaneObs, steer_limit: float = 0.80) -> float:
+    def steering_from_lane(
+        self,
+        lane: LaneObs,
+        steer_limit: float = 0.80,
+        curve_scale: float = 1.0,
+    ) -> float:
         """Computes pure-pursuit lane steering.
 
         The aim point sits ``lookahead_m`` ahead, laterally offset by the lane
@@ -58,11 +63,15 @@ class LaneController:
         if not lane.valid:
             raw = self.prev_steer * cfg.lost_decay
         else:
+            curve_scale = clamp(curve_scale, 0.0, 1.0)
             target_error = clamp(
-                lane.center_error + cfg.curve_blend * lane.signed_curvature, -1.0, 1.0
+                lane.center_error
+                + cfg.curve_blend * curve_scale * lane.signed_curvature,
+                -1.0,
+                1.0,
             )
             lateral = target_error * cfg.lateral_scale_m
-            curvature = clamp(lane.curvature, 0.0, 1.0)
+            curvature = clamp(lane.curvature * curve_scale, 0.0, 1.0)
             curve_strength = curvature ** max(cfg.curve_response_power, 1e-3)
             minimum = min(cfg.lookahead_m, cfg.curve_lookahead_min_m)
             lookahead = max(
@@ -109,7 +118,14 @@ class LaneController:
         self.prev_throttle = target
         return target
 
-    def lane_follow(self, lane: LaneObs, cap: float, steer_limit: float, section_min: float = None) -> ControlCmd:
+    def lane_follow(
+        self,
+        lane: LaneObs,
+        cap: float,
+        steer_limit: float,
+        section_min: float = None,
+        curve_scale: float = 1.0,
+    ) -> ControlCmd:
         """Follows the latest lane observation with cautious lost-lane behavior."""
 
         if not lane.valid:
@@ -123,7 +139,11 @@ class LaneController:
             self.prev_throttle = throttle
             return ControlCmd(throttle, steer)
 
-        steer = self.steering_from_lane(lane, steer_limit=steer_limit)
+        steer = self.steering_from_lane(
+            lane,
+            steer_limit=steer_limit,
+            curve_scale=curve_scale,
+        )
         throttle = self.throttle_scheduler(cap, steer, lane.curvature, section_min=section_min)
         return ControlCmd(throttle, steer)
 
@@ -254,6 +274,7 @@ class OutCourseFSM(BaseCourseFSM):
         steer = self.controller.steering_from_lane(
             virtual_lane,
             steer_limit=self.config.steering.fork_limit,
+            curve_scale=self.config.steering.fork_curve_scale,
         )
         throttle = self.controller.throttle_scheduler(
             self.config.throttle.fork_commit_cap,
@@ -315,6 +336,7 @@ class OutCourseFSM(BaseCourseFSM):
                 lane,
                 self.config.throttle.fork_approach_cap,
                 self.config.steering.fork_approach_limit,
+                curve_scale=self.config.steering.fork_curve_scale,
             )
             decision = self.fork_decision_update(detector)
             if decision is not None:

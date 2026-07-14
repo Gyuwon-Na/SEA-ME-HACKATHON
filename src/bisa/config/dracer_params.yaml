@@ -12,8 +12,8 @@ roi:
 # x_offset < 0 => centered horizontally, y_offset < 0 => anchored to frame bottom.
 lane_roi:
   enabled: true    # 차선 파이프라인 전용 ROI 크롭 사용 여부
-  width: 640       # ROI 가로 px (라이브 조정)
-  height: 240      # ROI 세로 px (작게 유지해 연산 절감)
+  width: 329       # ROI 가로 px (라이브 조정)
+  height: 148      # ROI 세로 px (작게 유지해 연산 절감)
   x_offset: -1     # <0 이면 가로 중앙 정렬
   y_offset: -1     # <0 이면 프레임 하단에 붙임(차선이 보이는 영역)
 
@@ -122,11 +122,12 @@ steering:
   steer_sign: 1              # 조향 부호(좌우 반대로 나가면 -1)
   lookahead_m: 0.60          # 직선 순수추종 전방주시 거리(m)
   curve_lookahead_min_m: 0.38 # 최대 곡률에서의 최소 전방주시(짧은 맵 코너용)
-  curve_response_power: 0.50  # sqrt(curvature): 중간 커브부터 보정을 빠르게 키움
-  curve_steer_boost: 0.35     # 커브에서만 최대 35% 조향 증폭(직선=0% 증폭)
-  wheelbase_m: 0.16          # 차축 거리(자전거 모델, m)
+  curve_response_power: 0.65  # 1보다 작아 커브 진입부터 반응하되 sqrt보다 완만
+  curve_steer_boost: 0.20     # 커브에서만 최대 20% 조향 증폭(직선=0% 증폭)
+  fork_curve_scale: 0.25      # 갈림길 ROI가 만든 가짜 곡률/상쇄 영향을 25%로 제한
+  wheelbase_m: 0.17          # 실차 전·후차축 거리(자전거 모델, m)
   lateral_scale_m: 0.30      # 오차 1.0을 몇 m 횡오프셋으로 볼지
-  max_steer_deg: 30.0        # 조향각 정규화 기준(풀락 각도)
+  max_steer_deg: 35.0        # 조향각 정규화 기준(풀락 각도)
   pp_gain: 1.0               # 순수추종 조향 게인
   curve_blend: 1.0           # 곡률로 목표점 이동시키는 정도
   rate_limit_per_cmd: 0.12   # 20Hz 기준 풀 조향까지 약 0.4s, 급커브 응답 개선

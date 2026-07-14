@@ -48,6 +48,39 @@ def test_missing_or_stale_light_clears_vote_streak():
     assert fresh_light_state(("red", 5, 11.0), 10.0, 0.75) == (None, 5)
 
 
+def test_throttle_starts_at_min_then_reaches_max_on_straight():
+    config = AutonomousConfig()
+    controller = LaneController(config)
+
+    values = [
+        controller.throttle_scheduler(config.throttle.speed_max, 0.0, 0.0)
+        for _ in range(20)
+    ]
+
+    assert values[0] == pytest.approx(config.throttle.speed_min)
+    assert all(
+        config.throttle.speed_min <= value <= config.throttle.speed_max
+        for value in values
+    )
+    assert values[-1] == pytest.approx(config.throttle.speed_max)
+
+
+def test_throttle_ignores_straight_noise_and_slows_for_curve():
+    config = AutonomousConfig()
+    controller = LaneController(config)
+    controller.prev_throttle = config.throttle.speed_max
+
+    straight = controller.throttle_scheduler(
+        config.throttle.speed_max,
+        config.throttle.straight_steer_deadband,
+        config.throttle.straight_curvature_deadband,
+    )
+    curve = controller.throttle_scheduler(config.throttle.speed_max, 0.45, 0.50)
+
+    assert straight == pytest.approx(config.throttle.speed_max)
+    assert config.throttle.speed_min <= curve < config.throttle.speed_max
+
+
 def test_lane_pipeline_prepares_lab_once_per_frame(monkeypatch):
     """Mask and Hough must reuse one LAB conversion and one CLAHE result."""
 

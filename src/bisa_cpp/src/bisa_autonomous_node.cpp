@@ -111,10 +111,11 @@ struct Config {
   double hough_slope_min{0.22}, assumed_lane_width{0.62};
   double lane_width_min{0.10}, lane_width_max{0.70}, lane_width_smoothing{0.20};
   double single_lane_switch_margin{0.08}, max_center_jump{0.35};
-  double speed_min{0.20}, speed_max{0.22};
-  double launch_cap{0.32}, s_curve_cap{0.24}, fork_approach_cap{0.20};
-  double fork_commit_cap{0.25}, post_fork_cap{0.30}, post_fork_min{0.25};
+  double speed_min{0.20}, speed_max{0.30};
+  double launch_cap{0.30}, s_curve_cap{0.30}, fork_approach_cap{0.30};
+  double fork_commit_cap{0.30}, post_fork_cap{0.30}, post_fork_min{0.20};
   double ramp_up{0.015}, steer_slowdown{0.22}, curvature_slowdown{0.08};
+  double straight_steer_deadband{0.05}, straight_curvature_deadband{0.05};
   int steer_sign{1};
   double lookahead{0.60}, curve_lookahead_min{0.38};
   double curve_response_power{0.65}, curve_steer_boost{0.20}, fork_curve_scale{0.25};
@@ -198,6 +199,8 @@ Config load_config(const std::string & path) {
   read_value(throttle, "post_fork_cap", c.post_fork_cap); read_value(throttle, "post_fork_min", c.post_fork_min);
   read_value(throttle, "ramp_up_per_cmd", c.ramp_up); read_value(throttle, "steer_slowdown", c.steer_slowdown);
   read_value(throttle, "curvature_slowdown", c.curvature_slowdown);
+  read_value(throttle, "straight_steer_deadband", c.straight_steer_deadband);
+  read_value(throttle, "straight_curvature_deadband", c.straight_curvature_deadband);
   const auto steering = root["steering"];
   read_value(steering, "steer_sign", c.steer_sign); read_value(steering, "lookahead_m", c.lookahead);
   read_value(steering, "curve_lookahead_min_m", c.curve_lookahead_min);
@@ -666,8 +669,17 @@ private:
   double throttle(double cap, double steer, double curvature, std::optional<double> requested_floor = std::nullopt) {
     cap = clamp(cap, c_.speed_min, c_.speed_max);
     const double floor = std::min(cap, requested_floor.value_or(c_.speed_min));
-    double target = clamp(cap - c_.steer_slowdown * std::abs(steer) - c_.curvature_slowdown * curvature, floor, cap);
-    if (target > previous_throttle_) target = std::min(target, previous_throttle_ + c_.ramp_up);
+    const double steer_demand = std::max(std::abs(steer) - c_.straight_steer_deadband, 0.0);
+    const double curvature_demand = std::max(
+      std::abs(curvature) - c_.straight_curvature_deadband, 0.0);
+    double target = clamp(
+      cap - c_.steer_slowdown * steer_demand - c_.curvature_slowdown * curvature_demand,
+      floor, cap);
+    if (target > previous_throttle_) {
+      target = previous_throttle_ <= 0.0 ? floor :
+        std::min(target, previous_throttle_ + c_.ramp_up);
+    }
+    target = clamp(target, floor, cap);
     previous_throttle_ = target;
     return target;
   }
@@ -842,6 +854,10 @@ private:
     config_.speed_max = declare_parameter<double>("throttle.speed_max", config_.speed_max);
     config_.launch_cap = declare_parameter<double>("throttle.launch_cap", config_.launch_cap);
     config_.s_curve_cap = declare_parameter<double>("throttle.s_curve_cap", config_.s_curve_cap);
+    config_.straight_steer_deadband = declare_parameter<double>(
+      "throttle.straight_steer_deadband", config_.straight_steer_deadband);
+    config_.straight_curvature_deadband = declare_parameter<double>(
+      "throttle.straight_curvature_deadband", config_.straight_curvature_deadband);
 
     config_.color_enabled = declare_parameter<bool>("color_correction.enabled", config_.color_enabled);
     config_.color_clahe_clip = declare_parameter<double>(
@@ -948,6 +964,12 @@ private:
         else if (name == "throttle.speed_max") next.speed_max = parameter.as_double();
         else if (name == "throttle.launch_cap") next.launch_cap = parameter.as_double();
         else if (name == "throttle.s_curve_cap") next.s_curve_cap = parameter.as_double();
+        else if (name == "throttle.straight_steer_deadband") {
+          next.straight_steer_deadband = parameter.as_double();
+        }
+        else if (name == "throttle.straight_curvature_deadband") {
+          next.straight_curvature_deadband = parameter.as_double();
+        }
         else if (name == "color_correction.enabled") next.color_enabled = parameter.as_bool();
         else if (name == "color_correction.clahe_clip") next.color_clahe_clip = parameter.as_double();
         else if (name == "color_correction.saturation_boost") next.saturation_boost = parameter.as_double();
@@ -979,7 +1001,10 @@ private:
       next.lane_width_min > 0.0 && next.lane_width_min < next.lane_width_max &&
       next.lane_width_max <= 1.0 && next.lane_width_smoothing >= 0.0 &&
       next.lane_width_smoothing <= 1.0 && next.single_lane_switch_margin >= 0.0;
-    const bool speed_valid = next.speed_min >= 0.0 && next.speed_min <= next.speed_max && next.speed_max <= 1.0;
+    const bool speed_valid = next.speed_min >= 0.0 && next.speed_min <= next.speed_max &&
+      next.speed_max <= 1.0 && next.straight_steer_deadband >= 0.0 &&
+      next.straight_steer_deadband <= 1.0 && next.straight_curvature_deadband >= 0.0 &&
+      next.straight_curvature_deadband <= 1.0;
     if (!lab_valid || !geometry_valid || !speed_valid || std::abs(next.steer_sign) != 1) {
       return rcl_interfaces::msg::SetParametersResult().set__successful(false).set__reason(
         "invalid LAB bounds, ROI/kernel size, steering geometry/sign, gamma, or speed band");

@@ -109,12 +109,27 @@ class LaneController:
         cap = clamp(section_cap, speed_min, speed_max)
         floor = speed_min if section_min is None else clamp(section_min, speed_min, cap)
         floor = min(floor, cap)
+        steer_demand = max(
+            abs(steer) - self.config.throttle.straight_steer_deadband,
+            0.0,
+        )
+        curvature_demand = max(
+            abs(curvature) - self.config.throttle.straight_curvature_deadband,
+            0.0,
+        )
         target = cap
-        target -= self.config.throttle.steer_slowdown * abs(steer)
-        target -= self.config.throttle.curvature_slowdown * curvature
+        target -= self.config.throttle.steer_slowdown * steer_demand
+        target -= self.config.throttle.curvature_slowdown * curvature_demand
         target = clamp(target, floor, cap)
         if target > self.prev_throttle:
-            target = min(target, self.prev_throttle + self.config.throttle.ramp_up_per_cmd)
+            if self.prev_throttle <= 0.0:
+                target = floor
+            else:
+                target = min(
+                    target,
+                    self.prev_throttle + self.config.throttle.ramp_up_per_cmd,
+                )
+        target = clamp(target, floor, cap)
         self.prev_throttle = target
         return target
 

@@ -100,19 +100,21 @@ detector:
   light_stale_sec: 0.75    # 이 시간보다 오래된 신호 판정은 자동 해제
 
 throttle:
-  # Moving speed band. Every throttle command (while not stopped) maps into
-  # [speed_min, speed_max]. Change these two to retune overall speed.
+  # 정지 명령(0.0)을 제외한 모든 이동 명령은 [speed_min, speed_max] 안에 있다.
+  # 직선 deadband 안에서는 speed_max, 조향/곡률이 커지면 speed_min 쪽으로 감속한다.
   speed_min: 0.20          # 이동 속도밴드 하한(정지 아닌 최저속)
-  speed_max: 0.22          # POWER-SAFE: was 0.25. 최고속 낮춰 모터 피크 전류 억제(팩 새그↓)
-  launch_cap: 0.32         # 출발 구간 속도 상한
-  s_curve_cap: 0.24        # S자 구간 속도 상한
-  fork_approach_cap: 0.20  # 갈림길 접근 속도 상한
-  fork_commit_cap: 0.25    # 갈림길 진입(커밋) 속도 상한
+  speed_max: 0.30          # 직선 목표 최고속
+  launch_cap: 0.30         # 상태별 상한은 기본적으로 전역 최고속을 따른다
+  s_curve_cap: 0.30        # S자 안의 직선에서도 최고속 허용, 커브에서는 동적 감속
+  fork_approach_cap: 0.30  # 표지판 대기 상태가 0.20에 영구 고정되지 않도록 함
+  fork_commit_cap: 0.30    # 갈림 조향량/곡률에 따라 동적 감속
   post_fork_cap: 0.30      # 갈림길 이후 크루즈(종단) 속도 상한
-  post_fork_min: 0.25      # 갈림길 이후 최저속(코너에서도 이 이하로 안 떨어짐)
-  ramp_up_per_cmd: 0.015   # POWER-SAFE: was 0.03. 완만 가속 → dI/dt 전류 스파이크 감소
+  post_fork_min: 0.20      # 전 구간에서 동일한 전역 최저속까지 감속 허용
+  ramp_up_per_cmd: 0.015   # 20Hz에서 틱당 가속량(감속은 즉시 반영)
   steer_slowdown: 0.22     # 조향 클수록 감속하는 계수
   curvature_slowdown: 0.08 # 곡률 클수록 감속하는 계수
+  straight_steer_deadband: 0.05     # 이 이하 조향 노이즈는 직선으로 간주
+  straight_curvature_deadband: 0.05 # 이 이하 곡률 노이즈는 직선으로 간주
 
 # Pure pursuit steering. center_error(정규화 오차)가 lateral_scale_m 미터의
 # 횡방향 오프셋으로 변환되고, lookahead_m 앞의 목표점을 향한 자전거 모델 조향각

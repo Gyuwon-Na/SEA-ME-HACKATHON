@@ -147,21 +147,24 @@ class ThrottleConfig:
     ``speed_min``/``speed_max`` are the single source of truth for the moving
     speed band: every commanded throttle (while not stopped) is mapped into
     ``[speed_min, speed_max]``. Change these two to retune the overall speed.
-    The per-state ``*_cap`` values only shape the *relative* speed inside that
-    band; they are clamped into it.
+    The default per-state caps all follow ``speed_max`` so straight sections
+    can reach the configured maximum. Steering and curvature continuously
+    reduce the command toward ``speed_min``.
     """
 
     speed_min: float = 0.20
     speed_max: float = 0.30
-    launch_cap: float = 0.32
-    s_curve_cap: float = 0.24
-    fork_approach_cap: float = 0.20
-    fork_commit_cap: float = 0.25
+    launch_cap: float = 0.30
+    s_curve_cap: float = 0.30
+    fork_approach_cap: float = 0.30
+    fork_commit_cap: float = 0.30
     post_fork_cap: float = 0.30
-    post_fork_min: float = 0.25
-    ramp_up_per_cmd: float = 0.03
+    post_fork_min: float = 0.20
+    ramp_up_per_cmd: float = 0.015
     steer_slowdown: float = 0.22
     curvature_slowdown: float = 0.08
+    straight_steer_deadband: float = 0.05
+    straight_curvature_deadband: float = 0.05
 
 
 @dataclass

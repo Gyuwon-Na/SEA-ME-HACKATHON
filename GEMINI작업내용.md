@@ -1195,3 +1195,46 @@ Error ID: c30cee0a67a149e9a1f2f37e3e5ce2ea
 
 - 실제 바닥 주행은 수행하지 않았다. `fork_forced_error=0.45`, `fork_sign_advance_sec=1.5`, 조향 rate limit은 현장 저속 확인 후 필요할 때만 조정한다.
 - 작업 당시 사용자가 실행한 기존 `bisa_autonomous_node` 프로세스는 중지하지 않았다. 디스크의 설치 바이너리는 새 빌드지만 이미 실행 중인 프로세스는 재시작 전까지 구 코드를 계속 사용한다.
+
+---
+
+## 2026-07-15 — OUT 갈림길 회전 후 새 차선 재중앙 정렬
+
+### 요청과 rosbag 분석
+
+- 로컬 `rosbag2_2026_07_14-19_00_35`의 갈림길 구간을 분석해, 방향 전환 뒤 이전 왼쪽 차선 각도에 오래 피팅되는 문제를 수정했다.
+- 핵심 영상은 약 `61.6s` 표지판, `66.2s` 분기 진입, `68.7~69.2s` 새 차선 진입 구간이다.
+- 같은 프레임을 연속 이력 피팅과 이력 없는 독립 피팅으로 비교했을 때 중심 오차 차이가 최대 `0.64`였고, 새 차선 진입 프레임에서도 약 `0.23` 차이가 남았다. 이전 중심, 좌/우 경계 정체성, 단일 차선 방향, 곡률 및 추적 차선 폭이 함께 다음 차선 해석을 끌고 가는 것이 원인이었다.
+- 기존 `fork_seen`은 검은 주행면이 좌우 절반에 모두 있으면 참이 되어 이 rosbag의 일반 차선에서도 거의 계속 참이었다. 따라서 새 종료 조건에는 사용하지 않고 기존 상태 타이밍을 유지했다.
+
+### 변경
+
+- `OUT_FORK_COMMIT -> OUT_TO_ARUCO` 전환 시 C++ perception thread에 one-shot reset을 요청한다.
+- 다음 카메라 프레임 직전에 이전 중심, 좌/우 경계 target, 단일 경계 방향, 곡률 EMA, 이전 오차 및 추적 차선 폭을 원자적으로 초기화한다.
+- 현재 프레임 처리 도중 이력을 건드리지 않도록 `std::atomic<bool>` 요청을 perception thread 안에서 소비한다.
+- Python 대체 경로도 FSM이 reset을 요청하고 다음 image callback이 같은 이력을 비우도록 동등하게 반영했다.
+- 조향 rate limit과 throttle 이력은 유지해 명령 자체가 갑자기 튀지 않게 했다.
+
+### 변경 파일과 보존
+
+- `src/bisa_cpp/src/bisa_autonomous_node.cpp`
+- `src/bisa/src/lane_perception.py`
+- `src/bisa/src/mission_controller.py`
+- `src/bisa/src/autonomous_driving_node.py`
+- `src/bisa/test/test_perception_timing.py`
+- 변경 전 차량 백업: `/tmp/bisa_pre_post_fork_recenter_20260715.tar.gz`.
+- 차량 YAML은 분석 중 원격에서 별도 변경된 해시를 확인해 덮어쓰지 않았다. 이번 기능은 새 YAML 파라미터 없이 동작한다.
+
+### 검증
+
+- rosbag의 `68.73s/68.98s` 프레임에서 기존 연속 피팅 중심 오차는 `-0.010/-0.088`, reset 적용 피팅은 `+0.224/+0.144`, 완전 독립 피팅은 `+0.222/+0.146`이었다. reset 결과가 독립 피팅과 `0.002` 이내로 일치했다.
+- 로컬 Python 회귀 `21 passed`, Python 문법 검사, `git diff --check`, C++ 빌드를 통과했다.
+- TOPST에서 `bisa` 설치본 회귀 `21 passed`, Python 문법 검사 및 `bisa_cpp` 빌드를 통과했다.
+- 로컬 별도 `ROS_DOMAIN_ID=104`, `ROS_LOCALHOST_ONLY=1`에서 새 C++ 바이너리와 실제 rosbag을 재생했다. 상태는 `OUT_FORK_COMMIT -> OUT_TO_ARUCO`, 로그는 `reset lane history`를 기록했고 이후 perception이 계속 프레임을 처리했다.
+- TOPST 별도 `ROS_DOMAIN_ID=103`에서도 같은 상태 전이와 reset 요청을 확인했다. 차량에는 해당 rosbag이 없어 차량 측 bag play는 경로 없음으로 실행되지 않았고, 실제 bag 재생 검증은 로컬에서 완료했다.
+- 모든 ROS 검증 제어 출력은 구독자 없는 `/test/*_control`로 격리했으며 control node, PCA9685, 모터 및 서보를 사용하지 않았다. 시험 프로세스는 종료했다.
+
+### 미완료 및 적용 시점
+
+- 실제 바닥 주행은 수행하지 않았다. 새 차선 진입 직후의 중앙 복귀 속도는 기존 `steering.rate_limit_per_cmd=0.12`의 영향을 계속 받는다.
+- 사용자가 실행한 기존 온보드 프로세스는 중지하지 않았다. 새 디스크 바이너리는 다음 안전한 온보드 재시작부터 적용된다.

@@ -116,7 +116,7 @@ throttle:
   post_fork_min: 0.20      # 전 구간에서 동일한 전역 최저속까지 감속 허용
   ramp_up_per_cmd: 0.015   # 20Hz에서 틱당 가속량(감속은 즉시 반영)
   steer_slowdown: 0.22     # 조향 클수록 감속하는 계수
-  curvature_slowdown: 0.08 # 곡률 클수록 감속하는 계수
+  curvature_slowdown: 0.06 # 곡률 클수록 감속하는 계수
   straight_steer_deadband: 0.05     # 이 이하 조향 노이즈는 직선으로 간주
   straight_curvature_deadband: 0.05 # 이 이하 곡률 노이즈는 직선으로 간주
 
@@ -129,7 +129,7 @@ steering:
   lookahead_m: 0.60          # 직선 순수추종 전방주시 거리(m)
   curve_lookahead_min_m: 0.38 # 최대 곡률에서의 최소 전방주시(짧은 맵 코너용)
   curve_response_power: 0.65  # 1보다 작아 커브 진입부터 반응하되 sqrt보다 완만
-  curve_steer_boost: 0.1     # 커브에서만 최대 20% 조향 증폭(직선=0% 증폭)
+  curve_steer_boost: 0.15     # 커브에서만 최대 20% 조향 증폭(직선=0% 증폭)
   fork_curve_scale: 0.25      # 갈림길 ROI가 만든 가짜 곡률/상쇄 영향을 25%로 제한
   fork_forced_error: 0.45     # 표지 확정 즉시 사용할 LEFT(+)/RIGHT(-) 화면 측면 목표
   wheelbase_m: 0.17          # 실차 전·후차축 거리(자전거 모델, m)
@@ -206,6 +206,6 @@ mission:
   # 표지판 투표가 확정될 때만 fork 접근 상태로 넘어간다.
   # 거리계가 없으므로 표지판 이후 0.3~0.5m는 시간으로 근사한다. 현장 실측 후 조정.
   fork_sign_advance_sec: 1.5    # 표지 확정 후 방향별 선제 강제 조향을 유지하는 시간(s)
-  fork_commit_min_sec: 0.8      # 갈림길 커밋 최소 유지 시간(s)
+  fork_commit_min_sec: 0.4      # 갈림길 커밋 최소 유지 시간(s)
   fork_commit_timeout_sec: 1.8  # 커밋 강제 종료 타임아웃(s)
   debug_log_hz: 1.0             # 상태 로그 출력 주기(Hz)

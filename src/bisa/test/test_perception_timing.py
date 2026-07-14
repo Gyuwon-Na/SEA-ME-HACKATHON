@@ -201,8 +201,10 @@ def test_out_fsm_curve_follows_until_sign_then_orders_fork_and_finish():
     )
     cmd = fsm.step(fork_lane, left, 20.5)
     assert cmd.steering > 0.0
-    fsm.step(lane, left, 20.8)
+    for now in (20.6, 20.7, 20.8):
+        fsm.step(lane, left, now)
     assert fsm.state == "OUT_TO_ARUCO"
+    assert fsm.consume_lane_reset_request()
 
     # Red is ignored until the ordered ArUco stop/release has completed.
     fsm.step(lane, no_sign, 20.9, light_state="red", light_seq=2)
@@ -238,6 +240,27 @@ def test_out_sign_advance_forces_direction_before_x_is_visible(sign_name, expect
     assert fsm.state == "OUT_FORK_SIGN_ADVANCE"
     assert cmd.steering * expected_sign > 0.0
     assert abs(cmd.steering) > 0.05
+
+
+def test_lane_perception_reset_clears_all_pre_fork_fit_history():
+    perception = LanePerception(AutonomousConfig())
+    perception.prev_center_error = 0.6
+    perception.prev_near_center = 100.0
+    perception.prev_left_target = 50.0
+    perception.prev_right_target = 350.0
+    perception.prev_single_is_left = True
+    perception.filtered_curvature = 0.8
+    perception.tracked_lane_width = 300.0
+
+    perception.reset_fork_history()
+
+    assert perception.prev_center_error == 0.0
+    assert perception.prev_near_center is None
+    assert perception.prev_left_target is None
+    assert perception.prev_right_target is None
+    assert perception.prev_single_is_left is None
+    assert perception.filtered_curvature == 0.0
+    assert perception.tracked_lane_width is None
 
 
 def test_out_startup_crawls_when_white_lane_is_not_yet_visible():

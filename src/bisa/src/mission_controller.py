@@ -263,6 +263,11 @@ class BaseCourseFSM:
 
         return lane.valid and not lane.fork_seen and abs(lane.center_error) < 0.45
 
+    def consume_lane_reset_request(self) -> bool:
+        """Non-OUT routes never request a fork-history reset."""
+
+        return False
+
     def fork_decision_update(self, detector: DetectionBuffer) -> str | None:
         """Locks a LEFT/RIGHT fork decision using temporal sign votes."""
 
@@ -282,6 +287,14 @@ class OutCourseFSM(BaseCourseFSM):
         super().__init__(config, controller)
         self.state = "OUT_WAIT_GREEN"
         self.fork_decision: str | None = None
+        self.lane_reset_requested = False
+
+    def consume_lane_reset_request(self) -> bool:
+        """Returns and clears the one-shot post-fork perception reset request."""
+
+        requested = self.lane_reset_requested
+        self.lane_reset_requested = False
+        return requested
 
     def control_directional_fork(
         self, lane: LaneObs, cap: float, steer_limit: float
@@ -350,6 +363,7 @@ class OutCourseFSM(BaseCourseFSM):
                 self.single_lane_reacquired(lane)
                 and self.elapsed(now) >= self.config.mission.fork_commit_min_sec
             ) or self.elapsed(now) >= self.config.mission.fork_commit_timeout_sec:
+                self.lane_reset_requested = True
                 self.transition("OUT_TO_ARUCO", now)
             return cmd
 

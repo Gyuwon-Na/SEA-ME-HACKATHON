@@ -118,6 +118,7 @@ class BisaAutonomousNode(Node):
         self.controller = LaneController(self.config)
         self.fsm = make_course_fsm(self.config, self.controller)
         self.latest_lane = LaneObs(valid=False)
+        self._lane_reset_requested = False
         # Phase-gated detections that feed the FSM vote buffer and status topics.
         self.fsm_detections = []
         # Pre-gate snapshot for the Detect View only: shows every model
@@ -451,6 +452,9 @@ class BisaAutonomousNode(Node):
         )
         if collect_viz:
             self._next_viz_collect_time = now_sec + 1.0 / self.debug_image_hz
+        if self._lane_reset_requested:
+            self.lane_perception.reset_fork_history()
+            self._lane_reset_requested = False
         self.latest_lane = self.lane_perception.compute_lane_obs(
             frame, collect_viz=collect_viz
         )
@@ -653,6 +657,8 @@ class BisaAutonomousNode(Node):
         else:
             cmd = self.fsm.step(lane, self.det_buffer, now_sec,
                                  light_state=light_state, light_seq=light_seq)
+            if self.fsm.consume_lane_reset_request():
+                self._lane_reset_requested = True
         self.last_cmd = cmd
         self.publish_control(cmd)
         # Keep control deterministic: visualization and its two JPEG encodes run

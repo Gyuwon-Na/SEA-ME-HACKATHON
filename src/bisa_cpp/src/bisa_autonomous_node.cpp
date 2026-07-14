@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -304,6 +305,19 @@ public:
   void update_config(const Config & config) {
     c_ = config;
     rebuild_kernels();
+  }
+
+  void reset_fork_history() {
+    // Discard the center, boundary identity, curvature, and width learned
+    // before/inside the fork.  The next frame must classify the new lane from
+    // current pixels without the previous turn angle or width pulling the fit.
+    previous_center_.reset();
+    previous_left_target_.reset();
+    previous_right_target_.reset();
+    previous_single_is_left_.reset();
+    tracked_lane_width_.reset();
+    filtered_curvature_ = 0.0;
+    previous_error_ = 0.0;
   }
 
   LaneObs process(
@@ -1257,6 +1271,7 @@ private:
     }
     {
       std::lock_guard<std::mutex> lane_lock(lane_mutex_);
+      if (lane_reset_requested_.exchange(false)) lane_.reset_fork_history();
       observation = lane_.process(
         frame, include_yellow, publish_debug_ ? &lane_debug : nullptr);
     }
@@ -1454,6 +1469,11 @@ private:
         if ((reacquired && now_sec - entered_ >= config_.fork_commit_min_sec) ||
           now_sec - entered_ >= config_.fork_commit_timeout_sec)
         {
+          RCLCPP_INFO(
+            get_logger(), "fork steering release: reacquired=%s timeout=%s; reset lane history",
+            reacquired ? "true" : "false",
+            now_sec - entered_ >= config_.fork_commit_timeout_sec ? "true" : "false");
+          lane_reset_requested_.store(true);
           transition(MissionState::OUT_TO_ARUCO, now_sec);
         }
         return cmd;
@@ -1849,6 +1869,7 @@ private:
   bool target_marker_{false}, publish_debug_{false};
   int light_state_{0}, green_streak_{0}, red_streak_{0};
   int marker_seen_streak_{0}, marker_clear_streak_{0};
+  std::atomic<bool> lane_reset_requested_{false};
   uint64_t detection_sequence_{0}, last_light_sequence_{0};
   int32_t detection_source_sec_{0};
   uint32_t detection_source_nanosec_{0};

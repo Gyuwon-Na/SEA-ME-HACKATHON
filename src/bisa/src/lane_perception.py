@@ -66,6 +66,17 @@ class LanePerception:
         # path so on-vehicle runs pay nothing for it.
         self.last_viz: dict = {}
 
+    def reset_fork_history(self) -> None:
+        """Drops directional fit history before centering on the post-fork lane."""
+
+        self.prev_center_error = 0.0
+        self.prev_near_center = None
+        self.prev_left_target = None
+        self.prev_right_target = None
+        self.prev_single_is_left = None
+        self.tracked_lane_width = None
+        self.filtered_curvature = 0.0
+
     def _get_clahe(self):
         """Returns a cached CLAHE object, rebuilding only after live tuning."""
 

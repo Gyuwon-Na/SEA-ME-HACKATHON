@@ -87,6 +87,7 @@ const char * state_name(MissionState state) {
 
 struct LaneObs {
   bool valid{false};
+  bool both_lanes{false};
   double center_error{0.0};
   double curvature{0.0};
   double signed_curvature{0.0};
@@ -386,9 +387,10 @@ public:
     const double vehicle_x = frame.cols / 2.0 - x0;
     const std::optional<double> previous_center_local = previous_center_ ?
       std::optional<double>(*previous_center_ - x0) : std::nullopt;
+    bool both_lanes = false;
     auto hough_center = hough(
       lane_mask, vehicle_x, filtered_curvature_, previous_center_local,
-      debug ? &debug->hough : nullptr);
+      &both_lanes, debug ? &debug->hough : nullptr);
     auto near_center = hough_center;
     // OUT deliberately has no road-mask fallback: when white paint is absent,
     // hold the previous command instead of snapping toward the yellow IN split.
@@ -412,6 +414,7 @@ public:
     }
     previous_center_ = full_center;
     obs.valid = true;
+    obs.both_lanes = both_lanes;
     obs.center_error = clamp((frame.cols / 2.0 - full_center) / (frame.cols / 2.0), -1.0, 1.0);
     previous_error_ = obs.center_error;
     const double far = far_center.value_or(*near_center);
@@ -499,8 +502,9 @@ private:
 
   std::optional<double> hough(
     const cv::Mat & lane_mask, double vehicle_x, double curvature_hint,
-    std::optional<double> previous_center, HoughDebug * debug)
+    std::optional<double> previous_center, bool * both_lanes, HoughDebug * debug)
   {
+    if (both_lanes) *both_lanes = false;
     cv::Mat blur, edges;
     cv::GaussianBlur(lane_mask, blur, cv::Size(5, 5), 0.0);
     cv::Canny(blur, edges, c_.canny_low, c_.canny_high);
@@ -649,6 +653,7 @@ private:
       const double minimum = lane_mask.cols * c_.lane_width_min;
       const double maximum = lane_mask.cols * c_.lane_width_max;
       if (observed_width >= minimum && observed_width <= maximum) {
+        if (both_lanes) *both_lanes = true;
         if (tracked_lane_width_) {
           *tracked_lane_width_ += clamp(c_.lane_width_smoothing, 0.0, 1.0) *
             (observed_width - *tracked_lane_width_);
@@ -1432,28 +1437,37 @@ private:
       }
 
       case MissionState::OUT_FORK_SIGN_ADVANCE: {
+        // Apply only a short, mild directional nudge.  The following state
+        // immediately returns steering authority to the observed lane pair.
         auto cmd = controller_.directional_fork(
           lane, fork_decision_, config_.fork_approach_cap,
           config_.fork_approach_limit);
         if (now_sec - entered_ >= config_.fork_sign_advance_sec) {
+          lane_reset_requested_.store(true);
           transition(MissionState::OUT_FORK_COMMIT, now_sec);
         }
         return cmd;
       }
 
       case MissionState::OUT_FORK_COMMIT: {
-        auto cmd = controller_.directional_fork(
-          lane, fork_decision_, config_.fork_commit_cap, config_.fork_limit);
+        // The directional pulse is over.  Reacquire both physical lane
+        // boundaries and align to their center instead of continuing to force
+        // the sign direction.  Single-boundary tracking remains available
+        // while the second boundary enters the ROI.
+        auto cmd = controller_.follow(
+          lane, config_.fork_commit_cap, config_.fork_limit);
         const bool reacquired =
-          lane.valid && !lane.fork_seen && std::abs(lane.center_error) < 0.45;
+          lane.valid && lane.both_lanes && !lane.fork_seen &&
+          std::abs(lane.center_error) < 0.25;
         if ((reacquired && now_sec - entered_ >= config_.fork_commit_min_sec) ||
           now_sec - entered_ >= config_.fork_commit_timeout_sec)
         {
           RCLCPP_INFO(
-            get_logger(), "fork steering release: reacquired=%s timeout=%s; reset lane history",
-            reacquired ? "true" : "false",
+            get_logger(),
+            "fork alignment release: both_lanes=%s centered=%s timeout=%s",
+            lane.both_lanes ? "true" : "false",
+            std::abs(lane.center_error) < 0.25 ? "true" : "false",
             now_sec - entered_ >= config_.fork_commit_timeout_sec ? "true" : "false");
-          lane_reset_requested_.store(true);
           transition(MissionState::OUT_RESUME, now_sec);
         }
         return cmd;
@@ -1528,9 +1542,17 @@ private:
         entered_ += std::max(0.0, now_sec - aruco_pause_started_);
         RCLCPP_INFO(get_logger(), "global ArUco stop cleared; resume mission");
       }
-      if (has_started_ && light == 2 && !red_stop_latched_) {
+      // Never latch the vehicle on a single detector frame.  The detector can
+      // briefly classify a sign or reflection as red; use the same confirmed
+      // streak required by the mission light gate before making this permanent
+      // stop decision.
+      if (has_started_ && red_streak_ >= config_.light_confirm_frames &&
+        !red_stop_latched_)
+      {
         red_stop_latched_ = true;
-        RCLCPP_WARN(get_logger(), "global red-light stop latched");
+        RCLCPP_WARN(
+          get_logger(), "global red-light stop latched after %d confirmed frames",
+          red_streak_);
       }
 
       if (red_stop_latched_ || aruco_stop_active_) {
@@ -1750,7 +1772,8 @@ private:
     status.setf(std::ios::fixed); status.precision(2);
     status << "err=" << std::showpos << lane.center_error <<
       " curv=" << std::noshowpos << lane.curvature <<
-      " steer=" << std::showpos << cmd.steering;
+      " steer=" << std::showpos << cmd.steering <<
+      " pair=" << (lane.both_lanes ? "2" : "1");
     put_outlined_text(view, status.str(), cv::Point(8, 42));
     return view;
   }
@@ -1841,7 +1864,8 @@ private:
     command_text << "thr=" << cmd.throttle << " err=" << std::showpos << lane.center_error <<
       " curv=" << std::noshowpos << lane.curvature <<
       " scurv=" << std::showpos << lane.signed_curvature <<
-      " steer=" << cmd.steering;
+      " steer=" << cmd.steering <<
+      " pair=" << (lane.both_lanes ? "2" : "1");
     put_outlined_text(frame, command_text.str(), cv::Point(8, 44));
     put_outlined_text(frame, "light=" + std::string(light == 1 ? "GREEN" : light == 2 ? "RED" : "none"),
       cv::Point(8, frame.rows - 12), 0.65,

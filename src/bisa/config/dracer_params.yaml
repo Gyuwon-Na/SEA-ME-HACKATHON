@@ -131,7 +131,7 @@ steering:
   curve_response_power: 0.65  # 1보다 작아 커브 진입부터 반응하되 sqrt보다 완만
   curve_steer_boost: 0.15     # 커브에서만 최대 20% 조향 증폭(직선=0% 증폭)
   fork_curve_scale: 0.25      # 갈림길 ROI가 만든 가짜 곡률/상쇄 영향을 25%로 제한
-  fork_forced_error: 0.45     # 표지 확정 즉시 사용할 LEFT(+)/RIGHT(-) 화면 측면 목표
+  fork_forced_error: 0.25    # 표지 확정 직후 짧은 펄스에만 쓸 완만한 방향 목표
   wheelbase_m: 0.17          # 실차 전·후차축 거리(자전거 모델, m)
   lateral_scale_m: 0.30      # 오차 1.0을 몇 m 횡오프셋으로 볼지
   max_steer_deg: 35.0        # 조향각 정규화 기준(풀락 각도)
@@ -140,8 +140,8 @@ steering:
   rate_limit_per_cmd: 0.12   # 20Hz 기준 풀 조향까지 약 0.4s, 급커브 응답 개선
   straight_limit: 0.60       # 출발 직후 완만한 상단 커브 허용
   s_curve_limit: 0.95        # 원형교차로/S자 최대 조향(1.0 풀락은 여유로 보존)
-  fork_approach_limit: 0.75  # 갈림길 접근 조향 클램프
-  fork_limit: 0.95           # 갈림길 커밋 조향 클램프
+  fork_approach_limit: 0.35  # 표지판 방향 펄스는 풀 조향의 35% 이내로 제한
+  fork_limit: 0.55           # 펄스 후 양차선 중앙 정렬 조향 클램프
   post_fork_limit: 0.90      # 우측 연속 S자/헤어핀용
   lost_decay: 0.70           # 차선 놓치면 직전 조향을 이 비율로 감쇠
 
@@ -204,8 +204,8 @@ mission:
   control_hz: 20.0              # 제어 루프 주기(Hz)
   # OUT은 초록불 뒤 별도 ENTRY/S 상태 없이 흰 차선을 곡률 기반 추종하다가
   # 표지판 투표가 확정될 때만 fork 접근 상태로 넘어간다.
-  # 거리계가 없으므로 표지판 이후 0.3~0.5m는 시간으로 근사한다. 현장 실측 후 조정.
-  fork_sign_advance_sec: 1.5    # 표지 확정 후 방향별 선제 강제 조향을 유지하는 시간(s)
-  fork_commit_min_sec: 0.4      # 갈림길 커밋 최소 유지 시간(s)
-  fork_commit_timeout_sec: 1.8  # 커밋 강제 종료 타임아웃(s)
+  # 표지판 방향은 아주 짧게만 넣고, 곧바로 양쪽 흰 차선을 재검출해 중앙 정렬한다.
+  fork_sign_advance_sec: 0.2    # 방향별 약한 조향 펄스 유지 시간(s)
+  fork_commit_min_sec: 0.3      # 양차선 중앙 정렬을 유지할 최소 시간(s)
+  fork_commit_timeout_sec: 1.0  # 양차선이 늦게 보여도 이 시간 후 일반 차선 추종으로 전환
   debug_log_hz: 1.0             # 상태 로그 출력 주기(Hz)

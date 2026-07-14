@@ -103,9 +103,9 @@ throttle:
   # Moving speed band. Every throttle command (while not stopped) maps into
   # [speed_min, speed_max]. Change these two to retune overall speed.
   speed_min: 0.20          # 이동 속도밴드 하한(정지 아닌 최저속)
-  speed_max: 0.22          # POWER-SAFE: was 0.25. 최고속 낮춰 모터 피크 전류 억제(팩 새그↓)
+  speed_max: 0.30          # POWER-SAFE: was 0.25. 최고속 낮춰 모터 피크 전류 억제(팩 새그↓)
   launch_cap: 0.32         # 출발 구간 속도 상한
-  s_curve_cap: 0.24        # S자 구간 속도 상한
+  s_curve_cap: 0.30        # S자 구간 속도 상한
   fork_approach_cap: 0.20  # 갈림길 접근 속도 상한
   fork_commit_cap: 0.25    # 갈림길 진입(커밋) 속도 상한
   post_fork_cap: 0.30      # 갈림길 이후 크루즈(종단) 속도 상한

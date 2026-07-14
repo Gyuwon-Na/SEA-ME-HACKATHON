@@ -65,6 +65,7 @@ def generate_launch_description():
     image_topic = LaunchConfiguration("image_topic")
     control_topic = LaunchConfiguration("control_topic")
     detections_topic = LaunchConfiguration("detections_topic")
+    enable_camera = LaunchConfiguration("enable_camera")
     enable_joystick = LaunchConfiguration("enable_joystick")
     enable_actuation = LaunchConfiguration("enable_actuation")
 
@@ -98,6 +99,8 @@ def generate_launch_description():
         DeclareLaunchArgument("image_topic", default_value="/camera/image/compressed"),
         DeclareLaunchArgument("control_topic", default_value="/control"),
         DeclareLaunchArgument("detections_topic", default_value="/bisa/detections"),
+        # Disable only for rosbag replay; production keeps the physical camera.
+        DeclareLaunchArgument("enable_camera", default_value="true"),
         # Set false if no gamepad dongle is plugged into the car.
         DeclareLaunchArgument("enable_joystick", default_value="true"),
         # Safe integration/benchmark mode: false keeps the hardware PCA9685
@@ -132,6 +135,7 @@ def generate_launch_description():
             executable="camera_node",
             name="camera_node",
             output="screen",
+            condition=IfCondition(enable_camera),
             parameters=[{
                 "publish_topic": image_topic,
                 "capture_hz": camera_hz,
@@ -154,48 +158,9 @@ def generate_launch_description():
                 "control_topic": control_topic,
                 "use_joystick_control": False,
                 "command_hz": pipeline_hz,
-                # Board-priority voltage guard: motor + the D3-G 5V/5A regulator
-                # share one 2S pack, so a sag browns out the board's 5V rail and
-                # USB camera. The guard watches /battery/voltage and scales the
-                # motor down before that happens (forward-only, floored at the
-                # min rolling throttle). See control/power_guard.py.
-                "voltage_guard_enabled": True,
-                "guard_low_voltage": 6.5,
-                "guard_critical_voltage": 6.2,
-                "guard_min_scale": 0.75,
-                "guard_floor_throttle": 0.20,
-                "battery_voltage_topic": "/battery/voltage",
-            }],
-        ),
-
-        # --- battery / power monitor (I2C INA219, publishes /battery/voltage) -
-        # Feeds the control_node voltage guard. Without this node the guard has
-        # no voltage data and stays idle (scale 1.0), so protection needs it
-        # running. 5Hz: pack voltage changes slowly and a low rate keeps the
-        # I2C read load off the board.
-        Node(
-            package="battery",
-            executable="battery_node",
-            name="battery_node",
-            output="screen",
-            parameters=[{
-                "publish_hz": 5.0,
-                "debug_log": False,
-            }],
-        ),
-
-        # --- on-car system vitals (CPU / temp / memory) ----------------------
-        # Headless car can't show a monitor, so it publishes its own vitals for
-        # the PC power GUI to display. Dependency-free (/proc + /sys reads), 2Hz
-        # — negligible load next to CPU-only YOLO. Watch these when the onboard
-        # stack stalls: a saturated core or thermal throttle shows up here.
-        Node(
-            package="bisa",
-            executable="system_telemetry_node",
-            name="system_telemetry_node",
-            output="screen",
-            parameters=[{
-                "publish_hz": 2.0,
+                # battery_node is no longer part of the competition runtime;
+                # keep the matching downstream guard explicitly disabled.
+                "voltage_guard_enabled": False,
             }],
         ),
 

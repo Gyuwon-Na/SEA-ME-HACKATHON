@@ -23,8 +23,6 @@
 
   <exec_depend>camera</exec_depend>
   <exec_depend>control</exec_depend>
-  <exec_depend>battery</exec_depend>
-  <exec_depend>monitor</exec_depend>
 
   <test_depend>python3-pytest</test_depend>
 

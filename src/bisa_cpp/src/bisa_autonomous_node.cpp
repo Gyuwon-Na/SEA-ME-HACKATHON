@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <deque>
@@ -39,6 +40,57 @@ double evaluate_curve(const cv::Vec3d & curve, double y, int top, int bottom) {
   const double span = std::max(1, bottom - top);
   const double t = (y - top) / span;
   return curve[0] * t * t + curve[1] * t + curve[2];
+}
+
+enum class RouteMode {OUT, IN, LANE};
+
+RouteMode parse_route_mode(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+    [](unsigned char ch) {return static_cast<char>(std::toupper(ch));});
+  if (value == "IN") return RouteMode::IN;
+  if (value == "LANE" || value == "LANE_TEST" || value == "TEST") return RouteMode::LANE;
+  return RouteMode::OUT;
+}
+
+enum class MissionState {
+  LANE_TEST,
+  OUT_WAIT_GREEN,
+  OUT_TO_FORK,
+  OUT_FORK_SIGN_ADVANCE,
+  OUT_FORK_COMMIT,
+  OUT_TO_ARUCO,
+  OUT_ARUCO_STOP,
+  OUT_RESUME,
+  OUT_FINISH_STOP,
+  IN_WAIT_GREEN,
+  IN_ENTRY,
+  IN_LAP,
+  IN_EXIT,
+  IN_ARUCO_STOP,
+  IN_RESUME,
+  IN_FINISH_STOP,
+};
+
+const char * state_name(MissionState state) {
+  switch (state) {
+    case MissionState::LANE_TEST: return "LANE_TEST";
+    case MissionState::OUT_WAIT_GREEN: return "OUT_WAIT_GREEN";
+    case MissionState::OUT_TO_FORK: return "OUT_TO_FORK";
+    case MissionState::OUT_FORK_SIGN_ADVANCE: return "OUT_FORK_SIGN_ADVANCE";
+    case MissionState::OUT_FORK_COMMIT: return "OUT_FORK_COMMIT";
+    case MissionState::OUT_TO_ARUCO: return "OUT_TO_ARUCO";
+    case MissionState::OUT_ARUCO_STOP: return "OUT_ARUCO_STOP";
+    case MissionState::OUT_RESUME: return "OUT_RESUME";
+    case MissionState::OUT_FINISH_STOP: return "OUT_FINISH_STOP";
+    case MissionState::IN_WAIT_GREEN: return "IN_WAIT_GREEN";
+    case MissionState::IN_ENTRY: return "IN_ENTRY";
+    case MissionState::IN_LAP: return "IN_LAP";
+    case MissionState::IN_EXIT: return "IN_EXIT";
+    case MissionState::IN_ARUCO_STOP: return "IN_ARUCO_STOP";
+    case MissionState::IN_RESUME: return "IN_RESUME";
+    case MissionState::IN_FINISH_STOP: return "IN_FINISH_STOP";
+  }
+  return "UNKNOWN";
 }
 
 struct LaneObs {
@@ -99,6 +151,9 @@ struct Config {
   int yellow_l_min{80}, yellow_l_max{255};
   int yellow_a_min{100}, yellow_a_max{140};
   int yellow_b_min{165}, yellow_b_max{255};
+  bool out_white_only{true};
+  double fork_target_y0{0.05}, fork_target_y1{0.45};
+  double fork_target_min_area_ratio{0.002};
   double clahe_clip{2.0};
   int clahe_tile{8};
   int morph_open{3}, morph_close{5};
@@ -112,13 +167,14 @@ struct Config {
   double lane_width_min{0.10}, lane_width_max{0.70}, lane_width_smoothing{0.20};
   double single_lane_switch_margin{0.08}, max_center_jump{0.35};
   double speed_min{0.20}, speed_max{0.30};
-  double launch_cap{0.30}, s_curve_cap{0.30}, fork_approach_cap{0.30};
-  double fork_commit_cap{0.30}, post_fork_cap{0.30}, post_fork_min{0.20};
+  double launch_cap{0.24}, s_curve_cap{0.24}, fork_approach_cap{0.24};
+  double fork_commit_cap{0.22}, post_fork_cap{0.30}, post_fork_min{0.20};
   double ramp_up{0.015}, steer_slowdown{0.22}, curvature_slowdown{0.08};
   double straight_steer_deadband{0.05}, straight_curvature_deadband{0.05};
   int steer_sign{1};
   double lookahead{0.60}, curve_lookahead_min{0.38};
   double curve_response_power{0.65}, curve_steer_boost{0.20}, fork_curve_scale{0.25};
+  double fork_forced_error{0.45};
   double wheelbase{0.17}, lateral_scale{0.30};
   double max_steer_deg{30.0}, pp_gain{1.0}, curve_blend{1.0};
   double steer_rate{0.12}, straight_limit{0.60}, s_curve_limit{0.95};
@@ -132,9 +188,9 @@ struct Config {
   double contrast{1.0}, saturation{1.0}, gamma{1.0};
   int sign_vote_k{6}, sign_vote_n{10}, light_confirm_frames{8};
   double light_stale_sec{0.75};
-  double launch_min_sec{1.0}, fork_commit_min_sec{0.8};
-  double fork_commit_timeout_sec{1.8}, finish_min_elapsed_sec{8.0};
-  int aruco_target_id{3};
+  double fork_sign_advance_sec{1.5};
+  double fork_commit_min_sec{0.8}, fork_commit_timeout_sec{1.8};
+  int aruco_target_id{3}, aruco_confirm_frames{2}, aruco_clear_frames{3};
 };
 
 template<typename T>
@@ -169,6 +225,10 @@ Config load_config(const std::string & path) {
   read_value(lane, "yellow_l_min", c.yellow_l_min); read_value(lane, "yellow_l_max", c.yellow_l_max);
   read_value(lane, "yellow_a_min", c.yellow_a_min); read_value(lane, "yellow_a_max", c.yellow_a_max);
   read_value(lane, "yellow_b_min", c.yellow_b_min); read_value(lane, "yellow_b_max", c.yellow_b_max);
+  read_value(lane, "out_white_only", c.out_white_only);
+  read_value(lane, "fork_target_y0", c.fork_target_y0);
+  read_value(lane, "fork_target_y1", c.fork_target_y1);
+  read_value(lane, "fork_target_min_area_ratio", c.fork_target_min_area_ratio);
   read_value(lane, "lab_clahe_clip", c.clahe_clip); read_value(lane, "lab_clahe_tile", c.clahe_tile);
   read_value(lane, "morph_open_kernel", c.morph_open); read_value(lane, "morph_close_kernel", c.morph_close);
   read_value(lane, "min_component_area_ratio", c.min_area_ratio);
@@ -207,6 +267,7 @@ Config load_config(const std::string & path) {
   read_value(steering, "curve_response_power", c.curve_response_power);
   read_value(steering, "curve_steer_boost", c.curve_steer_boost);
   read_value(steering, "fork_curve_scale", c.fork_curve_scale);
+  read_value(steering, "fork_forced_error", c.fork_forced_error);
   read_value(steering, "wheelbase_m", c.wheelbase); read_value(steering, "lateral_scale_m", c.lateral_scale);
   read_value(steering, "max_steer_deg", c.max_steer_deg); read_value(steering, "pp_gain", c.pp_gain);
   read_value(steering, "curve_blend", c.curve_blend); read_value(steering, "rate_limit_per_cmd", c.steer_rate);
@@ -224,12 +285,13 @@ Config load_config(const std::string & path) {
   read_value(color, "saturation", c.saturation);
   read_value(color, "gamma", c.gamma);
   const auto mission = root["mission"];
-  read_value(mission, "launch_min_sec", c.launch_min_sec);
+  read_value(mission, "fork_sign_advance_sec", c.fork_sign_advance_sec);
   read_value(mission, "fork_commit_min_sec", c.fork_commit_min_sec);
   read_value(mission, "fork_commit_timeout_sec", c.fork_commit_timeout_sec);
-  read_value(mission, "finish_min_elapsed_sec", c.finish_min_elapsed_sec);
   const auto aruco = root["aruco"];
   read_value(aruco, "target_id", c.aruco_target_id);
+  read_value(aruco, "confirm_frames", c.aruco_confirm_frames);
+  read_value(aruco, "clear_frames", c.aruco_clear_frames);
   return c;
 }
 
@@ -244,7 +306,9 @@ public:
     rebuild_kernels();
   }
 
-  LaneObs process(const cv::Mat & frame, LaneDebug * debug = nullptr) {
+  LaneObs process(
+    const cv::Mat & frame, bool include_yellow, LaneDebug * debug = nullptr)
+  {
     LaneObs obs;
     if (frame.empty()) return obs;
     const int rw = std::clamp(c_.lane_width, 1, frame.cols);
@@ -281,27 +345,34 @@ public:
       lab,
       cv::Scalar(c_.yellow_l_min, c_.yellow_a_min, c_.yellow_b_min),
       cv::Scalar(c_.yellow_l_max, c_.yellow_a_max, c_.yellow_b_max), yellow_mask);
-    cv::bitwise_or(white_mask, yellow_mask, lane_mask);
-    cv::morphologyEx(lane_mask, lane_mask, cv::MORPH_OPEN, open_kernel_);
-    cv::morphologyEx(lane_mask, lane_mask, cv::MORPH_CLOSE, close_kernel_);
+    cv::morphologyEx(white_mask, white_mask, cv::MORPH_OPEN, open_kernel_);
+    cv::morphologyEx(white_mask, white_mask, cv::MORPH_CLOSE, close_kernel_);
+    cv::morphologyEx(yellow_mask, yellow_mask, cv::MORPH_OPEN, open_kernel_);
+    cv::morphologyEx(yellow_mask, yellow_mask, cv::MORPH_CLOSE, close_kernel_);
+    if (include_yellow) cv::bitwise_or(white_mask, yellow_mask, lane_mask);
+    else lane_mask = white_mask;
     if (debug) {
       debug->roi = cv::Rect(x0, y0, rw, rh);
       debug->mask = lane_mask.clone();
     }
 
-    const auto road_near_center = contour_center(road_mask, c_.near_y0, 1.0);
-    const auto mid_center = contour_center(road_mask, c_.mid_y0, c_.mid_y1);
-    const auto far_center = contour_center(road_mask, c_.far_y0, c_.far_y1);
+    // Center, curvature, steering feed-forward, and speed scheduling must all
+    // use the same color-selected mask.  In OUT this is white-only, so the
+    // yellow IN split cannot leak back into steering through curvature even
+    // when the Hough center itself is correctly fitted to white paint.
+    const auto steering_near_center = contour_center(lane_mask, c_.near_y0, 1.0);
+    const auto mid_center = contour_center(lane_mask, c_.mid_y0, c_.mid_y1);
+    const auto far_center = contour_center(lane_mask, c_.far_y0, c_.far_y1);
     double rough_curvature = filtered_curvature_;
-    if (road_near_center) {
+    if (steering_near_center) {
       rough_curvature = 0.0;
       if (far_center) {
         rough_curvature = std::max(rough_curvature,
-          clamp(std::abs(*far_center - *road_near_center) / frame.cols * 2.5, 0.0, 1.0));
+          clamp(std::abs(*far_center - *steering_near_center) / frame.cols * 2.5, 0.0, 1.0));
       }
       if (mid_center) {
         rough_curvature = std::max(rough_curvature,
-          clamp(std::abs(*mid_center - *road_near_center) / frame.cols * 2.0, 0.0, 1.0));
+          clamp(std::abs(*mid_center - *steering_near_center) / frame.cols * 2.0, 0.0, 1.0));
       }
     }
     const double smoothing = clamp(c_.hough_curvature_smoothing, 0.0, 1.0);
@@ -314,7 +385,9 @@ public:
       lane_mask, vehicle_x, filtered_curvature_, previous_center_local,
       debug ? &debug->hough : nullptr);
     auto near_center = hough_center;
-    if (!near_center) near_center = road_near_center;
+    // OUT deliberately has no road-mask fallback: when white paint is absent,
+    // hold the previous command instead of snapping toward the yellow IN split.
+    if (!near_center && include_yellow) near_center = steering_near_center;
     if (debug) {
       debug->bands = {
         make_range(road_mask.rows, c_.near_y0, 1.0),
@@ -353,8 +426,10 @@ public:
     const double right_ratio = cv::countNonZero(far_mask.colRange(half, far_mask.cols)) /
       static_cast<double>(far_mask.rows * (far_mask.cols - half));
     obs.fork_seen = left_ratio >= c_.fork_area_ratio && right_ratio >= c_.fork_area_ratio;
-    if (left_ratio >= c_.fork_area_ratio) obs.left_target = obs.center_error + 0.18;
-    if (right_ratio >= c_.fork_area_ratio) obs.right_target = obs.center_error - 0.18;
+    if (obs.fork_seen) {
+      obs.left_target = branch_target_error(white_mask, true, x0, frame.cols);
+      obs.right_target = branch_target_error(white_mask, false, x0, frame.cols);
+    }
     return obs;
   }
 
@@ -386,6 +461,35 @@ private:
     }
     if (area_sum <= 0.0) return std::nullopt;
     return sx / area_sum;
+  }
+
+  std::optional<double> branch_target_error(
+    const cv::Mat & white_mask, bool left, int roi_x, int frame_width) const
+  {
+    const int y0 = std::clamp(
+      static_cast<int>(c_.fork_target_y0 * white_mask.rows), 0, white_mask.rows - 1);
+    const int y1 = std::clamp(
+      static_cast<int>(c_.fork_target_y1 * white_mask.rows), y0 + 1, white_mask.rows);
+    const int split = white_mask.cols / 2;
+    const int x0 = left ? 0 : split;
+    const int x1 = left ? split : white_mask.cols;
+    const cv::Mat branch = white_mask(cv::Range(y0, y1), cv::Range(x0, x1));
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(branch.clone(), contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    const double minimum = branch.total() * c_.fork_target_min_area_ratio;
+    double weighted_x = 0.0;
+    double area_sum = 0.0;
+    for (const auto & contour : contours) {
+      const double area = cv::contourArea(contour);
+      if (area < minimum) continue;
+      const cv::Moments moments = cv::moments(contour);
+      if (moments.m00 <= 0.0) continue;
+      weighted_x += (moments.m10 / moments.m00 + x0) * area;
+      area_sum += area;
+    }
+    if (area_sum <= 0.0) return std::nullopt;
+    const double full_x = roi_x + weighted_x / area_sum;
+    return clamp((frame_width / 2.0 - full_x) / (frame_width / 2.0), -1.0, 1.0);
   }
 
   std::optional<double> hough(
@@ -633,10 +737,33 @@ public:
     return {throttle(cap, steer, lane.curvature, floor), steer};
   }
 
-  Command fork(const LaneObs & lane, const std::string & decision) {
+  Command follow_with_startup(const LaneObs & lane, double cap, double steer_limit) {
+    if (lane.valid) return follow(lane, cap, steer_limit);
+
+    // The start grid can contain no usable OUT white line.  A normal lost-lane
+    // command preserves the previous throttle, which is zero while waiting for
+    // green and therefore deadlocks AUTO at the start.  Launch straight at the
+    // configured rolling minimum until white paint becomes visible; steering
+    // still decays toward center instead of following the excluded yellow line.
+    previous_steer_ = rate(previous_steer_ * c_.lost_decay, previous_steer_, c_.steer_rate);
+    const double section_cap = clamp(cap, c_.speed_min, c_.speed_max);
+    previous_throttle_ = clamp(
+      std::max(previous_throttle_, c_.speed_min), c_.speed_min, section_cap);
+    return {previous_throttle_, previous_steer_};
+  }
+
+  Command fork(
+    const LaneObs & lane, const std::string & decision,
+    const std::optional<double> & latched_target)
+  {
     LaneObs virtual_lane = lane;
-    if (decision == "LEFT") virtual_lane.center_error = lane.left_target.value_or(lane.center_error + 0.18);
-    if (decision == "RIGHT") virtual_lane.center_error = lane.right_target.value_or(lane.center_error - 0.18);
+    if (latched_target) {
+      virtual_lane.center_error = *latched_target;
+    } else if (decision == "LEFT") {
+      virtual_lane.center_error = c_.fork_forced_error;
+    } else if (decision == "RIGHT") {
+      virtual_lane.center_error = -c_.fork_forced_error;
+    }
     const double steer = steering(virtual_lane, c_.fork_limit, c_.fork_curve_scale);
     return {throttle(c_.fork_commit_cap, steer, lane.curvature), steer};
   }
@@ -696,7 +823,8 @@ public:
     config_(load_config(declare_parameter<std::string>(
       "config_file", ament_index_cpp::get_package_share_directory("bisa") + "/config/dracer_params.yaml"))),
     lane_(config_), controller_(config_) {
-    route_mode_ = declare_parameter<std::string>("route_mode", "OUT");
+    const std::string route_mode_text = declare_parameter<std::string>("route_mode", "OUT");
+    route_mode_ = parse_route_mode(route_mode_text);
     image_topic_ = declare_parameter<std::string>("image_topic", "/camera/image/compressed");
     control_topic_ = declare_parameter<std::string>("control_topic", "/control");
     detections_topic_ = declare_parameter<std::string>("detections_topic", "/bisa/detections");
@@ -761,12 +889,14 @@ public:
         std::bind(&BisaAutonomousNode::debug_loop, this),
         debug_group_);
     }
-    state_ = route_mode_ == "LANE" ? "LANE_TEST" : "OUT_WAIT_GREEN";
+    state_ = route_mode_ == RouteMode::LANE ? MissionState::LANE_TEST :
+      route_mode_ == RouteMode::IN ? MissionState::IN_WAIT_GREEN :
+      MissionState::OUT_WAIT_GREEN;
     performance_started_ = std::chrono::steady_clock::now();
     RCLCPP_INFO(
       get_logger(),
-      "C++ BISA core started: perception=%.1f Hz control=%.1f Hz debug=%.1f Hz",
-      perception_hz_, control_hz_, debug_hz_);
+      "C++ BISA core started: route=%s state=%s perception=%.1f Hz control=%.1f Hz debug=%.1f Hz",
+      route_mode_text.c_str(), state_name(state_), perception_hz_, control_hz_, debug_hz_);
   }
 
 private:
@@ -793,6 +923,11 @@ private:
     config_.yellow_a_max = declare_parameter<int>("lane.yellow_a_max", config_.yellow_a_max);
     config_.yellow_b_min = declare_parameter<int>("lane.yellow_b_min", config_.yellow_b_min);
     config_.yellow_b_max = declare_parameter<int>("lane.yellow_b_max", config_.yellow_b_max);
+    config_.out_white_only = declare_parameter<bool>("lane.out_white_only", config_.out_white_only);
+    config_.fork_target_y0 = declare_parameter<double>("lane.fork_target_y0", config_.fork_target_y0);
+    config_.fork_target_y1 = declare_parameter<double>("lane.fork_target_y1", config_.fork_target_y1);
+    config_.fork_target_min_area_ratio = declare_parameter<double>(
+      "lane.fork_target_min_area_ratio", config_.fork_target_min_area_ratio);
     config_.clahe_clip = declare_parameter<double>("lane.lab_clahe_clip", config_.clahe_clip);
     config_.clahe_tile = declare_parameter<int>("lane.lab_clahe_tile", config_.clahe_tile);
     config_.morph_open = declare_parameter<int>("lane.morph_open_kernel", config_.morph_open);
@@ -835,6 +970,8 @@ private:
       "steering.curve_steer_boost", config_.curve_steer_boost);
     config_.fork_curve_scale = declare_parameter<double>(
       "steering.fork_curve_scale", config_.fork_curve_scale);
+    config_.fork_forced_error = declare_parameter<double>(
+      "steering.fork_forced_error", config_.fork_forced_error);
     config_.wheelbase = declare_parameter<double>("steering.wheelbase_m", config_.wheelbase);
     config_.lateral_scale = declare_parameter<double>("steering.lateral_scale_m", config_.lateral_scale);
     config_.max_steer_deg = declare_parameter<double>("steering.max_steer_deg", config_.max_steer_deg);
@@ -854,10 +991,27 @@ private:
     config_.speed_max = declare_parameter<double>("throttle.speed_max", config_.speed_max);
     config_.launch_cap = declare_parameter<double>("throttle.launch_cap", config_.launch_cap);
     config_.s_curve_cap = declare_parameter<double>("throttle.s_curve_cap", config_.s_curve_cap);
+    config_.fork_approach_cap = declare_parameter<double>(
+      "throttle.fork_approach_cap", config_.fork_approach_cap);
+    config_.fork_commit_cap = declare_parameter<double>(
+      "throttle.fork_commit_cap", config_.fork_commit_cap);
+    config_.post_fork_cap = declare_parameter<double>(
+      "throttle.post_fork_cap", config_.post_fork_cap);
     config_.straight_steer_deadband = declare_parameter<double>(
       "throttle.straight_steer_deadband", config_.straight_steer_deadband);
     config_.straight_curvature_deadband = declare_parameter<double>(
       "throttle.straight_curvature_deadband", config_.straight_curvature_deadband);
+
+    config_.fork_sign_advance_sec = declare_parameter<double>(
+      "mission.fork_sign_advance_sec", config_.fork_sign_advance_sec);
+    config_.fork_commit_min_sec = declare_parameter<double>(
+      "mission.fork_commit_min_sec", config_.fork_commit_min_sec);
+    config_.fork_commit_timeout_sec = declare_parameter<double>(
+      "mission.fork_commit_timeout_sec", config_.fork_commit_timeout_sec);
+    config_.aruco_confirm_frames = declare_parameter<int>(
+      "aruco.confirm_frames", config_.aruco_confirm_frames);
+    config_.aruco_clear_frames = declare_parameter<int>(
+      "aruco.clear_frames", config_.aruco_clear_frames);
 
     config_.color_enabled = declare_parameter<bool>("color_correction.enabled", config_.color_enabled);
     config_.color_clahe_clip = declare_parameter<double>(
@@ -908,6 +1062,12 @@ private:
         else if (name == "lane.yellow_a_max") next.yellow_a_max = parameter.as_int();
         else if (name == "lane.yellow_b_min") next.yellow_b_min = parameter.as_int();
         else if (name == "lane.yellow_b_max") next.yellow_b_max = parameter.as_int();
+        else if (name == "lane.out_white_only") next.out_white_only = parameter.as_bool();
+        else if (name == "lane.fork_target_y0") next.fork_target_y0 = parameter.as_double();
+        else if (name == "lane.fork_target_y1") next.fork_target_y1 = parameter.as_double();
+        else if (name == "lane.fork_target_min_area_ratio") {
+          next.fork_target_min_area_ratio = parameter.as_double();
+        }
         else if (name == "lane.lab_clahe_clip") next.clahe_clip = parameter.as_double();
         else if (name == "lane.lab_clahe_tile") next.clahe_tile = parameter.as_int();
         else if (name == "lane.morph_open_kernel") next.morph_open = parameter.as_int();
@@ -946,6 +1106,9 @@ private:
         else if (name == "steering.fork_curve_scale") {
           next.fork_curve_scale = parameter.as_double();
         }
+        else if (name == "steering.fork_forced_error") {
+          next.fork_forced_error = parameter.as_double();
+        }
         else if (name == "steering.wheelbase_m") next.wheelbase = parameter.as_double();
         else if (name == "steering.lateral_scale_m") next.lateral_scale = parameter.as_double();
         else if (name == "steering.max_steer_deg") next.max_steer_deg = parameter.as_double();
@@ -964,12 +1127,34 @@ private:
         else if (name == "throttle.speed_max") next.speed_max = parameter.as_double();
         else if (name == "throttle.launch_cap") next.launch_cap = parameter.as_double();
         else if (name == "throttle.s_curve_cap") next.s_curve_cap = parameter.as_double();
+        else if (name == "throttle.fork_approach_cap") {
+          next.fork_approach_cap = parameter.as_double();
+        }
+        else if (name == "throttle.fork_commit_cap") {
+          next.fork_commit_cap = parameter.as_double();
+        }
+        else if (name == "throttle.post_fork_cap") {
+          next.post_fork_cap = parameter.as_double();
+        }
         else if (name == "throttle.straight_steer_deadband") {
           next.straight_steer_deadband = parameter.as_double();
         }
         else if (name == "throttle.straight_curvature_deadband") {
           next.straight_curvature_deadband = parameter.as_double();
         }
+        else if (name == "mission.fork_sign_advance_sec") {
+          next.fork_sign_advance_sec = parameter.as_double();
+        }
+        else if (name == "mission.fork_commit_min_sec") {
+          next.fork_commit_min_sec = parameter.as_double();
+        }
+        else if (name == "mission.fork_commit_timeout_sec") {
+          next.fork_commit_timeout_sec = parameter.as_double();
+        }
+        else if (name == "aruco.confirm_frames") {
+          next.aruco_confirm_frames = parameter.as_int();
+        }
+        else if (name == "aruco.clear_frames") next.aruco_clear_frames = parameter.as_int();
         else if (name == "color_correction.enabled") next.color_enabled = parameter.as_bool();
         else if (name == "color_correction.clahe_clip") next.color_clahe_clip = parameter.as_double();
         else if (name == "color_correction.saturation_boost") next.saturation_boost = parameter.as_double();
@@ -998,13 +1183,24 @@ private:
       next.hough_top >= 0.0 && next.hough_top < 0.90 &&
       next.hough_curve_top >= next.hough_top && next.hough_curve_top <= 0.90 &&
       next.hough_curvature_smoothing >= 0.0 && next.hough_curvature_smoothing <= 1.0 &&
+      next.fork_target_y0 >= 0.0 && next.fork_target_y0 < next.fork_target_y1 &&
+      next.fork_target_y1 <= 1.0 && next.fork_target_min_area_ratio >= 0.0 &&
       next.lane_width_min > 0.0 && next.lane_width_min < next.lane_width_max &&
       next.lane_width_max <= 1.0 && next.lane_width_smoothing >= 0.0 &&
       next.lane_width_smoothing <= 1.0 && next.single_lane_switch_margin >= 0.0;
+    const auto valid_cap = [&next](double cap) {
+      return cap >= next.speed_min && cap <= next.speed_max;
+    };
     const bool speed_valid = next.speed_min >= 0.0 && next.speed_min <= next.speed_max &&
-      next.speed_max <= 1.0 && next.straight_steer_deadband >= 0.0 &&
+      next.speed_max <= 1.0 && valid_cap(next.launch_cap) && valid_cap(next.s_curve_cap) &&
+      valid_cap(next.fork_approach_cap) && valid_cap(next.fork_commit_cap) &&
+      valid_cap(next.post_fork_cap) && next.straight_steer_deadband >= 0.0 &&
       next.straight_steer_deadband <= 1.0 && next.straight_curvature_deadband >= 0.0 &&
-      next.straight_curvature_deadband <= 1.0;
+      next.straight_curvature_deadband <= 1.0 && next.fork_forced_error >= 0.0 &&
+      next.fork_forced_error <= 1.0 &&
+      next.fork_sign_advance_sec >= 0.0 && next.fork_commit_min_sec >= 0.0 &&
+      next.fork_commit_timeout_sec >= next.fork_commit_min_sec &&
+      next.aruco_confirm_frames >= 1 && next.aruco_clear_frames >= 1;
     if (!lab_valid || !geometry_valid || !speed_valid || std::abs(next.steer_sign) != 1) {
       return rcl_interfaces::msg::SetParametersResult().set__successful(false).set__reason(
         "invalid LAB bounds, ROI/kernel size, steering geometry/sign, gamma, or speed band");
@@ -1050,16 +1246,19 @@ private:
     if (frame.empty()) return;
     LaneDebug lane_debug;
     LaneObs observation;
-    {
-      std::lock_guard<std::mutex> lane_lock(lane_mutex_);
-      observation = lane_.process(frame, publish_debug_ ? &lane_debug : nullptr);
-    }
-    bool marker = false;
+    bool include_yellow = true;
     int aruco_target_id = 3;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      include_yellow = route_mode_ != RouteMode::OUT || !config_.out_white_only;
       aruco_target_id = config_.aruco_target_id;
     }
+    {
+      std::lock_guard<std::mutex> lane_lock(lane_mutex_);
+      observation = lane_.process(
+        frame, include_yellow, publish_debug_ ? &lane_debug : nullptr);
+    }
+    bool marker = false;
     std::vector<int> ids;
     std::vector<std::vector<cv::Point2f>> corners;
     cv::aruco::detectMarkers(frame, cv::aruco::getPredefinedDictionary(cv::aruco::DICT_6X6_50), corners, ids);
@@ -1187,48 +1386,160 @@ private:
     (void)now_sec;
   }
 
-  void transition(const std::string & next, double now_sec) { state_ = next; entered_ = now_sec; }
+  void transition(MissionState next, double now_sec) {
+    if (state_ == next) return;
+    RCLCPP_INFO(get_logger(), "mission state: %s -> %s", state_name(state_), state_name(next));
+    state_ = next;
+    entered_ = now_sec;
+  }
+
+  void update_marker(bool visible) {
+    if (visible) {
+      marker_seen_streak_ = std::min(marker_seen_streak_ + 1, config_.aruco_confirm_frames);
+      marker_clear_streak_ = 0;
+    } else {
+      marker_clear_streak_ = std::min(marker_clear_streak_ + 1, config_.aruco_clear_frames);
+      marker_seen_streak_ = 0;
+    }
+  }
+
+  bool marker_confirmed() const {
+    return marker_seen_streak_ >= config_.aruco_confirm_frames;
+  }
+
+  bool marker_cleared() const {
+    return marker_clear_streak_ >= config_.aruco_clear_frames;
+  }
+
+  void update_fork_target(const LaneObs & lane) {
+    if (fork_decision_ == "LEFT" && lane.left_target) fork_target_error_ = lane.left_target;
+    if (fork_decision_ == "RIGHT" && lane.right_target) fork_target_error_ = lane.right_target;
+  }
+
+  Command step_out(const LaneObs & lane, double now_sec) {
+    switch (state_) {
+      case MissionState::OUT_WAIT_GREEN:
+        if (green_streak_ >= config_.light_confirm_frames) {
+          transition(MissionState::OUT_TO_FORK, now_sec);
+        }
+        return {};
+
+      case MissionState::OUT_TO_FORK: {
+        // S bends are ordinary lane geometry, not a timed mission state. Run
+        // the whole green-to-sign section at the global speed cap and let
+        // steering demand + measured curvature continuously pull it toward
+        // speed_min. OUT perception is white-only, so an adjacent yellow IN
+        // split cannot influence center, curvature, or steering.
+        auto cmd = controller_.follow_with_startup(
+          lane, config_.speed_max, config_.s_curve_limit);
+        if (auto decision = sign_decision()) {
+          fork_decision_ = *decision;
+          fork_target_error_.reset();
+          transition(MissionState::OUT_FORK_SIGN_ADVANCE, now_sec);
+        }
+        return cmd;
+      }
+
+      case MissionState::OUT_FORK_SIGN_ADVANCE: {
+        update_fork_target(lane);
+        auto cmd = controller_.follow(
+          lane, config_.fork_approach_cap, config_.fork_approach_limit,
+          std::nullopt, config_.fork_curve_scale);
+        if (now_sec - entered_ >= config_.fork_sign_advance_sec) {
+          transition(MissionState::OUT_FORK_COMMIT, now_sec);
+        }
+        return cmd;
+      }
+
+      case MissionState::OUT_FORK_COMMIT: {
+        update_fork_target(lane);
+        auto cmd = controller_.fork(lane, fork_decision_, fork_target_error_);
+        const bool reacquired =
+          lane.valid && !lane.fork_seen && std::abs(lane.center_error) < 0.45;
+        if ((reacquired && now_sec - entered_ >= config_.fork_commit_min_sec) ||
+          now_sec - entered_ >= config_.fork_commit_timeout_sec)
+        {
+          transition(MissionState::OUT_TO_ARUCO, now_sec);
+        }
+        return cmd;
+      }
+
+      case MissionState::OUT_TO_ARUCO:
+        if (marker_confirmed()) {
+          controller_.stop();
+          transition(MissionState::OUT_ARUCO_STOP, now_sec);
+          return {};
+        }
+        return controller_.follow(
+          lane, config_.post_fork_cap, config_.post_fork_limit, config_.post_fork_min);
+
+      case MissionState::OUT_ARUCO_STOP:
+        controller_.stop();
+        if (marker_cleared()) transition(MissionState::OUT_RESUME, now_sec);
+        return {};
+
+      case MissionState::OUT_RESUME:
+        if (red_streak_ >= config_.light_confirm_frames) {
+          controller_.stop();
+          transition(MissionState::OUT_FINISH_STOP, now_sec);
+          return {};
+        }
+        return controller_.follow(
+          lane, config_.post_fork_cap, config_.post_fork_limit, config_.post_fork_min);
+
+      case MissionState::OUT_FINISH_STOP:
+        controller_.stop();
+        return {};
+
+      default:
+        controller_.stop();
+        return {};
+    }
+  }
+
+  Command step_in(const LaneObs & lane, double now_sec) {
+    // IN is deliberately isolated from OUT. Only green -> entry is active in
+    // this iteration; dash-line side selection and stop-line lap counting are
+    // explicit future gates before IN_ENTRY can transition to IN_LAP/IN_EXIT.
+    switch (state_) {
+      case MissionState::IN_WAIT_GREEN:
+        if (green_streak_ >= config_.light_confirm_frames) {
+          transition(MissionState::IN_ENTRY, now_sec);
+        }
+        return {};
+      case MissionState::IN_ENTRY:
+      case MissionState::IN_LAP:
+        return controller_.follow(lane, config_.s_curve_cap, config_.s_curve_limit);
+      case MissionState::IN_EXIT:
+        if (marker_confirmed()) {
+          controller_.stop();
+          transition(MissionState::IN_ARUCO_STOP, now_sec);
+          return {};
+        }
+        return controller_.follow(lane, config_.post_fork_cap, config_.post_fork_limit);
+      case MissionState::IN_ARUCO_STOP:
+        controller_.stop();
+        if (marker_cleared()) transition(MissionState::IN_RESUME, now_sec);
+        return {};
+      case MissionState::IN_RESUME:
+        if (red_streak_ >= config_.light_confirm_frames) {
+          controller_.stop();
+          transition(MissionState::IN_FINISH_STOP, now_sec);
+          return {};
+        }
+        return controller_.follow(lane, config_.post_fork_cap, config_.post_fork_limit);
+      case MissionState::IN_FINISH_STOP:
+      default:
+        controller_.stop();
+        return {};
+    }
+  }
 
   Command step(const LaneObs & lane, double now_sec) {
-    if (route_mode_ == "LANE") return controller_.follow(lane, config_.speed_max, config_.s_curve_limit);
-    if (started_ <= 0.0) { started_ = entered_ = now_sec; }
-    if (state_ != "OUT_WAIT_GREEN" && state_ != "OUT_FINISH_STOP" &&
-      now_sec - started_ >= config_.finish_min_elapsed_sec && red_streak_ >= config_.light_confirm_frames) {
-      transition("OUT_FINISH_STOP", now_sec);
+    if (route_mode_ == RouteMode::LANE) {
+      return controller_.follow(lane, config_.speed_max, config_.s_curve_limit);
     }
-    if (state_ == "OUT_WAIT_GREEN") {
-      if (green_streak_ >= config_.light_confirm_frames) { started_ = now_sec; transition("OUT_LAUNCH", now_sec); }
-      return {};
-    }
-    if (state_ == "OUT_LAUNCH") {
-      auto cmd = controller_.follow(lane, config_.launch_cap, config_.straight_limit);
-      if (now_sec - entered_ > config_.launch_min_sec) transition("OUT_S_CURVE", now_sec);
-      return cmd;
-    }
-    if (state_ == "OUT_S_CURVE") {
-      auto cmd = controller_.follow(lane, config_.s_curve_cap, config_.s_curve_limit);
-      if (sign_decision() || lane.fork_seen) transition("OUT_FORK_APPROACH", now_sec);
-      return cmd;
-    }
-    if (state_ == "OUT_FORK_APPROACH") {
-      auto cmd = controller_.follow(
-        lane, config_.fork_approach_cap, config_.fork_approach_limit,
-        std::nullopt, config_.fork_curve_scale);
-      if (auto decision = sign_decision()) { fork_decision_ = *decision; transition("OUT_FORK_COMMIT", now_sec); }
-      return cmd;
-    }
-    if (state_ == "OUT_FORK_COMMIT") {
-      auto cmd = controller_.fork(lane, fork_decision_);
-      const bool reacquired = lane.valid && !lane.fork_seen && std::abs(lane.center_error) < 0.45;
-      if ((reacquired && now_sec - entered_ > config_.fork_commit_min_sec) ||
-        now_sec - entered_ > config_.fork_commit_timeout_sec) transition("OUT_POST_FORK", now_sec);
-      return cmd;
-    }
-    if (state_ == "OUT_POST_FORK") {
-      return controller_.follow(lane, config_.post_fork_cap, config_.post_fork_limit, config_.post_fork_min);
-    }
-    controller_.stop();
-    return {};
+    return route_mode_ == RouteMode::IN ? step_in(lane, now_sec) : step_out(lane, now_sec);
   }
 
   void control_loop() {
@@ -1244,10 +1555,10 @@ private:
       const double now_sec = now().seconds();
       update_light(now_sec);
       lane = latest_lane_; marker = target_marker_; markers = marker_ids_;
+      update_marker(marker);
       const double light_age = (now() - light_received_).seconds();
       light = light_age >= 0.0 && light_age <= config_.light_stale_sec ? light_state_ : 0;
-      cmd = marker ? Command{} : step(lane, now_sec);
-      if (marker) controller_.stop();
+      cmd = step(lane, now_sec);
       last_command_ = cmd;
       decision = sign_decision();
       speed_max = config_.speed_max;
@@ -1447,7 +1758,7 @@ private:
     cv::arrowedLine(view, steer_origin,
       steering_tip(steer_origin, cmd.steering, static_cast<int>(view.rows * 0.45)),
       cv::Scalar(0, 0, 255), 2, cv::LINE_AA, 0, 0.2);
-    put_outlined_text(view, "mask=WHITE|YELLOW " + std::to_string(view.cols) + "x" +
+    put_outlined_text(view, "mask=STEERING " + std::to_string(view.cols) + "x" +
       std::to_string(view.rows),
       cv::Point(8, 20));
     std::ostringstream status;
@@ -1475,7 +1786,7 @@ private:
       std::lock_guard<std::mutex> lock(mutex_);
       if (latest_frame_.empty()) return;
       lane_debug = latest_lane_debug_; lane = latest_lane_;
-      cmd = last_command_; state = state_;
+      cmd = last_command_; state = state_name(state_);
       markers = marker_ids_; marker_corners = marker_corners_;
       light = light_state_; config = config_;
       if (!detection_frame_.empty()) {
@@ -1542,6 +1853,7 @@ private:
   Command last_command_;
   bool target_marker_{false}, publish_debug_{false};
   int light_state_{0}, green_streak_{0}, red_streak_{0};
+  int marker_seen_streak_{0}, marker_clear_streak_{0};
   uint64_t detection_sequence_{0}, last_light_sequence_{0};
   int32_t detection_source_sec_{0};
   uint32_t detection_source_nanosec_{0};
@@ -1549,8 +1861,11 @@ private:
   uint32_t processed_image_nanosec_{0};
   rclcpp::Time light_received_{0, 0, RCL_ROS_TIME};
   rclcpp::Time detection_stamp_{0, 0, RCL_ROS_TIME};
-  std::string state_, fork_decision_, route_mode_, image_topic_, control_topic_, detections_topic_;
-  double started_{0.0}, entered_{0.0}, debug_hz_{5.0}, perception_hz_{20.0}, control_hz_{20.0};
+  MissionState state_{MissionState::OUT_WAIT_GREEN};
+  RouteMode route_mode_{RouteMode::OUT};
+  std::string fork_decision_, image_topic_, control_topic_, detections_topic_;
+  std::optional<double> fork_target_error_;
+  double entered_{0.0}, debug_hz_{5.0}, perception_hz_{20.0}, control_hz_{20.0};
   double detection_hz_target_{20.0};
   uint64_t perception_count_{0}, detection_count_{0};
   double perception_ms_sum_{0.0}, perception_ms_max_{0.0};

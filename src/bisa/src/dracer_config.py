@@ -72,6 +72,10 @@ class LaneVisionConfig:
     yellow_a_max: int = 140
     yellow_b_min: int = 165
     yellow_b_max: int = 255
+    out_white_only: bool = True
+    fork_target_y0: float = 0.05
+    fork_target_y1: float = 0.45
+    fork_target_min_area_ratio: float = 0.002
     # CLAHE applied to the L channel before LAB thresholding AND before the
     # Canny/Hough lane-line pass (previously hardcoded clip=2.0 tile=8).
     lab_clahe_clip: float = 2.0
@@ -147,17 +151,17 @@ class ThrottleConfig:
     ``speed_min``/``speed_max`` are the single source of truth for the moving
     speed band: every commanded throttle (while not stopped) is mapped into
     ``[speed_min, speed_max]``. Change these two to retune the overall speed.
-    The default per-state caps all follow ``speed_max`` so straight sections
-    can reach the configured maximum. Steering and curvature continuously
-    reduce the command toward ``speed_min``.
+    OUT uses ``speed_max`` from green to sign and continuously reduces it by
+    steering demand and curvature. Per-state caps remain for fork, post-fork,
+    and the isolated IN skeleton.
     """
 
     speed_min: float = 0.20
     speed_max: float = 0.30
-    launch_cap: float = 0.30
-    s_curve_cap: float = 0.30
-    fork_approach_cap: float = 0.30
-    fork_commit_cap: float = 0.30
+    launch_cap: float = 0.24
+    s_curve_cap: float = 0.24
+    fork_approach_cap: float = 0.24
+    fork_commit_cap: float = 0.22
     post_fork_cap: float = 0.30
     post_fork_min: float = 0.20
     ramp_up_per_cmd: float = 0.015
@@ -185,6 +189,7 @@ class SteeringConfig:
     curve_response_power: float = 0.65
     curve_steer_boost: float = 0.20
     fork_curve_scale: float = 0.25
+    fork_forced_error: float = 0.45
     wheelbase_m: float = 0.17
     lateral_scale_m: float = 0.30
     max_steer_deg: float = 30.0
@@ -206,6 +211,8 @@ class ArucoConfig:
     enabled: bool = True
     dictionary: str = "DICT_6X6_50"
     target_id: int = 3
+    confirm_frames: int = 2
+    clear_frames: int = 3
     detect_hz: float = 10.0
 
 
@@ -285,10 +292,9 @@ class MissionConfig:
 
     route_mode: str = "OUT"
     control_hz: float = 10.0
-    launch_min_sec: float = 1.0
+    fork_sign_advance_sec: float = 1.5
     fork_commit_min_sec: float = 0.8
     fork_commit_timeout_sec: float = 1.8
-    finish_min_elapsed_sec: float = 8.0
     debug_log_hz: float = 1.0
 
 

@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from bisa.dracer_config import AutonomousConfig
-from bisa.lane_perception import LaneObs, LanePerception
+from bisa.lane_perception import LaneObs, LanePerception, PathCandidate
 from bisa.mission_controller import (
     LaneController,
     fresh_light_state,
@@ -81,6 +81,23 @@ def test_throttle_ignores_straight_noise_and_slows_for_curve():
     assert config.throttle.speed_min <= curve < config.throttle.speed_max
 
 
+def test_fork_sections_keep_safe_speed_caps():
+    config = AutonomousConfig()
+    throttle = config.throttle
+
+    assert throttle.fork_approach_cap == pytest.approx(0.24)
+    assert throttle.fork_commit_cap == pytest.approx(0.22)
+    assert throttle.post_fork_cap == pytest.approx(throttle.speed_max)
+    assert all(
+        throttle.speed_min <= cap <= throttle.speed_max
+        for cap in (
+            throttle.fork_approach_cap,
+            throttle.fork_commit_cap,
+            throttle.post_fork_cap,
+        )
+    )
+
+
 def test_lane_pipeline_prepares_lab_once_per_frame(monkeypatch):
     """Mask and Hough must reuse one LAB conversion and one CLAHE result."""
 
@@ -115,9 +132,118 @@ def test_lane_mask_keeps_white_and_yellow_but_rejects_road_and_skin():
     ]], dtype=np.uint8)
     frame = np.zeros((1, 4, 3), dtype=np.uint8)
 
-    mask = perception.build_lane_mask(frame, prepared_lab=prepared_lab)
+    mask = perception.build_lane_mask(
+        frame, prepared_lab=prepared_lab, include_yellow=True
+    )
 
     assert mask.tolist() == [[255, 255, 0, 0]]
+
+
+def test_out_lane_mask_excludes_yellow_split_line():
+    config = AutonomousConfig()
+    config.mission.route_mode = "OUT"
+    config.lane.morph_open_kernel = 1
+    config.lane.morph_close_kernel = 1
+    perception = LanePerception(config)
+    prepared_lab = np.array([[
+        [230, 128, 128],  # white OUT boundary
+        [210, 127, 190],  # yellow IN split
+    ]], dtype=np.uint8)
+
+    mask = perception.build_lane_mask(
+        np.zeros((1, 2, 3), dtype=np.uint8), prepared_lab=prepared_lab
+    )
+
+    assert mask.tolist() == [[255, 0]]
+
+
+class _SignDetector:
+    def __init__(self, direction=None):
+        self.direction = direction
+
+    def count(self, name, _window):
+        return 99 if name == self.direction else 0
+
+
+def test_out_fsm_curve_follows_until_sign_then_orders_fork_and_finish():
+    config = AutonomousConfig()
+    config.detector.light_confirm_frames = 1
+    config.mission.fork_sign_advance_sec = 0.2
+    config.mission.fork_commit_min_sec = 0.1
+    config.mission.fork_commit_timeout_sec = 0.3
+    config.aruco.confirm_frames = 2
+    config.aruco.clear_frames = 3
+    controller = LaneController(config)
+    fsm = make_course_fsm(config, controller)
+    lane = LaneObs(valid=True)
+    no_sign = _SignDetector()
+
+    fsm.step(lane, no_sign, 1.0, light_state="green", light_seq=1)
+    assert fsm.state == "OUT_TO_FORK"
+    # Elapsed time and S-shaped curvature never advance a mission state.
+    curved_lane = LaneObs(valid=True, curvature=0.8, signed_curvature=0.5)
+    cmd = fsm.step(curved_lane, no_sign, 20.0)
+    assert fsm.state == "OUT_TO_FORK"
+    assert config.throttle.speed_min <= cmd.throttle <= config.throttle.speed_max
+
+    left = _SignDetector("sign_left")
+    fsm.step(lane, left, 20.1)
+    assert fsm.state == "OUT_FORK_SIGN_ADVANCE"
+    fsm.step(lane, left, 20.4)
+    assert fsm.state == "OUT_FORK_COMMIT"
+
+    fork_lane = LaneObs(
+        valid=True,
+        fork_seen=True,
+        left_branch=PathCandidate(0.55, 0.1, 100.0),
+    )
+    cmd = fsm.step(fork_lane, left, 20.5)
+    assert cmd.steering > 0.0
+    fsm.step(lane, left, 20.8)
+    assert fsm.state == "OUT_TO_ARUCO"
+
+    # Red is ignored until the ordered ArUco stop/release has completed.
+    fsm.step(lane, no_sign, 20.9, light_state="red", light_seq=2)
+    assert fsm.state == "OUT_TO_ARUCO"
+    fsm.step(lane, no_sign, 21.0, marker_visible=True)
+    fsm.step(lane, no_sign, 21.1, marker_visible=True)
+    assert fsm.state == "OUT_ARUCO_STOP"
+    for now in (21.2, 21.3, 21.4):
+        fsm.step(lane, no_sign, now, marker_visible=False)
+    assert fsm.state == "OUT_RESUME"
+    fsm.step(lane, no_sign, 21.5, light_state="red", light_seq=3)
+    assert fsm.state == "OUT_FINISH_STOP"
+
+
+def test_out_startup_crawls_when_white_lane_is_not_yet_visible():
+    config = AutonomousConfig()
+    config.detector.light_confirm_frames = 1
+    fsm = make_course_fsm(config, LaneController(config))
+    no_sign = _SignDetector()
+
+    fsm.step(LaneObs(valid=False), no_sign, 1.0, light_state="green", light_seq=1)
+    cmd = fsm.step(LaneObs(valid=False), no_sign, 1.1)
+
+    assert fsm.state == "OUT_TO_FORK"
+    assert cmd.throttle == pytest.approx(config.throttle.speed_min)
+    assert cmd.steering == pytest.approx(0.0)
+
+
+def test_in_route_never_enters_out_states():
+    config = AutonomousConfig()
+    config.mission.route_mode = "IN"
+    config.detector.light_confirm_frames = 1
+    fsm = make_course_fsm(config, LaneController(config))
+
+    fsm.step(
+        LaneObs(valid=True),
+        _SignDetector(),
+        1.0,
+        light_state="green",
+        light_seq=1,
+    )
+
+    assert fsm.state == "IN_ENTRY"
 
 
 def test_hough_selects_only_nearest_lane_on_each_side(monkeypatch):

@@ -1079,3 +1079,81 @@ Error ID: c30cee0a67a149e9a1f2f37e3e5ce2ea
 - 비대화형 SSH 백그라운드 launch가 셸에서 보낸 SIGINT를 무시해 종료 대기 상태가 됐다. launch 부모에 SIGTERM을 보낸 뒤 남은 detector/C++ 시험 자식에도 SIGTERM을 보내 정리했다. 이는 실행 기능 오류가 아니라 시험 셸의 백그라운드 signal 상속 문제이며, 측정 구간의 launch 로그에는 ERROR/Traceback/process died가 없었다.
 - 최종 확인에서 관련 launch, camera, detector, C++ core 및 control 프로세스가 남아 있지 않았다.
 - 실제 `control_node -> PCA9685 -> 서보/ESC`와 joystick 수동 전환/E-stop은 물리 출력이 수반되므로 검증하지 않았다. 완전한 실차 최종 검증에는 바퀴를 지면에서 띄운 상태에서 사용자 명시 확인 후 별도 시험이 필요하다.
+---
+
+## 2026-07-14 — AUTO 출발 무출력 및 정지 상태 전이 수정
+
+### 요청 및 확인된 원인
+
+- AUTO에서는 모터가 출발하지 않지만 MANUAL은 정상이고, 차량이 정지한 상태에서도 `OUT_S_CURVE`까지 상태가 진행되는 현상을 수정했다.
+- 14:41 차량 로그에서 초록 확정 후 `OUT_WAIT_GREEN -> OUT_ENTRY -> OUT_S_CURVE`가 발생했지만, 기존 `OUT_ENTRY` 전이는 실제 이동과 무관한 1초 벽시계 타이머였다.
+- OUT은 노란 IN 분기선을 조향에서 제외한다. 출발 격자에서 흰 차선을 아직 못 잡으면 `Controller::follow()`가 대기 상태의 이전 스로틀 0을 계속 보존해 AUTO가 영구 정지하는 시작 교착이 있었다.
+- `OUT_S_CURVE`는 S자를 지난 상태가 아니라 S자 구간을 주행 중인 상태다. 다만 그 상태로의 진입은 실제 출발 확인 뒤에만 이뤄져야 한다.
+
+### 변경 파일 및 핵심 변경
+
+- `src/bisa_cpp/src/bisa_autonomous_node.cpp`
+  - 출발 전용 `Controller::launch()`를 추가했다. OUT 흰 차선이 아직 유효하지 않아도 조향은 중앙으로 감쇠하면서 최소 구름 스로틀 `speed_min`을 즉시 출력한다.
+  - 화면 하단 절반을 160x60 회색 영상으로 축소·블러 처리하고 인접 프레임 평균 절대차로 장면 이동을 판단한다.
+  - `OUT_ENTRY`의 1초 벽시계 전이를 제거하고, 3프레임 연속 영상 이동이 확인된 제어 시간만 누적해 `OUT_S_CURVE`로 전이한다. 모터/ESC가 실제로 차량을 움직이지 못하면 상태도 진행하지 않는다.
+  - 디버그 영상에 `motion=MOVING/still`, 변화 점수, OUT_ENTRY 이동 누적 시간을 표시한다.
+- `src/bisa/config/dracer_params.yaml`
+  - `mission.entry_motion_pixel_threshold: 1.5`
+  - `mission.entry_motion_confirm_frames: 3`
+  - 실제 정지 카메라 160프레임의 점수는 min 0.239, mean 0.291, p95 0.422, max 0.693이었다. 합성 이동은 약 2.49여서 두 분포 사이의 1.5를 기본 임계값으로 정했다.
+- 변경 전 차량 백업: `/tmp/bisa_pre_auto_launch_motion_fix_20260714.tar.gz`.
+
+### 검증 결과
+
+- 차량에서 `bisa_cpp` 재빌드와 `bisa` 재빌드 성공, `git diff --check` 통과, 임시 작업본과 차량 소스 SHA-256 일치.
+- 액추에이터 노드 없이 `/test/control`로 실행한 반복 정지 영상 시험: 80개 명령 중 양수 69개, 최소/최대 양수 스로틀 모두 0.200. 상태는 `OUT_ENTRY`에 머물고 `OUT_S_CURVE` 전이가 없었다.
+- 같은 비구동 합성 이동 영상 시험: AUTO 스로틀 0.200을 출력하고, `OUT_ENTRY` 진입 약 1.15초 뒤 `OUT_S_CURVE`로 전이했다.
+- 실제 USB 카메라를 정지해 둔 비구동 시험: 80개 명령 중 양수 70개, 스로틀 0.200. 4초 동안 `OUT_ENTRY`에 머물러 정지 노이즈로 전이하지 않았다.
+- Python 회귀 시험은 첫 시도에서 빌드 후 `install/setup.bash`를 다시 source하지 않아 `ModuleNotFoundError: bisa`로 수집 실패했다. 환경을 source한 재시도는 `17 passed`였다.
+- 모든 시험은 `control_node` 없이 실행해 PCA9685/모터/서보를 구동하지 않았다. 종료 후 camera, C++ autonomous 및 임시 publisher 잔류 프로세스가 없음을 확인했다.
+
+### 미완료/현장 확인
+
+- 실제 바닥 주행은 안전상 실행하지 않았다. 다음 실차 주행에서 디버그의 `motion` 점수와 `entry` 누적값을 확인하고, 트랙 조명에서 이동 점수가 1.5를 안정적으로 넘지 못할 때만 임계값을 재조정한다.
+
+---
+
+## 2026-07-14 — OUT S 상태 제거 및 곡률 기반 pre-fork 주행으로 변경
+
+### 사용자 결정과 설계 변경
+
+- 사용자가 S자를 별도 미션 상태로 구분하지 않고, 출발부터 표지판을 보고 갈림길 방향을 지정하기 전까지 곡률 기반으로 속도를 조절하는 구조를 선택했다.
+- 바로 앞 절의 영상 움직임 기반 `OUT_ENTRY -> OUT_S_CURVE` 수정은 이 결정으로 대체됐다. 해당 motion detector, 파라미터, 디버그 표시는 생산 코드에서 다시 제거했다.
+- AUTO 0 스로틀 교착을 해결하는 출발 최소속도 로직은 `follow_with_startup()`으로 유지했다.
+
+### 최종 OUT 상태 흐름
+
+`OUT_WAIT_GREEN -> OUT_TO_FORK -> OUT_FORK_SIGN_ADVANCE -> OUT_FORK_COMMIT -> OUT_TO_ARUCO -> OUT_ARUCO_STOP -> OUT_RESUME -> OUT_FINISH_STOP`
+
+- `OUT_TO_FORK`는 경과 시간이나 S자 곡률로 전이하지 않는다. 좌/우 표지판의 시간 투표가 확정될 때만 방향을 잠그고 fork 접근 상태로 넘어간다.
+- 초록불부터 표지판 확정 전까지 상태 cap 대신 전역 `speed_max=0.30`을 사용한다. 기존 스케줄러가 흰 차선의 조향 요구량과 곡률을 이용해 커브에서 `speed_min=0.20` 방향으로 연속 감속한다.
+- 출발 격자에서 흰 차선을 아직 못 잡으면 중앙 조향으로 0.20 직진 출발하고, 흰 차선이 잡힌 뒤 곡률 스케줄링으로 자연스럽게 이어진다.
+- `lane.out_white_only=true`를 유지해 OUT 전체의 중심, 곡률, 조향 및 fork 후보 목표가 흰색 마스크만 사용한다. 동시에 보이는 노란 IN 점선은 OUT 조향에 들어가지 않는다.
+
+### 변경 파일
+
+- `src/bisa_cpp/src/bisa_autonomous_node.cpp`
+- `src/bisa/config/dracer_params.yaml`
+- `src/bisa/src/mission_controller.py`
+- `src/bisa/src/dracer_config.py`
+- `src/bisa/src/param_gui_node.py`
+- `src/bisa/test/test_perception_timing.py`
+- 폐기된 `mission.out_entry_sec`, `mission.entry_motion_*`와 GUI의 entry seconds 슬라이더를 제거했다.
+- 변경 전 차량 백업: `/tmp/bisa_pre_curve_to_fork_fsm_20260714.tar.gz`.
+
+### 검증 결과
+
+- 차량에서 `bisa_cpp`, `bisa` 빌드 성공, `git diff --check` 통과, 회귀 시험 `18 passed`.
+- 액추에이터 없는 C++ 합성 영상 시험에서 표지판 없이 4초간 장면을 계속 움직여도 상태 전이는 `OUT_WAIT_GREEN -> OUT_TO_FORK` 하나뿐이었다.
+- 같은 시험에 좌 표지판을 넣으면 `OUT_TO_FORK -> OUT_FORK_SIGN_ADVANCE -> OUT_FORK_COMMIT -> OUT_TO_ARUCO` 순서로만 전이했다.
+- 흰색 직선 합성 차선은 스로틀이 0.200에서 0.300까지 상승했고, 흰색 커브 합성 차선은 최대 0.259로 감속했다.
+- 모든 통합 시험은 `/test/control`을 사용하고 `control_node`를 실행하지 않아 PCA9685, 모터 및 서보를 구동하지 않았다. 종료 후 시험 프로세스가 남지 않았다.
+
+### 미완료
+
+- 실제 바닥 주행은 수행하지 않았다. 실차에서는 흰색 차선 마스크와 표지판 인식 거리, `fork_sign_advance_sec=1.5`만 현장 확인하면 된다.

@@ -27,8 +27,8 @@ lane:
   lab_a_max: 145               # a 상한 — 붉은/주황 물체 제외
   lab_b_min: 122               # b 하한 — 파란 바닥 제외
   lab_b_max: 148               # b 상한 — 노란/주황 물체 제외
-  # 실제 주행 차선 마스크 = white 범위 OR yellow 범위. 노면 마스크와 분리해
-  # 사람/물체의 명도 경계가 Hough 차선으로 들어가지 않게 한다.
+  # 흰색/노란색은 반드시 별도 마스크로 유지한다. OUT은 white만 사용하고,
+  # IN은 추후 점선 기반 진입/탈출을 위해 white|yellow를 사용한다.
   white_l_min: 200             # 밝은 흰색 페인트
   white_l_max: 255
   white_a_min: 115             # 무채색 128 주변
@@ -41,6 +41,10 @@ lane:
   yellow_a_max: 140
   yellow_b_min: 165            # 노란색 핵심: 높은 b, 피부/노면 제외
   yellow_b_max: 255
+  out_white_only: true         # OUT에서는 노란 IN 분기선을 조향 피팅에서 완전히 제외
+  fork_target_y0: 0.05         # X자 상단 분기 후보를 찾을 ROI 시작(차선 ROI 비율)
+  fork_target_y1: 0.45         # X자 상단 분기 후보를 찾을 ROI 끝
+  fork_target_min_area_ratio: 0.002 # 상단 후보에서 제거할 작은 흰색 노이즈
   lab_clahe_clip: 2.0          # 이진화/캐니 전 L채널 CLAHE 대비제한
   lab_clahe_tile: 8            # CLAHE 타일 그리드 크기
   morph_open_kernel: 3         # 열림 커널 — 작은 잡티 제거
@@ -104,11 +108,11 @@ throttle:
   # 직선 deadband 안에서는 speed_max, 조향/곡률이 커지면 speed_min 쪽으로 감속한다.
   speed_min: 0.20          # 이동 속도밴드 하한(정지 아닌 최저속)
   speed_max: 0.30          # 직선 목표 최고속
-  launch_cap: 0.30         # 상태별 상한은 기본적으로 전역 최고속을 따른다
-  s_curve_cap: 0.30        # S자 안의 직선에서도 최고속 허용, 커브에서는 동적 감속
-  fork_approach_cap: 0.30  # 표지판 대기 상태가 0.20에 영구 고정되지 않도록 함
-  fork_commit_cap: 0.30    # 갈림 조향량/곡률에 따라 동적 감속
-  post_fork_cap: 0.30      # 갈림길 이후 크루즈(종단) 속도 상한
+  launch_cap: 0.24         # 호환용(OUT은 초록~표지판까지 speed_max+곡률 스케줄 사용)
+  s_curve_cap: 0.24        # IN 진입/랩 골격용 속도 상한
+  fork_approach_cap: 0.24  # 표지판 후 1.5 s 전진 시 약 0.36 m 목표
+  fork_commit_cap: 0.22    # X자 강제 조향은 가장 낮은 별도 상한 사용
+  post_fork_cap: 0.30      # 갈림길 이후 일반 차선의 직선에서만 전역 최고속 허용
   post_fork_min: 0.20      # 전 구간에서 동일한 전역 최저속까지 감속 허용
   ramp_up_per_cmd: 0.015   # 20Hz에서 틱당 가속량(감속은 즉시 반영)
   steer_slowdown: 0.22     # 조향 클수록 감속하는 계수
@@ -127,6 +131,7 @@ steering:
   curve_response_power: 0.65  # 1보다 작아 커브 진입부터 반응하되 sqrt보다 완만
   curve_steer_boost: 0.20     # 커브에서만 최대 20% 조향 증폭(직선=0% 증폭)
   fork_curve_scale: 0.25      # 갈림길 ROI가 만든 가짜 곡률/상쇄 영향을 25%로 제한
+  fork_forced_error: 0.45     # X 상단 후보를 못 잡았을 때 LEFT(+)/RIGHT(-) 강제 목표
   wheelbase_m: 0.17          # 실차 전·후차축 거리(자전거 모델, m)
   lateral_scale_m: 0.30      # 오차 1.0을 몇 m 횡오프셋으로 볼지
   max_steer_deg: 35.0        # 조향각 정규화 기준(풀락 각도)
@@ -143,7 +148,9 @@ steering:
 aruco:
   enabled: true              # ArUco 마커 검출 사용 여부
   dictionary: DICT_6X6_50    # ArUco 사전
-  target_id: 3               # 이 ID 마커 보이면 즉시 정지/홀드
+  target_id: 3               # OUT_TO_ARUCO에서 이 ID가 확인되면 정지
+  confirm_frames: 2          # 연속 확인 프레임 수(단발 오검출 방지)
+  clear_frames: 3            # 연속 미검출 프레임 수(깜빡임 재출발 방지)
   detect_hz: 20.0            # 마커 검출 주기(Hz) — 온보드 루프와 통일
 
 # YOLO 검출 프레임 전처리(CLAHE→채도부스트→밝기/대비/감마). 레퍼런스처럼
@@ -193,10 +200,12 @@ traffic_light:
   classifier: lab      # 사용할 색분류기: color / lit / lab
 
 mission:
-  route_mode: OUT               # 코스 모드(OUT=본선, LANE=차선전용 테스트)
+  route_mode: OUT               # 코스 모드(OUT/IN/LANE), 각 FSM은 완전히 분리
   control_hz: 20.0              # 제어 루프 주기(Hz)
-  launch_min_sec: 1.0           # 출발(LAUNCH) 상태 최소 유지 시간(s)
+  # OUT은 초록불 뒤 별도 ENTRY/S 상태 없이 흰 차선을 곡률 기반 추종하다가
+  # 표지판 투표가 확정될 때만 fork 접근 상태로 넘어간다.
+  # 거리계가 없으므로 표지판 이후 0.3~0.5m는 시간으로 근사한다. 현장 실측 후 조정.
+  fork_sign_advance_sec: 1.5    # 표지 확정 후 정상 차선으로 추가 전진하는 시간(s)
   fork_commit_min_sec: 0.8      # 갈림길 커밋 최소 유지 시간(s)
   fork_commit_timeout_sec: 1.8  # 커밋 강제 종료 타임아웃(s)
-  finish_min_elapsed_sec: 8.0   # 출발 후 이 시간(s) 지나야 red 정지 창이 열림
   debug_log_hz: 1.0             # 상태 로그 출력 주기(Hz)

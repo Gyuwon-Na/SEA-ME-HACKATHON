@@ -162,23 +162,41 @@ class LaneController:
         throttle = self.throttle_scheduler(cap, steer, lane.curvature, section_min=section_min)
         return ControlCmd(throttle, steer)
 
+    def follow_with_startup(
+        self, lane: LaneObs, cap: float, steer_limit: float
+    ) -> ControlCmd:
+        """Follows curvature while allowing a straight crawl off the start grid."""
+
+        if lane.valid:
+            return self.lane_follow(lane, cap, steer_limit)
+        steer = self.rate_limit(
+            self.prev_steer * self.config.steering.lost_decay,
+            self.prev_steer,
+            self.config.steering.rate_limit_per_cmd,
+        )
+        self.prev_steer = steer
+        self.prev_throttle = max(
+            self.prev_throttle, self.config.throttle.speed_min
+        )
+        return ControlCmd(self.prev_throttle, steer)
+
 
 class BaseCourseFSM:
     """Shared helpers for the course state machines."""
 
     def __init__(self, config: AutonomousConfig, controller: LaneController):
-        """Initializes common timing and finish bookkeeping."""
+        """Initializes shared timing and debounced mission observations."""
 
         self.config = config
         self.controller = controller
         self.state = ""
         self.enter_t = 0.0
-        self.start_t = 0.0
-        self.finish_crossed = False
         # Consecutive control ticks the traffic-light verdict has held green/red.
         self._green_streak = 0
         self._red_streak = 0
         self._last_light_seq = None
+        self._marker_seen_streak = 0
+        self._marker_clear_streak = 0
 
     def update_light(self, light_state, light_seq=None) -> None:
         """Counts consecutive verdicts from distinct detector frames only.
@@ -220,18 +238,25 @@ class BaseCourseFSM:
 
         return now - self.enter_t
 
-    def finish_window_open(self, now: float) -> bool:
-        """Latches the red-listen finish window open after enough elapsed time.
+    def update_marker(self, visible: bool) -> None:
+        """Debounces ArUco appearance and disappearance."""
 
-        The detect model has no finish_line class, so the finish window is a
-        pure mission timer: once ``finish_min_elapsed_sec`` has passed since
-        launch (so the start light is out of view), a confirmed red verdict is
-        allowed to stop the car. The latch never re-closes.
-        """
+        if visible:
+            self._marker_seen_streak = min(
+                self._marker_seen_streak + 1, self.config.aruco.confirm_frames
+            )
+            self._marker_clear_streak = 0
+        else:
+            self._marker_clear_streak = min(
+                self._marker_clear_streak + 1, self.config.aruco.clear_frames
+            )
+            self._marker_seen_streak = 0
 
-        if not self.finish_crossed and now - self.start_t >= self.config.mission.finish_min_elapsed_sec:
-            self.finish_crossed = True
-        return self.finish_crossed
+    def marker_confirmed(self) -> bool:
+        return self._marker_seen_streak >= self.config.aruco.confirm_frames
+
+    def marker_cleared(self) -> bool:
+        return self._marker_clear_streak >= self.config.aruco.clear_frames
 
     def single_lane_reacquired(self, lane: LaneObs) -> bool:
         """Checks whether branch geometry has returned to one stable lane."""
@@ -251,40 +276,27 @@ class BaseCourseFSM:
 
 
 class OutCourseFSM(BaseCourseFSM):
-    """FSM for the Out/Base route: green launch, S-curve, sign fork, red stop.
-
-    Reachable path:
-        OUT_WAIT_GREEN -> OUT_LAUNCH -> OUT_S_CURVE -> OUT_FORK_APPROACH
-        -> OUT_FORK_COMMIT -> OUT_POST_FORK -(confirmed red)-> OUT_FINISH_STOP
-
-    OUT_POST_FORK cruises to the finish; the red stop is handled by the global
-    gate in :meth:`step`, not by a dedicated finish-approach state.
-    """
+    """Production OUT FSM, isolated from every IN-course transition."""
 
     def __init__(self, config: AutonomousConfig, controller: LaneController):
-        """Creates the OUT course state machine."""
-
         super().__init__(config, controller)
         self.state = "OUT_WAIT_GREEN"
         self.fork_decision: str | None = None
+        self.fork_target_error: float | None = None
 
-    def choose_branch_target(self, lane: LaneObs, decision: str | None) -> float:
-        """Selects branch candidate error or applies a sign-based fallback bias."""
-
-        if decision == "LEFT" and lane.left_branch is not None:
-            return lane.left_branch.target_error
-        if decision == "RIGHT" and lane.right_branch is not None:
-            return lane.right_branch.target_error
-        if decision == "LEFT":
-            return lane.center_error + 0.18
-        if decision == "RIGHT":
-            return lane.center_error - 0.18
-        return lane.center_error
+    def update_fork_target(self, lane: LaneObs) -> None:
+        if self.fork_decision == "LEFT" and lane.left_branch is not None:
+            self.fork_target_error = lane.left_branch.target_error
+        if self.fork_decision == "RIGHT" and lane.right_branch is not None:
+            self.fork_target_error = lane.right_branch.target_error
 
     def control_fork_commit(self, lane: LaneObs) -> ControlCmd:
-        """Controls the committed fork path without changing the locked decision."""
-
-        target_error = self.choose_branch_target(lane, self.fork_decision)
+        if self.fork_target_error is not None:
+            target_error = self.fork_target_error
+        elif self.fork_decision == "LEFT":
+            target_error = self.config.steering.fork_forced_error
+        else:
+            target_error = -self.config.steering.fork_forced_error
         virtual_lane = lane.with_center_error(target_error)
         steer = self.controller.steering_from_lane(
             virtual_lane,
@@ -292,92 +304,139 @@ class OutCourseFSM(BaseCourseFSM):
             curve_scale=self.config.steering.fork_curve_scale,
         )
         throttle = self.controller.throttle_scheduler(
-            self.config.throttle.fork_commit_cap,
-            steer,
-            lane.curvature,
+            self.config.throttle.fork_commit_cap, steer, lane.curvature
         )
         return ControlCmd(throttle, steer)
 
-    def step(self, lane: LaneObs, detector: DetectionBuffer, now: float,
-             light_state=None, light_seq=None) -> ControlCmd:
-        """Runs one OUT-course FSM tick and returns the desired control command."""
-
-        if self.start_t <= 0.0:
-            self.start_t = now
-            self.enter_t = now
+    def step(
+        self,
+        lane: LaneObs,
+        detector: DetectionBuffer,
+        now: float,
+        light_state=None,
+        light_seq=None,
+        marker_visible: bool = False,
+    ) -> ControlCmd:
         self.update_light(light_state, light_seq)
-
-        # Arrival red-stop, independent of the intermediate state chain: once the
-        # finish window is open (enough time since launch, so the start light is
-        # out of view), a confirmed red verdict stops the car from ANY driving
-        # state. OUT_POST_FORK has no detection-driven exit, so this global gate
-        # is what actually ends the run.
-        if (
-            self.state not in ("OUT_WAIT_GREEN", "OUT_FINISH_STOP")
-            and self.finish_window_open(now)
-            and self.red_confirmed()
-        ):
-            self.transition("OUT_FINISH_STOP", now)
+        self.update_marker(marker_visible)
 
         if self.state == "OUT_WAIT_GREEN":
-            cmd = ControlCmd(0.0, 0.0)
             if self.green_confirmed():
-                # Mission clock starts at launch, not at node startup, so the
-                # finish timer is unaffected by how long the car waited at the
-                # start light.
-                self.start_t = now
-                self.transition("OUT_LAUNCH", now)
+                self.transition("OUT_TO_FORK", now)
+            return ControlCmd(0.0, 0.0)
 
-        elif self.state == "OUT_LAUNCH":
-            cmd = self.controller.lane_follow(
-                lane,
-                self.config.throttle.launch_cap,
-                self.config.steering.straight_limit,
+        if self.state == "OUT_TO_FORK":
+            cmd = self.controller.follow_with_startup(
+                lane, self.config.throttle.speed_max, self.config.steering.s_curve_limit
             )
-            if self.elapsed(now) > self.config.mission.launch_min_sec:
-                self.transition("OUT_S_CURVE", now)
+            decision = self.fork_decision_update(detector)
+            if decision is not None:
+                self.fork_decision = decision
+                self.fork_target_error = None
+                self.transition("OUT_FORK_SIGN_ADVANCE", now)
+            return cmd
 
-        elif self.state == "OUT_S_CURVE":
-            cmd = self.controller.lane_follow(
-                lane,
-                self.config.throttle.s_curve_cap,
-                self.config.steering.s_curve_limit,
-            )
-            if self.fork_decision_update(detector) is not None or lane.fork_seen:
-                self.transition("OUT_FORK_APPROACH", now)
-
-        elif self.state == "OUT_FORK_APPROACH":
+        if self.state == "OUT_FORK_SIGN_ADVANCE":
+            self.update_fork_target(lane)
             cmd = self.controller.lane_follow(
                 lane,
                 self.config.throttle.fork_approach_cap,
                 self.config.steering.fork_approach_limit,
                 curve_scale=self.config.steering.fork_curve_scale,
             )
-            decision = self.fork_decision_update(detector)
-            if decision is not None:
-                self.fork_decision = decision
+            if self.elapsed(now) >= self.config.mission.fork_sign_advance_sec:
                 self.transition("OUT_FORK_COMMIT", now)
+            return cmd
 
-        elif self.state == "OUT_FORK_COMMIT":
+        if self.state == "OUT_FORK_COMMIT":
+            self.update_fork_target(lane)
             cmd = self.control_fork_commit(lane)
-            commit_done = self.single_lane_reacquired(lane) and self.elapsed(now) > self.config.mission.fork_commit_min_sec
-            if commit_done or self.elapsed(now) > self.config.mission.fork_commit_timeout_sec:
-                self.transition("OUT_POST_FORK", now)
+            if (
+                self.single_lane_reacquired(lane)
+                and self.elapsed(now) >= self.config.mission.fork_commit_min_sec
+            ) or self.elapsed(now) >= self.config.mission.fork_commit_timeout_sec:
+                self.transition("OUT_TO_ARUCO", now)
+            return cmd
 
-        elif self.state == "OUT_POST_FORK":
-            # Terminal cruise: follow the lane to the finish. The confirmed-red
-            # stop is handled by the global gate above.
-            cmd = self.controller.lane_follow(
+        if self.state == "OUT_TO_ARUCO":
+            if self.marker_confirmed():
+                self.controller.prev_throttle = 0.0
+                self.transition("OUT_ARUCO_STOP", now)
+                return ControlCmd(0.0, 0.0)
+            return self.controller.lane_follow(
                 lane,
                 self.config.throttle.post_fork_cap,
                 self.config.steering.post_fork_limit,
                 section_min=self.config.throttle.post_fork_min,
             )
 
-        else:
-            cmd = ControlCmd(0.0, 0.0)
+        if self.state == "OUT_ARUCO_STOP":
+            self.controller.prev_throttle = 0.0
+            if self.marker_cleared():
+                self.transition("OUT_RESUME", now)
+            return ControlCmd(0.0, 0.0)
 
-        return cmd
+        if self.state == "OUT_RESUME":
+            if self.red_confirmed():
+                self.controller.prev_throttle = 0.0
+                self.transition("OUT_FINISH_STOP", now)
+                return ControlCmd(0.0, 0.0)
+            return self.controller.lane_follow(
+                lane,
+                self.config.throttle.post_fork_cap,
+                self.config.steering.post_fork_limit,
+                section_min=self.config.throttle.post_fork_min,
+            )
+
+        self.controller.prev_throttle = 0.0
+        return ControlCmd(0.0, 0.0)
+
+
+class InCourseFSM(BaseCourseFSM):
+    """Isolated IN skeleton; dash/stop-line gates intentionally remain pending."""
+
+    def __init__(self, config: AutonomousConfig, controller: LaneController):
+        super().__init__(config, controller)
+        self.state = "IN_WAIT_GREEN"
+
+    def step(
+        self,
+        lane: LaneObs,
+        detector: DetectionBuffer,
+        now: float,
+        light_state=None,
+        light_seq=None,
+        marker_visible: bool = False,
+    ) -> ControlCmd:
+        self.update_light(light_state, light_seq)
+        self.update_marker(marker_visible)
+        if self.state == "IN_WAIT_GREEN":
+            if self.green_confirmed():
+                self.transition("IN_ENTRY", now)
+            return ControlCmd(0.0, 0.0)
+        if self.state in ("IN_ENTRY", "IN_LAP"):
+            return self.controller.lane_follow(
+                lane, self.config.throttle.s_curve_cap, self.config.steering.s_curve_limit
+            )
+        if self.state == "IN_EXIT":
+            if self.marker_confirmed():
+                self.transition("IN_ARUCO_STOP", now)
+                return ControlCmd(0.0, 0.0)
+            return self.controller.lane_follow(
+                lane, self.config.throttle.post_fork_cap, self.config.steering.post_fork_limit
+            )
+        if self.state == "IN_ARUCO_STOP":
+            if self.marker_cleared():
+                self.transition("IN_RESUME", now)
+            return ControlCmd(0.0, 0.0)
+        if self.state == "IN_RESUME" and not self.red_confirmed():
+            return self.controller.lane_follow(
+                lane, self.config.throttle.post_fork_cap, self.config.steering.post_fork_limit
+            )
+        if self.state == "IN_RESUME":
+            self.transition("IN_FINISH_STOP", now)
+        self.controller.prev_throttle = 0.0
+        return ControlCmd(0.0, 0.0)
 
 
 class LaneTestFSM(BaseCourseFSM):
@@ -398,9 +457,6 @@ class LaneTestFSM(BaseCourseFSM):
              light_state=None, light_seq=None) -> ControlCmd:
         """Follows the lane every tick, capped by the speed band (ignores lights)."""
 
-        if self.start_t <= 0.0:
-            self.start_t = now
-            self.enter_t = now
         return self.controller.lane_follow(
             lane,
             self.config.throttle.speed_max,
@@ -414,4 +470,6 @@ def make_course_fsm(config: AutonomousConfig, controller: LaneController) -> Bas
     route = config.mission.route_mode.upper()
     if route in ("LANE", "LANE_TEST", "TEST"):
         return LaneTestFSM(config, controller)
+    if route == "IN":
+        return InCourseFSM(config, controller)
     return OutCourseFSM(config, controller)

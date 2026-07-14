@@ -121,9 +121,12 @@ class LanePerception:
         return mask
 
     def build_lane_mask(
-        self, frame_bgr: np.ndarray, prepared_lab: np.ndarray | None = None
+        self,
+        frame_bgr: np.ndarray,
+        prepared_lab: np.ndarray | None = None,
+        include_yellow: bool | None = None,
     ) -> np.ndarray:
-        """Extracts white and yellow lane paint as one binary steering mask."""
+        """Builds the steering mask, excluding yellow for OUT by default."""
 
         cfg = self.config.lane
         lab = prepared_lab
@@ -139,11 +142,16 @@ class LanePerception:
             np.array([cfg.yellow_l_min, cfg.yellow_a_min, cfg.yellow_b_min], dtype=np.uint8),
             np.array([cfg.yellow_l_max, cfg.yellow_a_max, cfg.yellow_b_max], dtype=np.uint8),
         )
-        mask = cv2.bitwise_or(white, yellow)
         open_kernel = self._get_morph_kernel(cfg.morph_open_kernel)
         close_kernel = self._get_morph_kernel(cfg.morph_close_kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
+        white = cv2.morphologyEx(white, cv2.MORPH_OPEN, open_kernel)
+        white = cv2.morphologyEx(white, cv2.MORPH_CLOSE, close_kernel)
+        yellow = cv2.morphologyEx(yellow, cv2.MORPH_OPEN, open_kernel)
+        yellow = cv2.morphologyEx(yellow, cv2.MORPH_CLOSE, close_kernel)
+        if include_yellow is None:
+            route = self.config.mission.route_mode.upper()
+            include_yellow = route != "OUT" or not cfg.out_white_only
+        mask = cv2.bitwise_or(white, yellow) if include_yellow else white
         return mask
 
     def get_l_channel(self, frame_bgr: np.ndarray) -> np.ndarray:

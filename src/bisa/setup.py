@@ -32,11 +32,8 @@ setup(
     license='Apache-2.0',
     entry_points={
         'console_scripts': [
-            'bisa_autonomous_node = bisa.autonomous_driving_node:main',
             'bisa_detector_node = bisa.detector_node:main',
             'viz_node = bisa.viz_node:main',
-            'power_gui_node = bisa.power_gui_node:main',
-            'system_telemetry_node = bisa.system_telemetry_node:main',
             'param_gui_node = bisa.param_gui_node:main',
             'traffic_light_tuner = bisa.traffic_light:main',
             'dash_line_tuner = bisa.dash_line_tuner:main',

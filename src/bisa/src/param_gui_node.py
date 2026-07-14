@@ -35,6 +35,9 @@ SPEC = {
         ("slope min abs", "lane.hough_slope_min_abs", "f", 0.0, 2.0),
         ("min comp area", "lane.min_component_area_ratio", "f", 0.0, 0.1),
         ("fork area", "lane.fork_area_ratio", "f", 0.0, 0.2),
+        ("fork target y0", "lane.fork_target_y0", "f", 0.0, 1.0),
+        ("fork target y1", "lane.fork_target_y1", "f", 0.0, 1.0),
+        ("fork target area", "lane.fork_target_min_area_ratio", "f", 0.0, 0.05),
     ],
     "Steering (PP)": [
         ("lookahead (m)", "steering.lookahead_m", "f", 0.1, 2.0),
@@ -42,6 +45,7 @@ SPEC = {
         ("curve response pow", "steering.curve_response_power", "f", 0.1, 2.0),
         ("curve steer boost", "steering.curve_steer_boost", "f", 0.0, 1.0),
         ("fork curve scale", "steering.fork_curve_scale", "f", 0.0, 1.0),
+        ("fork forced error", "steering.fork_forced_error", "f", 0.0, 1.0),
         ("wheelbase (m)", "steering.wheelbase_m", "f", 0.05, 0.5),
         ("lateral scale (m)", "steering.lateral_scale_m", "f", 0.05, 1.0),
         ("max steer (deg)", "steering.max_steer_deg", "f", 5.0, 60.0),
@@ -65,6 +69,7 @@ SPEC = {
         ("morph close", "lane.morph_close_kernel", "i", 1, 15),
     ],
     "Lane White": [
+        ("OUT white only", "lane.out_white_only", "b", 0, 1),
         ("L min", "lane.white_l_min", "i", 0, 255),
         ("L max", "lane.white_l_max", "i", 0, 255),
         ("A min", "lane.white_a_min", "i", 0, 255),
@@ -85,6 +90,16 @@ SPEC = {
         ("max speed", "throttle.speed_max", "f", 0.0, 1.0),
         ("launch cap", "throttle.launch_cap", "f", 0.0, 1.0),
         ("s-curve cap", "throttle.s_curve_cap", "f", 0.0, 1.0),
+        ("fork approach cap", "throttle.fork_approach_cap", "f", 0.0, 1.0),
+        ("fork commit cap", "throttle.fork_commit_cap", "f", 0.0, 1.0),
+        ("post-fork cap", "throttle.post_fork_cap", "f", 0.0, 1.0),
+    ],
+    "OUT Mission": [
+        ("sign advance seconds", "mission.fork_sign_advance_sec", "f", 0.0, 5.0),
+        ("fork min seconds", "mission.fork_commit_min_sec", "f", 0.0, 5.0),
+        ("fork timeout seconds", "mission.fork_commit_timeout_sec", "f", 0.0, 8.0),
+        ("aruco confirm", "aruco.confirm_frames", "i", 1, 20),
+        ("aruco clear", "aruco.clear_frames", "i", 1, 20),
     ],
     "Color Correction": [
         ("enabled", "color_correction.enabled", "b", 0, 1),

@@ -131,7 +131,7 @@ steering:
   curve_response_power: 0.65  # 1보다 작아 커브 진입부터 반응하되 sqrt보다 완만
   curve_steer_boost: 0.15     # 커브에서만 최대 20% 조향 증폭(직선=0% 증폭)
   fork_curve_scale: 0.25      # 갈림길 ROI가 만든 가짜 곡률/상쇄 영향을 25%로 제한
-  fork_forced_error: 0.3    # 표지 확정 직후 짧은 펄스에만 쓸 완만한 방향 목표
+  fork_forced_error: 0.3    # LEFT(+)/RIGHT(-)에 동일 크기로 적용하는 방향 목표
   wheelbase_m: 0.17          # 실차 전·후차축 거리(자전거 모델, m)
   lateral_scale_m: 0.30      # 오차 1.0을 몇 m 횡오프셋으로 볼지
   max_steer_deg: 35.0        # 조향각 정규화 기준(풀락 각도)

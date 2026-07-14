@@ -1409,6 +1409,14 @@ private:
   void transition(MissionState next, double now_sec) {
     if (state_ == next) return;
     RCLCPP_INFO(get_logger(), "mission state: %s -> %s", state_name(state_), state_name(next));
+    if (next == MissionState::OUT_FORK_SIGN_ADVANCE) {
+      fork_geometry_observed_ = false;
+      fork_direction_progressed_ = false;
+      fork_pair_streak_ = 0;
+    }
+    if (next == MissionState::OUT_FORK_COMMIT) {
+      fork_pair_streak_ = 0;
+    }
     state_ = next;
     entered_ = now_sec;
   }
@@ -1437,8 +1445,8 @@ private:
       }
 
       case MissionState::OUT_FORK_SIGN_ADVANCE: {
-        // Apply only a short, mild directional nudge.  The following state
-        // immediately returns steering authority to the observed lane pair.
+        // Apply the same signed directional nudge for LEFT and RIGHT.
+        fork_geometry_observed_ = fork_geometry_observed_ || lane.fork_seen;
         auto cmd = controller_.directional_fork(
           lane, fork_decision_, config_.fork_approach_cap,
           config_.fork_approach_limit);
@@ -1450,24 +1458,43 @@ private:
       }
 
       case MissionState::OUT_FORK_COMMIT: {
-        // The directional pulse is over.  Reacquire both physical lane
-        // boundaries and align to their center instead of continuing to force
-        // the sign direction.  Single-boundary tracking remains available
-        // while the second boundary enters the ROI.
-        auto cmd = controller_.follow(
-          lane, config_.fork_commit_cap, config_.fork_limit);
+        const double elapsed = now_sec - entered_;
+        constexpr double direction_progress_error = 0.14;
+        constexpr int pair_confirm_ticks = 3;
+        const double signed_progress = fork_decision_ == "LEFT" ?
+          lane.center_error : -lane.center_error;
+        if (lane.valid && signed_progress >= direction_progress_error) {
+          fork_direction_progressed_ = true;
+        }
+        fork_geometry_observed_ = fork_geometry_observed_ || lane.fork_seen;
+        // At a visible fork, generic Hough fitting can pair the two closest
+        // lines around the old center and pull the vehicle straight. Do not
+        // grant that pair steering authority until pixels show progress toward
+        // the signed branch and a non-fork two-boundary lane is stable.
+        const bool branch_evidence =
+          fork_geometry_observed_ || fork_direction_progressed_;
+        const bool pair_candidate =
+          branch_evidence && lane.valid && lane.both_lanes && !lane.fork_seen;
+        fork_pair_streak_ = pair_candidate ?
+          std::min(fork_pair_streak_ + 1, pair_confirm_ticks) : 0;
+        const bool pair_locked = fork_pair_streak_ >= pair_confirm_ticks;
+        auto cmd = pair_locked ?
+          controller_.follow(lane, config_.fork_commit_cap, config_.fork_limit) :
+          controller_.directional_fork(
+            lane, fork_decision_, config_.fork_commit_cap, config_.fork_limit);
         const bool reacquired =
-          lane.valid && lane.both_lanes && !lane.fork_seen &&
-          std::abs(lane.center_error) < 0.25;
-        if ((reacquired && now_sec - entered_ >= config_.fork_commit_min_sec) ||
-          now_sec - entered_ >= config_.fork_commit_timeout_sec)
+          pair_locked && std::abs(lane.center_error) < 0.25;
+        if ((reacquired && elapsed >= config_.fork_commit_min_sec) ||
+          elapsed >= config_.fork_commit_timeout_sec)
         {
           RCLCPP_INFO(
             get_logger(),
-            "fork alignment release: both_lanes=%s centered=%s timeout=%s",
-            lane.both_lanes ? "true" : "false",
+            "fork alignment release: fork_seen=%s progressed=%s pair_ticks=%d centered=%s timeout=%s",
+            fork_geometry_observed_ ? "true" : "false",
+            fork_direction_progressed_ ? "true" : "false",
+            fork_pair_streak_,
             std::abs(lane.center_error) < 0.25 ? "true" : "false",
-            now_sec - entered_ >= config_.fork_commit_timeout_sec ? "true" : "false");
+            elapsed >= config_.fork_commit_timeout_sec ? "true" : "false");
           transition(MissionState::OUT_RESUME, now_sec);
         }
         return cmd;
@@ -1894,6 +1921,9 @@ private:
   double aruco_pause_started_{0.0};
   int light_state_{0}, green_streak_{0}, red_streak_{0};
   std::atomic<bool> lane_reset_requested_{false};
+  bool fork_geometry_observed_{false};
+  bool fork_direction_progressed_{false};
+  int fork_pair_streak_{0};
   uint64_t detection_sequence_{0}, last_light_sequence_{0};
   int32_t detection_source_sec_{0};
   uint32_t detection_source_nanosec_{0};

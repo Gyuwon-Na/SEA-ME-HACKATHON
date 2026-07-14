@@ -92,7 +92,7 @@ detector:
   # 신호등 conf를 낮추면 멀리/작게 잡히는 불도 미리 감지. 행 분할 재분류(row_*)
   # + 상태 게이팅 + 연속 투표가 오탐을 걸러주므로 낮춰도 비교적 안전.
   conf:
-    traffic_green: 0.40  # green 검출 최소 신뢰도
+    traffic_green: 0.30  # green 검출 최소 신뢰도
     traffic_red: 0.40    # red 검출 최소 신뢰도
     sign_left: 0.65      # 좌 표지 최소 신뢰도
     sign_right: 0.65     # 우 표지 최소 신뢰도
@@ -126,8 +126,8 @@ throttle:
 # curve_blend 는 도로 굽어짐(signed curvature)만큼 목표점을 이동시킴.
 steering:
   steer_sign: 1              # 조향 부호(좌우 반대로 나가면 -1)
-  lookahead_m: 0.62          # 직선 순수추종 전방주시 거리(m)
-  curve_lookahead_min_m: 0.38 # 최대 곡률에서의 최소 전방주시(짧은 맵 코너용)
+  lookahead_m: 0.50          # 직선 순수추종 전방주시 거리(m)
+  curve_lookahead_min_m: 0.33 # 최대 곡률에서의 최소 전방주시(짧은 맵 코너용)
   curve_response_power: 0.80  # 1보다 작아 커브 진입부터 반응하되 sqrt보다 완만
   curve_steer_boost: 0.15     # 커브에서만 곡률 비례 조향 증폭(직선=0% 증폭)
   fork_curve_scale: 0.25      # 갈림길 ROI가 만든 가짜 곡률/상쇄 영향을 25%로 제한

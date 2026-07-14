@@ -42,9 +42,9 @@ lane:
   yellow_b_min: 165            # 노란색 핵심: 높은 b, 피부/노면 제외
   yellow_b_max: 255
   out_white_only: true         # OUT에서는 노란 IN 분기선을 조향 피팅에서 완전히 제외
-  fork_target_y0: 0.05         # X자 상단 분기 후보를 찾을 ROI 시작(차선 ROI 비율)
-  fork_target_y1: 0.45         # X자 상단 분기 후보를 찾을 ROI 끝
-  fork_target_min_area_ratio: 0.002 # 상단 후보에서 제거할 작은 흰색 노이즈
+  fork_target_y0: 0.05         # 갈림길 형상 관측용 ROI 시작(조향 목표에는 사용하지 않음)
+  fork_target_y1: 0.45         # 갈림길 형상 관측용 ROI 끝
+  fork_target_min_area_ratio: 0.002 # 형상 관측에서 제거할 작은 흰색 노이즈
   lab_clahe_clip: 2.0          # 이진화/캐니 전 L채널 CLAHE 대비제한
   lab_clahe_tile: 8            # CLAHE 타일 그리드 크기
   morph_open_kernel: 3         # 열림 커널 — 작은 잡티 제거
@@ -107,11 +107,11 @@ throttle:
   # 정지 명령(0.0)을 제외한 모든 이동 명령은 [speed_min, speed_max] 안에 있다.
   # 직선 deadband 안에서는 speed_max, 조향/곡률이 커지면 speed_min 쪽으로 감속한다.
   speed_min: 0.20          # 이동 속도밴드 하한(정지 아닌 최저속)
-  speed_max: 0.30          # 직선 목표 최고속
-  launch_cap: 0.24         # 호환용(OUT은 초록~표지판까지 speed_max+곡률 스케줄 사용)
-  s_curve_cap: 0.24        # IN 진입/랩 골격용 속도 상한
-  fork_approach_cap: 0.24  # 표지판 후 1.5 s 전진 시 약 0.36 m 목표
-  fork_commit_cap: 0.22    # X자 강제 조향은 가장 낮은 별도 상한 사용
+  speed_max: 0.25          # 직선 목표 최고속
+  launch_cap: 0.22         # 호환용(OUT은 초록~표지판까지 speed_max+곡률 스케줄 사용)
+  s_curve_cap: 0.22        # IN 진입/랩 골격용 속도 상한
+  fork_approach_cap: 0.22  # 표지판 확정 직후 방향별 선제 강제 조향 속도 상한
+  fork_commit_cap: 0.22    # 갈림길 방향 강제 조향은 가장 낮은 별도 상한 사용
   post_fork_cap: 0.30      # 갈림길 이후 일반 차선의 직선에서만 전역 최고속 허용
   post_fork_min: 0.20      # 전 구간에서 동일한 전역 최저속까지 감속 허용
   ramp_up_per_cmd: 0.015   # 20Hz에서 틱당 가속량(감속은 즉시 반영)
@@ -129,9 +129,9 @@ steering:
   lookahead_m: 0.60          # 직선 순수추종 전방주시 거리(m)
   curve_lookahead_min_m: 0.38 # 최대 곡률에서의 최소 전방주시(짧은 맵 코너용)
   curve_response_power: 0.65  # 1보다 작아 커브 진입부터 반응하되 sqrt보다 완만
-  curve_steer_boost: 0.20     # 커브에서만 최대 20% 조향 증폭(직선=0% 증폭)
+  curve_steer_boost: 0.1     # 커브에서만 최대 20% 조향 증폭(직선=0% 증폭)
   fork_curve_scale: 0.25      # 갈림길 ROI가 만든 가짜 곡률/상쇄 영향을 25%로 제한
-  fork_forced_error: 0.45     # X 상단 후보를 못 잡았을 때 LEFT(+)/RIGHT(-) 강제 목표
+  fork_forced_error: 0.45     # 표지 확정 즉시 사용할 LEFT(+)/RIGHT(-) 화면 측면 목표
   wheelbase_m: 0.17          # 실차 전·후차축 거리(자전거 모델, m)
   lateral_scale_m: 0.30      # 오차 1.0을 몇 m 횡오프셋으로 볼지
   max_steer_deg: 35.0        # 조향각 정규화 기준(풀락 각도)
@@ -205,7 +205,7 @@ mission:
   # OUT은 초록불 뒤 별도 ENTRY/S 상태 없이 흰 차선을 곡률 기반 추종하다가
   # 표지판 투표가 확정될 때만 fork 접근 상태로 넘어간다.
   # 거리계가 없으므로 표지판 이후 0.3~0.5m는 시간으로 근사한다. 현장 실측 후 조정.
-  fork_sign_advance_sec: 1.5    # 표지 확정 후 정상 차선으로 추가 전진하는 시간(s)
+  fork_sign_advance_sec: 1.5    # 표지 확정 후 방향별 선제 강제 조향을 유지하는 시간(s)
   fork_commit_min_sec: 0.8      # 갈림길 커밋 최소 유지 시간(s)
   fork_commit_timeout_sec: 1.8  # 커밋 강제 종료 타임아웃(s)
   debug_log_hz: 1.0             # 상태 로그 출력 주기(Hz)

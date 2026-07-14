@@ -752,20 +752,22 @@ public:
     return {previous_throttle_, previous_steer_};
   }
 
-  Command fork(
+  Command directional_fork(
     const LaneObs & lane, const std::string & decision,
-    const std::optional<double> & latched_target)
+    double cap, double steer_limit)
   {
     LaneObs virtual_lane = lane;
-    if (latched_target) {
-      virtual_lane.center_error = *latched_target;
-    } else if (decision == "LEFT") {
+    // Start moving toward the signed side target as soon as the sign vote is
+    // locked.  Do not wait for, or steer at, a contour in the upper arm of the
+    // X: at that point the car has already spent too long driving straight.
+    virtual_lane.valid = true;
+    if (decision == "LEFT") {
       virtual_lane.center_error = c_.fork_forced_error;
     } else if (decision == "RIGHT") {
       virtual_lane.center_error = -c_.fork_forced_error;
     }
-    const double steer = steering(virtual_lane, c_.fork_limit, c_.fork_curve_scale);
-    return {throttle(c_.fork_commit_cap, steer, lane.curvature), steer};
+    const double steer = steering(virtual_lane, steer_limit, c_.fork_curve_scale);
+    return {throttle(cap, steer, lane.curvature), steer};
   }
 
   void stop() { previous_throttle_ = 0.0; }
@@ -1411,11 +1413,6 @@ private:
     return marker_clear_streak_ >= config_.aruco_clear_frames;
   }
 
-  void update_fork_target(const LaneObs & lane) {
-    if (fork_decision_ == "LEFT" && lane.left_target) fork_target_error_ = lane.left_target;
-    if (fork_decision_ == "RIGHT" && lane.right_target) fork_target_error_ = lane.right_target;
-  }
-
   Command step_out(const LaneObs & lane, double now_sec) {
     switch (state_) {
       case MissionState::OUT_WAIT_GREEN:
@@ -1434,17 +1431,15 @@ private:
           lane, config_.speed_max, config_.s_curve_limit);
         if (auto decision = sign_decision()) {
           fork_decision_ = *decision;
-          fork_target_error_.reset();
           transition(MissionState::OUT_FORK_SIGN_ADVANCE, now_sec);
         }
         return cmd;
       }
 
       case MissionState::OUT_FORK_SIGN_ADVANCE: {
-        update_fork_target(lane);
-        auto cmd = controller_.follow(
-          lane, config_.fork_approach_cap, config_.fork_approach_limit,
-          std::nullopt, config_.fork_curve_scale);
+        auto cmd = controller_.directional_fork(
+          lane, fork_decision_, config_.fork_approach_cap,
+          config_.fork_approach_limit);
         if (now_sec - entered_ >= config_.fork_sign_advance_sec) {
           transition(MissionState::OUT_FORK_COMMIT, now_sec);
         }
@@ -1452,8 +1447,8 @@ private:
       }
 
       case MissionState::OUT_FORK_COMMIT: {
-        update_fork_target(lane);
-        auto cmd = controller_.fork(lane, fork_decision_, fork_target_error_);
+        auto cmd = controller_.directional_fork(
+          lane, fork_decision_, config_.fork_commit_cap, config_.fork_limit);
         const bool reacquired =
           lane.valid && !lane.fork_seen && std::abs(lane.center_error) < 0.45;
         if ((reacquired && now_sec - entered_ >= config_.fork_commit_min_sec) ||
@@ -1864,7 +1859,6 @@ private:
   MissionState state_{MissionState::OUT_WAIT_GREEN};
   RouteMode route_mode_{RouteMode::OUT};
   std::string fork_decision_, image_topic_, control_topic_, detections_topic_;
-  std::optional<double> fork_target_error_;
   double entered_{0.0}, debug_hz_{5.0}, perception_hz_{20.0}, control_hz_{20.0};
   double detection_hz_target_{20.0};
   uint64_t perception_count_{0}, detection_count_{0};

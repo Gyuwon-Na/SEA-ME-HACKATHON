@@ -189,6 +189,8 @@ def test_out_fsm_curve_follows_until_sign_then_orders_fork_and_finish():
     left = _SignDetector("sign_left")
     fsm.step(lane, left, 20.1)
     assert fsm.state == "OUT_FORK_SIGN_ADVANCE"
+    advance_cmd = fsm.step(lane, left, 20.15)
+    assert advance_cmd.steering > 0.0
     fsm.step(lane, left, 20.4)
     assert fsm.state == "OUT_FORK_COMMIT"
 
@@ -213,6 +215,29 @@ def test_out_fsm_curve_follows_until_sign_then_orders_fork_and_finish():
     assert fsm.state == "OUT_RESUME"
     fsm.step(lane, no_sign, 21.5, light_state="red", light_seq=3)
     assert fsm.state == "OUT_FINISH_STOP"
+
+
+@pytest.mark.parametrize(
+    ("sign_name", "expected_sign"),
+    [("sign_left", 1.0), ("sign_right", -1.0)],
+)
+def test_out_sign_advance_forces_direction_before_x_is_visible(sign_name, expected_sign):
+    """A confirmed sign must steer immediately even with no X branch contour."""
+
+    config = AutonomousConfig()
+    config.detector.light_confirm_frames = 1
+    config.steering.rate_limit_per_cmd = 1.0
+    fsm = make_course_fsm(config, LaneController(config))
+    lane = LaneObs(valid=True, center_error=0.0, fork_seen=False)
+    no_sign = _SignDetector()
+
+    fsm.step(lane, no_sign, 1.0, light_state="green", light_seq=1)
+    fsm.step(lane, _SignDetector(sign_name), 1.1)
+    cmd = fsm.step(lane, _SignDetector(sign_name), 1.15)
+
+    assert fsm.state == "OUT_FORK_SIGN_ADVANCE"
+    assert cmd.steering * expected_sign > 0.0
+    assert abs(cmd.steering) > 0.05
 
 
 def test_out_startup_crawls_when_white_lane_is_not_yet_visible():

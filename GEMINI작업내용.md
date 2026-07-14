@@ -1157,3 +1157,41 @@ Error ID: c30cee0a67a149e9a1f2f37e3e5ce2ea
 ### 미완료
 
 - 실제 바닥 주행은 수행하지 않았다. 실차에서는 흰색 차선 마스크와 표지판 인식 거리, `fork_sign_advance_sec=1.5`만 현장 확인하면 된다.
+
+---
+
+## 2026-07-15 — OUT 갈림길 표지판 확정 즉시 방향별 선제 조향
+
+### 요청과 확인된 원인
+
+- `OUT_FORK_SIGN_ADVANCE`, `OUT_FORK_COMMIT`, `OUT_TO_ARUCO`로 이어지는 갈림길에서 표지판을 일찍 검출한 뒤 차량이 계속 직진해 표지판과 충돌하는 문제를 우선 수정했다.
+- 기존 `OUT_FORK_SIGN_ADVANCE`는 표지 방향을 잠근 뒤에도 1.5초 동안 일반 차선 추종을 수행했고, 실제 방향 강제 조향은 `OUT_FORK_COMMIT`에 들어가 X자 상단 흰색 후보가 잡힌 뒤에만 시작됐다.
+
+### 변경
+
+- 표지판 투표가 확정된 다음 제어 틱부터 좌회전은 `+fork_forced_error`, 우회전은 `-fork_forced_error`를 화면 측면 목표로 강제한다.
+- `OUT_FORK_SIGN_ADVANCE`는 `fork_approach_cap`/`fork_approach_limit`, `OUT_FORK_COMMIT`은 `fork_commit_cap`/`fork_limit`을 유지하면서 같은 방향 목표를 연속 사용한다.
+- X자 상단 contour의 `left_target`/`right_target`은 더 이상 FSM 조향 목표로 잠그지 않는다. `OUT_TO_ARUCO` 진입 후에는 선택된 갈림길의 일반 차선 중심 추종으로 복귀한다.
+- 차선 관측이 일시적으로 invalid여도 방향 강제 목표는 유효하도록 C++ virtual lane을 명시적으로 valid 처리했다.
+- Python 동등 FSM과 YAML 설명, 좌/우 즉시 조향 회귀 시험을 함께 갱신했다.
+
+### 변경 파일과 백업
+
+- `src/bisa_cpp/src/bisa_autonomous_node.cpp`
+- `src/bisa/src/mission_controller.py`
+- `src/bisa/config/dracer_params.yaml`
+- `src/bisa/test/test_perception_timing.py`
+- 반영 전 차량 백업: `/tmp/bisa_pre_directional_fork_20260715.tar.gz`.
+
+### 검증 결과
+
+- 로컬 임시 작업공간에서 Python 회귀 `20 passed`, C++ `bisa_cpp` 독립 빌드를 통과했다.
+- TOPST에서 Python 문법 검사, 설치본 회귀 `20 passed`, `bisa`/`bisa_cpp` 재빌드 및 `git diff --check`를 통과했다.
+- 별도 `ROS_DOMAIN_ID=101/102`, `ROS_LOCALHOST_ONLY=1`에서 C++ 코어만 실행하고 제어 출력을 구독자 없는 `/test/fork_left_control`, `/test/fork_right_control`로 격리했다.
+- 중앙 차선이며 X자 후보가 없는 합성 검출 입력에서 좌 표지판은 `steering=+0.202589`, 우 표지판은 `steering=-0.202589`, 양쪽 throttle은 `0.20`이었다. 실제 `/control`, control node, PCA9685, 모터 및 서보는 사용하지 않았다.
+- 첫 TOPST pytest는 ROS 설치 환경을 source하지 않아 패키지 수집에 실패했다. 두 번째는 새 테스트보다 이전 설치본 FSM이 먼저 로드돼 3개가 실패했다. `bisa` 설치본을 먼저 재빌드한 뒤 동일 회귀 전체가 통과했다.
+
+### 미완료 및 적용 시점
+
+- 실제 바닥 주행은 수행하지 않았다. `fork_forced_error=0.45`, `fork_sign_advance_sec=1.5`, 조향 rate limit은 현장 저속 확인 후 필요할 때만 조정한다.
+- 작업 당시 사용자가 실행한 기존 `bisa_autonomous_node` 프로세스는 중지하지 않았다. 디스크의 설치 바이너리는 새 빌드지만 이미 실행 중인 프로세스는 재시작 전까지 구 코드를 계속 사용한다.

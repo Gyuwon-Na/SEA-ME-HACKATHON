@@ -199,14 +199,51 @@ class LanePerception:
             return None
         return float(moments["m10"] / moments["m00"])
 
-    def _line_endpoints(self, slope: float, intercept: float, top_y: int, height: int):
-        """Returns ((x_top, top_y), (x_bot, height)) for a fitted lane line."""
+    @staticmethod
+    def _evaluate_curve(coefficients: np.ndarray, y: float, top_y: int, bottom_y: int) -> float:
+        """Evaluates normalized ``x(y) = ay^2 + by + c`` coefficients."""
 
-        if abs(slope) < 1e-6:
+        t = (float(y) - top_y) / max(float(bottom_y - top_y), 1.0)
+        return float(coefficients[0] * t * t + coefficients[1] * t + coefficients[2])
+
+    @classmethod
+    def _curve_points(
+        cls, coefficients: np.ndarray, top_y: int, height: int, step: int = 4
+    ) -> list[tuple[float, int]]:
+        """Samples a fitted curve for debug rendering."""
+
+        bottom_y = height - 1
+        return [
+            (cls._evaluate_curve(coefficients, y, top_y, bottom_y), y)
+            for y in range(top_y, bottom_y + 1, max(1, step))
+        ]
+
+    @classmethod
+    def _fit_hough_curve(
+        cls, points: np.ndarray, top_y: int, height: int, width: int
+    ) -> Optional[np.ndarray]:
+        """Fits one robust quadratic ``x(y)`` curve, with a linear sparse fallback."""
+
+        if points.shape[0] < 2:
             return None
-        x_top = (top_y - intercept) / slope
-        x_bot = (height - intercept) / slope
-        return ((float(x_top), int(top_y)), (float(x_bot), int(height)))
+        bottom_y = height - 1
+        span = max(float(bottom_y - top_y), 1.0)
+        unique_y = np.unique(np.round(points[:, 1], 1))
+        quadratic = bool(
+            unique_y.size >= 3
+            and float(np.ptp(points[:, 1])) >= 0.15 * span
+        )
+
+        def solve(samples: np.ndarray) -> np.ndarray:
+            t = (samples[:, 1] - top_y) / span
+            if quadratic:
+                design = np.column_stack((t * t, t, np.ones_like(t)))
+                return np.linalg.lstsq(design, samples[:, 0], rcond=None)[0]
+            design = np.column_stack((t, np.ones_like(t)))
+            linear = np.linalg.lstsq(design, samples[:, 0], rcond=None)[0]
+            return np.array([0.0, linear[0], linear[1]], dtype=float)
+
+        return solve(points)
 
     def average_hough_lanes(
         self,
@@ -214,15 +251,17 @@ class LanePerception:
         record: bool = False,
         viz_out: dict | None = None,
         prepared_l_channel: np.ndarray | None = None,
+        vehicle_x: float | None = None,
     ) -> tuple[Optional[float], bool, bool]:
-        """Computes lane center from Canny/Hough lines as in the ERP reference code."""
+        """Selects one camera-left/right lane and fits each as a quadratic curve."""
 
         height, width = frame_bgr.shape[:2]
         top_y = int(self.config.lane.hough_roi_top_ratio * height)
         if record and viz_out is not None:
-            viz_out["hough_left"] = None
-            viz_out["hough_right"] = None
+            viz_out["hough_left_curve"] = None
+            viz_out["hough_right_curve"] = None
             viz_out["hough_segments"] = []
+            viz_out["hough_selected_segments"] = []
             viz_out["hough_top_y"] = top_y
         l_channel = prepared_l_channel
         if l_channel is None:
@@ -255,53 +294,85 @@ class LanePerception:
         pts = lines.reshape(-1, 4).astype(float)
         x1, y1, x2, y2 = pts[:, 0], pts[:, 1], pts[:, 2], pts[:, 3]
 
-        valid = x1 != x2
-        x1, y1, x2, y2 = x1[valid], y1[valid], x2[valid], y2[valid]
-
-        slopes = (y2 - y1) / (x2 - x1)
-        intercepts = y1 - slopes * x1
-
+        dx = x2 - x1
+        dy = y2 - y1
         min_abs = self.config.lane.hough_slope_min_abs
-        left_mask = slopes < -min_abs
-        right_mask = slopes > min_abs
+        valid = (np.abs(dy) > 1e-6) & (np.abs(dy) >= min_abs * np.abs(dx))
+        x1, y1, x2, y2 = x1[valid], y1[valid], x2[valid], y2[valid]
+        if x1.size == 0:
+            return None, False, False
 
-        left_slopes, left_intercepts = slopes[left_mask], intercepts[left_mask]
-        right_slopes, right_intercepts = slopes[right_mask], intercepts[right_mask]
+        dx = x2 - x1
+        dy = y2 - y1
+        bottom_y = height - 1
+        reference_x = x1 + (bottom_y - y1) * dx / dy
+        in_bounds = (
+            np.isfinite(reference_x)
+            & (reference_x >= -0.25 * width)
+            & (reference_x <= 1.25 * width)
+        )
+        x1, y1, x2, y2, reference_x = (
+            values[in_bounds] for values in (x1, y1, x2, y2, reference_x)
+        )
+        if reference_x.size == 0:
+            return None, False, False
+
+        camera_x = width / 2.0 if vehicle_x is None else float(vehicle_x)
+        left_indices = np.where(reference_x < camera_x)[0]
+        right_indices = np.where(reference_x > camera_x)[0]
+        cluster_limit = max(16.0, width * 0.12)
 
         if record and viz_out is not None:
-            for m_mask in (left_mask, right_mask):
-                for ix in np.where(m_mask)[0]:
-                    viz_out["hough_segments"].append(
+            for ix in range(reference_x.size):
+                viz_out["hough_segments"].append(
+                    (int(x1[ix]), int(y1[ix]), int(x2[ix]), int(y2[ix]))
+                )
+
+        def select_curve(indices: np.ndarray, is_left: bool) -> Optional[np.ndarray]:
+            if indices.size == 0:
+                return None
+            side_x = reference_x[indices]
+            seed_index = indices[int(np.argmax(side_x) if is_left else np.argmin(side_x))]
+            selected = indices[np.abs(side_x - reference_x[seed_index]) <= cluster_limit]
+            ratios = np.linspace(0.0, 1.0, 8)
+            points = np.vstack([
+                np.column_stack((
+                    x1[ix] + ratios * (x2[ix] - x1[ix]),
+                    y1[ix] + ratios * (y2[ix] - y1[ix]),
+                ))
+                for ix in selected
+            ])
+            if record and viz_out is not None:
+                for ix in selected:
+                    viz_out["hough_selected_segments"].append(
                         (int(x1[ix]), int(y1[ix]), int(x2[ix]), int(y2[ix]))
                     )
+            return self._fit_hough_curve(points, top_y, height, width)
 
-        left_fit = list(zip(left_slopes.tolist(), left_intercepts.tolist()))
-        right_fit = list(zip(right_slopes.tolist(), right_intercepts.tolist()))
-
-        left_present = len(left_fit) > 0
-        right_present = len(right_fit) > 0
+        left_curve = select_curve(left_indices, True)
+        right_curve = select_curve(right_indices, False)
+        left_present = left_curve is not None
+        right_present = right_curve is not None
         if not left_present and not right_present:
             return None, False, False
 
-        assumed_width = width * self.config.lane.assumed_lane_width_ratio
-        x_targets = []
-        if left_present:
-            slope, intercept = np.average(left_fit, axis=0)
-            x_targets.append((top_y - intercept) / slope)
-            if record and viz_out is not None:
-                viz_out["hough_left"] = self._line_endpoints(slope, intercept, top_y, height)
-        if right_present:
-            slope, intercept = np.average(right_fit, axis=0)
-            x_targets.append((top_y - intercept) / slope)
-            if record and viz_out is not None:
-                viz_out["hough_right"] = self._line_endpoints(slope, intercept, top_y, height)
+        if record and viz_out is not None:
+            if left_curve is not None:
+                viz_out["hough_left_curve"] = self._curve_points(left_curve, top_y, height)
+            if right_curve is not None:
+                viz_out["hough_right_curve"] = self._curve_points(right_curve, top_y, height)
 
-        if left_present and right_present:
-            center_x = float(np.average(x_targets))
-        elif left_present:
-            center_x = float(x_targets[0] + assumed_width / 2.0)
+        left_target = self._evaluate_curve(left_curve, top_y, top_y, bottom_y) \
+            if left_curve is not None else None
+        right_target = self._evaluate_curve(right_curve, top_y, top_y, bottom_y) \
+            if right_curve is not None else None
+        assumed_width = width * self.config.lane.assumed_lane_width_ratio
+        if left_target is not None and right_target is not None:
+            center_x = (left_target + right_target) / 2.0
+        elif left_target is not None:
+            center_x = left_target + assumed_width / 2.0
         else:
-            center_x = float(x_targets[0] - assumed_width / 2.0)
+            center_x = right_target - assumed_width / 2.0
         return center_x, left_present, right_present
 
     def detect_fork_candidates(self, mask: np.ndarray) -> tuple[bool, Optional[PathCandidate], Optional[PathCandidate]]:
@@ -403,6 +474,7 @@ class LanePerception:
             record=collect_viz,
             viz_out=viz_tmp,
             prepared_l_channel=lane_mask,
+            vehicle_x=full_width / 2.0 - x0,
         )
         near_center = hough_center
         if near_center is None:

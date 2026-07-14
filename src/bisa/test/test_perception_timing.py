@@ -2,6 +2,7 @@
 
 import cv2
 import numpy as np
+import pytest
 
 from bisa.dracer_config import AutonomousConfig
 from bisa.lane_perception import LaneObs, LanePerception
@@ -84,3 +85,66 @@ def test_lane_mask_keeps_white_and_yellow_but_rejects_road_and_skin():
     mask = perception.build_lane_mask(frame, prepared_lab=prepared_lab)
 
     assert mask.tolist() == [[255, 255, 0, 0]]
+
+
+def test_hough_selects_only_nearest_lane_on_each_side(monkeypatch):
+    """Two markings on the left must not be averaged into the steering target."""
+
+    config = AutonomousConfig()
+    perception = LanePerception(config)
+    frame = np.zeros((240, 640, 3), dtype=np.uint8)
+    lane_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+    lines = np.array([
+        [[70, 239, 160, 108]],   # outer left marking
+        [[210, 239, 280, 108]],  # nearest left marking (must win)
+        [[550, 239, 370, 108]],  # nearest right marking
+    ], dtype=np.int32)
+    monkeypatch.setattr(cv2, "HoughLinesP", lambda *args, **kwargs: lines)
+    viz = {}
+
+    center, left_present, right_present = perception.average_hough_lanes(
+        frame, record=True, viz_out=viz, prepared_l_channel=lane_mask, vehicle_x=320.0
+    )
+
+    assert left_present and right_present
+    assert center == pytest.approx(325.0, abs=1.0)
+    assert len(viz["hough_selected_segments"]) == 2
+    assert viz["hough_left_curve"][0][0] == pytest.approx(280.0, abs=1.0)
+    assert viz["hough_right_curve"][0][0] == pytest.approx(370.0, abs=1.0)
+
+
+def test_hough_keeps_one_sided_driving(monkeypatch):
+    """When all visible markings are left of center, use the nearest one only."""
+
+    config = AutonomousConfig()
+    perception = LanePerception(config)
+    frame = np.zeros((240, 640, 3), dtype=np.uint8)
+    lines = np.array([
+        [[70, 239, 160, 108]],
+        [[210, 239, 280, 108]],
+    ], dtype=np.int32)
+    monkeypatch.setattr(cv2, "HoughLinesP", lambda *args, **kwargs: lines)
+
+    center, left_present, right_present = perception.average_hough_lanes(
+        frame, prepared_l_channel=np.zeros(frame.shape[:2], dtype=np.uint8), vehicle_x=320.0
+    )
+
+    assert left_present and not right_present
+    expected = 280.0 + 640 * config.lane.assumed_lane_width_ratio / 2.0
+    assert center == pytest.approx(expected, abs=1.0)
+
+
+def test_hough_curve_fit_is_second_order():
+    """The selected lane model must retain measurable quadratic curvature."""
+
+    top_y, height, width = 100, 241, 640
+    bottom_y = height - 1
+    ys = np.linspace(top_y, bottom_y, 7)
+    t = (ys - top_y) / (bottom_y - top_y)
+    xs = 24.0 * t * t + 55.0 * t + 120.0
+    coefficients = LanePerception._fit_hough_curve(
+        np.column_stack((xs, ys)), top_y, height, width
+    )
+
+    assert coefficients is not None
+    assert coefficients == pytest.approx([24.0, 55.0, 120.0], abs=1e-6)

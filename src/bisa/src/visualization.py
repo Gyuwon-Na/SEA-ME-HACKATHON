@@ -14,6 +14,7 @@ import numpy as np
 # BGR colors.
 COLOR_LANE = (0, 255, 0)        # detected lane lines (solid)
 COLOR_LANE_RAW = (0, 160, 0)    # raw hough segments (faint)
+COLOR_LANE_SELECTED = (0, 200, 255)  # segments supporting the selected curves
 COLOR_CENTER_LINE = (255, 255, 0)   # image vertical center line
 COLOR_LANE_CENTER = (0, 255, 0)     # perceived lane center marker (reference green)
 COLOR_VEHICLE_CENTER = (0, 0, 255)  # vehicle center marker (reference red)
@@ -57,7 +58,7 @@ def draw_lane_roi(frame, lane_viz) -> None:
 
 
 def draw_lanes(frame, lane_viz) -> None:
-    """Draws averaged lane lines plus lane-center vs vehicle-center markers.
+    """Draws selected quadratic lanes plus lane-center vs vehicle-center markers.
 
     Mirrors the reference ``lane_detector_1029.py`` visualization: bold green
     averaged lane lines blended translucently over the frame (display_lines +
@@ -71,17 +72,27 @@ def draw_lanes(frame, lane_viz) -> None:
     height_f, width_f = frame.shape[:2]
     ox, oy = lane_viz.get("roi_offset", (0, 0))
 
-    # Bold averaged lane lines on a separate layer, then blend (reference look).
-    segments = []
-    for key in ("hough_left", "hough_right"):
-        line = lane_viz.get(key)
-        if line:
-            (x1, y1), (x2, y2) = line
-            segments.append(((_ipt(x1) + ox, _ipt(y1) + oy), (_ipt(x2) + ox, _ipt(y2) + oy)))
-    if segments:
+    # Bold selected lane curves on a separate layer, then blend.
+    curves = []
+    for key in ("hough_left_curve", "hough_right_curve"):
+        curve = lane_viz.get(key)
+        if curve:
+            curves.append(np.array(
+                [[_ipt(x) + ox, _ipt(y) + oy] for x, y in curve], dtype=np.int32
+            ))
+    # Backward compatibility for visualization dictionaries recorded before
+    # quadratic fitting was introduced.
+    if not curves:
+        for key in ("hough_left", "hough_right"):
+            line = lane_viz.get(key)
+            if line:
+                curves.append(np.array(
+                    [[_ipt(x) + ox, _ipt(y) + oy] for x, y in line], dtype=np.int32
+                ))
+    if curves:
         layer = np.zeros_like(frame)
-        for point_a, point_b in segments:
-            cv2.line(layer, point_a, point_b, COLOR_LANE, 6)
+        for curve in curves:
+            cv2.polylines(layer, [curve], False, COLOR_LANE, 6, cv2.LINE_AA)
         cv2.addWeighted(frame, 0.8, layer, 1.0, 0.0, dst=frame)
 
     # Lane-center (green) vs vehicle-center (red) comparison at the near band.
@@ -223,14 +234,23 @@ def draw_lane_mask_view(lane_viz, cmd):
         if center is not None:
             cv2.circle(view, (_ipt(center), (y0 + y1) // 2), 6, color, -1)
 
-    # Raw Hough segments (faint) then the averaged left/right lines (bold).
+    # Raw proposals (faint), selected clusters (amber), then fitted curves (bold).
     for x1, y1, x2, y2 in lane_viz.get("hough_segments") or []:
         cv2.line(view, (x1, y1), (x2, y2), COLOR_LANE_RAW, 1)
-    for key in ("hough_left", "hough_right"):
-        line = lane_viz.get(key)
-        if line:
-            (x1, y1), (x2, y2) = line
-            cv2.line(view, (_ipt(x1), _ipt(y1)), (_ipt(x2), _ipt(y2)), COLOR_LANE, 2)
+    for x1, y1, x2, y2 in lane_viz.get("hough_selected_segments") or []:
+        cv2.line(view, (x1, y1), (x2, y2), COLOR_LANE_SELECTED, 2)
+    curves = []
+    for key in ("hough_left_curve", "hough_right_curve"):
+        curve = lane_viz.get(key)
+        if curve:
+            curves.append(np.array([[_ipt(x), _ipt(y)] for x, y in curve], dtype=np.int32))
+    if not curves:
+        for key in ("hough_left", "hough_right"):
+            line = lane_viz.get(key)
+            if line:
+                curves.append(np.array([[_ipt(x), _ipt(y)] for x, y in line], dtype=np.int32))
+    for curve in curves:
+        cv2.polylines(view, [curve], False, COLOR_LANE, 2, cv2.LINE_AA)
     top_y = lane_viz.get("hough_top_y")
     if top_y is not None:
         cv2.line(view, (0, top_y), (width, top_y), COLOR_LANE_RAW, 1)

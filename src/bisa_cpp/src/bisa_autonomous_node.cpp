@@ -35,6 +35,12 @@ double clamp(double value, double lo, double hi) {
   return std::max(lo, std::min(value, hi));
 }
 
+double evaluate_curve(const cv::Vec3d & curve, double y, int top, int bottom) {
+  const double span = std::max(1, bottom - top);
+  const double t = (y - top) / span;
+  return curve[0] * t * t + curve[1] * t + curve[2];
+}
+
 struct LaneObs {
   bool valid{false};
   double center_error{0.0};
@@ -47,8 +53,9 @@ struct LaneObs {
 
 struct HoughDebug {
   std::vector<cv::Vec4i> segments;
-  std::optional<cv::Vec4d> left_line;
-  std::optional<cv::Vec4d> right_line;
+  std::vector<cv::Vec4i> selected_segments;
+  std::optional<cv::Vec3d> left_curve;
+  std::optional<cv::Vec3d> right_curve;
   cv::Mat edges;
   int top_y{0};
 };
@@ -265,7 +272,8 @@ public:
       debug->mask = lane_mask.clone();
     }
 
-    auto hough_center = hough(lane_mask, debug ? &debug->hough : nullptr);
+    const double vehicle_x = frame.cols / 2.0 - x0;
+    auto hough_center = hough(lane_mask, vehicle_x, debug ? &debug->hough : nullptr);
     auto near_center = hough_center;
     if (!near_center) near_center = contour_center(road_mask, c_.near_y0, 1.0);
     const auto mid_center = contour_center(road_mask, c_.mid_y0, c_.mid_y1);
@@ -343,52 +351,144 @@ private:
     return sx / area_sum;
   }
 
-  std::optional<double> hough(const cv::Mat & l_channel, HoughDebug * debug) const {
+  std::optional<double> hough(
+    const cv::Mat & lane_mask, double vehicle_x, HoughDebug * debug) const
+  {
     cv::Mat blur, edges;
-    cv::GaussianBlur(l_channel, blur, cv::Size(5, 5), 0.0);
+    cv::GaussianBlur(lane_mask, blur, cv::Size(5, 5), 0.0);
     cv::Canny(blur, edges, c_.canny_low, c_.canny_high);
     const int top = std::clamp(static_cast<int>(c_.hough_top * edges.rows), 0, edges.rows - 1);
+    const int bottom = edges.rows - 1;
     edges.rowRange(0, top).setTo(0);
     std::vector<cv::Vec4i> lines;
     cv::HoughLinesP(edges, lines, 1.0, CV_PI / 180.0, c_.hough_threshold,
       c_.hough_min_length, c_.hough_max_gap);
-    std::vector<std::pair<double, double>> left, right;
+
+    struct Candidate {
+      cv::Vec4i segment;
+      double reference_x;
+    };
+    std::vector<Candidate> left, right;
     for (const auto & line : lines) {
-      if (line[0] == line[2]) continue;
-      const double slope = static_cast<double>(line[3] - line[1]) / (line[2] - line[0]);
-      if (std::abs(slope) < c_.hough_slope_min) continue;
-      const double intercept = line[1] - slope * line[0];
-      (slope < 0.0 ? left : right).emplace_back(slope, intercept);
+      const double dx = line[2] - line[0];
+      const double dy = line[3] - line[1];
+      // Express the old |dy/dx| threshold without rejecting vertical lanes.
+      if (std::abs(dy) < 1e-6 || std::abs(dy) < c_.hough_slope_min * std::abs(dx)) continue;
+      const double reference_x = line[0] + (bottom - line[1]) * dx / dy;
+      if (!std::isfinite(reference_x) || reference_x < -0.25 * lane_mask.cols ||
+        reference_x > 1.25 * lane_mask.cols)
+      {
+        continue;
+      }
+      if (reference_x < vehicle_x) {
+        left.push_back({line, reference_x});
+      } else if (reference_x > vehicle_x) {
+        right.push_back({line, reference_x});
+      }
     }
     if (debug) {
       debug->segments = lines;
+      debug->selected_segments.clear();
+      debug->left_curve.reset();
+      debug->right_curve.reset();
       debug->edges = edges.clone();
       debug->top_y = top;
     }
     if (left.empty() && right.empty()) return std::nullopt;
-    auto average_fit = [](const auto & fits) {
-      double sm = 0.0, sb = 0.0;
-      for (const auto & fit : fits) { sm += fit.first; sb += fit.second; }
-      sm /= fits.size(); sb /= fits.size();
-      return std::pair<double, double>{sm, sb};
+
+    auto fit_curve = [top, bottom](const std::vector<Candidate> & candidates)
+      -> std::optional<cv::Vec3d>
+    {
+      std::vector<cv::Point2d> points;
+      constexpr int samples_per_segment = 8;
+      points.reserve(candidates.size() * samples_per_segment);
+      for (const auto & candidate : candidates) {
+        const auto & s = candidate.segment;
+        for (int i = 0; i < samples_per_segment; ++i) {
+          const double ratio = static_cast<double>(i) / (samples_per_segment - 1);
+          points.emplace_back(
+            s[0] + ratio * (s[2] - s[0]),
+            s[1] + ratio * (s[3] - s[1]));
+        }
+      }
+      if (points.size() < 2) return std::nullopt;
+
+      std::vector<double> ys;
+      ys.reserve(points.size());
+      for (const auto & point : points) ys.push_back(point.y);
+      std::sort(ys.begin(), ys.end());
+      int distinct_y = 1;
+      for (std::size_t i = 1; i < ys.size(); ++i) {
+        if (std::abs(ys[i] - ys[i - 1]) > 1.0) ++distinct_y;
+      }
+      const bool quadratic = distinct_y >= 3 &&
+        ys.back() - ys.front() >= 0.15 * std::max(1, bottom - top);
+
+      auto solve_points = [top, bottom](
+        const std::vector<cv::Point2d> & samples, bool use_quadratic)
+        -> std::optional<cv::Vec3d>
+      {
+        const int columns = use_quadratic ? 3 : 2;
+        cv::Mat design(static_cast<int>(samples.size()), columns, CV_64F);
+        cv::Mat values(static_cast<int>(samples.size()), 1, CV_64F);
+        const double span = std::max(1, bottom - top);
+        for (std::size_t i = 0; i < samples.size(); ++i) {
+          const double t = (samples[i].y - top) / span;
+          if (use_quadratic) {
+            design.at<double>(static_cast<int>(i), 0) = t * t;
+            design.at<double>(static_cast<int>(i), 1) = t;
+            design.at<double>(static_cast<int>(i), 2) = 1.0;
+          } else {
+            design.at<double>(static_cast<int>(i), 0) = t;
+            design.at<double>(static_cast<int>(i), 1) = 1.0;
+          }
+          values.at<double>(static_cast<int>(i), 0) = samples[i].x;
+        }
+        cv::Mat solution;
+        if (!cv::solve(design, values, solution, cv::DECOMP_SVD)) return std::nullopt;
+        if (use_quadratic) {
+          return cv::Vec3d(
+            solution.at<double>(0), solution.at<double>(1), solution.at<double>(2));
+        }
+        return cv::Vec3d(0.0, solution.at<double>(0), solution.at<double>(1));
+      };
+
+      return solve_points(points, quadratic);
     };
-    auto endpoints = [top, &l_channel](const auto & fit) {
-      const double bottom = static_cast<double>(l_channel.rows - 1);
-      return cv::Vec4d(
-        (bottom - fit.second) / fit.first, bottom,
-        (top - fit.second) / fit.first, static_cast<double>(top));
+
+    const double cluster_limit = std::max(16.0, lane_mask.cols * 0.12);
+    auto select_curve = [&](const std::vector<Candidate> & candidates, bool is_left)
+      -> std::optional<cv::Vec3d>
+    {
+      if (candidates.empty()) return std::nullopt;
+      const auto seed = is_left ?
+        std::max_element(candidates.begin(), candidates.end(),
+          [](const auto & a, const auto & b) { return a.reference_x < b.reference_x; }) :
+        std::min_element(candidates.begin(), candidates.end(),
+          [](const auto & a, const auto & b) { return a.reference_x < b.reference_x; });
+      std::vector<Candidate> selected;
+      for (const auto & candidate : candidates) {
+        if (std::abs(candidate.reference_x - seed->reference_x) <= cluster_limit) {
+          selected.push_back(candidate);
+          if (debug) debug->selected_segments.push_back(candidate.segment);
+        }
+      }
+      return fit_curve(selected);
     };
-    std::optional<std::pair<double, double>> left_fit, right_fit;
-    if (!left.empty()) left_fit = average_fit(left);
-    if (!right.empty()) right_fit = average_fit(right);
+
+    const auto left_curve = select_curve(left, true);
+    const auto right_curve = select_curve(right, false);
     if (debug) {
-      if (left_fit) debug->left_line = endpoints(*left_fit);
-      if (right_fit) debug->right_line = endpoints(*right_fit);
+      debug->left_curve = left_curve;
+      debug->right_curve = right_curve;
     }
-    const auto target = [top](const auto & fit) { return (top - fit.second) / fit.first; };
-    if (left_fit && right_fit) return (target(*left_fit) + target(*right_fit)) / 2.0;
-    if (left_fit) return target(*left_fit) + l_channel.cols * c_.assumed_lane_width / 2.0;
-    return target(*right_fit) - l_channel.cols * c_.assumed_lane_width / 2.0;
+    if (!left_curve && !right_curve) return std::nullopt;
+    const auto target = [top, bottom](const cv::Vec3d & curve) {
+      return evaluate_curve(curve, top, top, bottom);
+    };
+    if (left_curve && right_curve) return (target(*left_curve) + target(*right_curve)) / 2.0;
+    if (left_curve) return target(*left_curve) + lane_mask.cols * c_.assumed_lane_width / 2.0;
+    return target(*right_curve) - lane_mask.cols * c_.assumed_lane_width / 2.0;
   }
 
   Config c_;
@@ -1040,15 +1140,20 @@ private:
       "lane ROI " + std::to_string(debug.roi.width) + "x" + std::to_string(debug.roi.height),
       cv::Point(debug.roi.x + 4, std::max(16, debug.roi.y + 18)), 0.5, roi_color);
 
-    auto draw_average = [&](const std::optional<cv::Vec4d> & line) {
-      if (!line) return;
-      cv::line(frame,
-        cv::Point(cvRound((*line)[0]) + debug.roi.x, cvRound((*line)[1]) + debug.roi.y),
-        cv::Point(cvRound((*line)[2]) + debug.roi.x, cvRound((*line)[3]) + debug.roi.y),
-        lane_color, 5, cv::LINE_AA);
+    auto draw_curve = [&](const std::optional<cv::Vec3d> & curve) {
+      if (!curve) return;
+      std::vector<cv::Point> points;
+      const int bottom = debug.roi.height - 1;
+      for (int y = debug.hough.top_y; y <= bottom; y += 4) {
+        const double x = evaluate_curve(*curve, y, debug.hough.top_y, bottom);
+        if (std::isfinite(x) && x >= -debug.roi.width && x <= 2 * debug.roi.width) {
+          points.emplace_back(cvRound(x) + debug.roi.x, y + debug.roi.y);
+        }
+      }
+      if (points.size() >= 2) cv::polylines(frame, points, false, lane_color, 5, cv::LINE_AA);
     };
-    draw_average(debug.hough.left_line);
-    draw_average(debug.hough.right_line);
+    draw_curve(debug.hough.left_curve);
+    draw_curve(debug.hough.right_curve);
 
     const int center_x = frame.cols / 2;
     cv::line(frame, cv::Point(center_x, 0), cv::Point(center_x, frame.rows - 1),
@@ -1092,15 +1197,26 @@ private:
       cv::line(view, cv::Point(segment[0], segment[1]), cv::Point(segment[2], segment[3]),
         cv::Scalar(0, 160, 0), 1);
     }
-    auto draw_average = [&](const std::optional<cv::Vec4d> & line) {
-      if (!line) return;
-      cv::line(view,
-        cv::Point(cvRound((*line)[0]), cvRound((*line)[1])),
-        cv::Point(cvRound((*line)[2]), cvRound((*line)[3])),
-        cv::Scalar(0, 255, 0), 2, cv::LINE_AA);
+    for (const auto & segment : debug.hough.selected_segments) {
+      cv::line(view, cv::Point(segment[0], segment[1]), cv::Point(segment[2], segment[3]),
+        cv::Scalar(0, 200, 255), 2, cv::LINE_AA);
+    }
+    auto draw_curve = [&](const std::optional<cv::Vec3d> & curve) {
+      if (!curve) return;
+      std::vector<cv::Point> points;
+      const int bottom = view.rows - 1;
+      for (int y = debug.hough.top_y; y <= bottom; y += 4) {
+        const double x = evaluate_curve(*curve, y, debug.hough.top_y, bottom);
+        if (std::isfinite(x) && x >= -view.cols && x <= 2 * view.cols) {
+          points.emplace_back(cvRound(x), y);
+        }
+      }
+      if (points.size() >= 2) {
+        cv::polylines(view, points, false, cv::Scalar(0, 255, 0), 2, cv::LINE_AA);
+      }
     };
-    draw_average(debug.hough.left_line);
-    draw_average(debug.hough.right_line);
+    draw_curve(debug.hough.left_curve);
+    draw_curve(debug.hough.right_curve);
     cv::line(view, cv::Point(0, debug.hough.top_y),
       cv::Point(view.cols - 1, debug.hough.top_y), cv::Scalar(0, 160, 0), 1);
 

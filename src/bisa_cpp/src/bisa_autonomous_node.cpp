@@ -1532,7 +1532,7 @@ private:
         // speed_min. OUT perception is white-only, so an adjacent yellow IN
         // split cannot influence center, curvature, or steering.
         auto cmd = controller_.follow_with_startup(
-          lane, config_.speed_max, config_.s_curve_limit);
+          lane, config_.speed_max, config_.straight_limit);
         if (auto decision = sign_decision()) {
           fork_decision_ = *decision;
           transition(MissionState::OUT_FORK_SIGN_ADVANCE, now_sec);

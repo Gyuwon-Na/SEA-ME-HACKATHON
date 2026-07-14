@@ -83,16 +83,22 @@ struct Config {
   int lane_height{240};
   int lane_x{-1};
   int lane_y{-1};
-  int lab_l_min{0}, lab_l_max{90};
-  int lab_a_min{105}, lab_a_max{150};
-  int lab_b_min{105}, lab_b_max{150};
+  int lab_l_min{20}, lab_l_max{205};
+  int lab_a_min{112}, lab_a_max{145};
+  int lab_b_min{122}, lab_b_max{148};
+  int white_l_min{200}, white_l_max{255};
+  int white_a_min{115}, white_a_max{140};
+  int white_b_min{115}, white_b_max{145};
+  int yellow_l_min{80}, yellow_l_max{255};
+  int yellow_a_min{100}, yellow_a_max{140};
+  int yellow_b_min{165}, yellow_b_max{255};
   double clahe_clip{2.0};
   int clahe_tile{8};
   int morph_open{3}, morph_close{5};
   double min_area_ratio{0.006};
   double fork_area_ratio{0.035};
   double near_y0{0.70}, mid_y0{0.52}, mid_y1{0.75}, far_y0{0.32}, far_y1{0.58};
-  double hough_top{0.58};
+  double hough_top{0.45};
   int canny_low{50}, canny_high{150}, hough_threshold{38};
   int hough_min_length{30}, hough_max_gap{290};
   double hough_slope_min{0.22}, assumed_lane_width{0.62}, max_center_jump{0.70};
@@ -145,6 +151,12 @@ Config load_config(const std::string & path) {
   read_value(lane, "lab_l_min", c.lab_l_min); read_value(lane, "lab_l_max", c.lab_l_max);
   read_value(lane, "lab_a_min", c.lab_a_min); read_value(lane, "lab_a_max", c.lab_a_max);
   read_value(lane, "lab_b_min", c.lab_b_min); read_value(lane, "lab_b_max", c.lab_b_max);
+  read_value(lane, "white_l_min", c.white_l_min); read_value(lane, "white_l_max", c.white_l_max);
+  read_value(lane, "white_a_min", c.white_a_min); read_value(lane, "white_a_max", c.white_a_max);
+  read_value(lane, "white_b_min", c.white_b_min); read_value(lane, "white_b_max", c.white_b_max);
+  read_value(lane, "yellow_l_min", c.yellow_l_min); read_value(lane, "yellow_l_max", c.yellow_l_max);
+  read_value(lane, "yellow_a_min", c.yellow_a_min); read_value(lane, "yellow_a_max", c.yellow_a_max);
+  read_value(lane, "yellow_b_min", c.yellow_b_min); read_value(lane, "yellow_b_max", c.yellow_b_max);
   read_value(lane, "lab_clahe_clip", c.clahe_clip); read_value(lane, "lab_clahe_tile", c.clahe_tile);
   read_value(lane, "morph_open_kernel", c.morph_open); read_value(lane, "morph_close_kernel", c.morph_close);
   read_value(lane, "min_component_area_ratio", c.min_area_ratio);
@@ -224,28 +236,45 @@ public:
     cv::split(lab, channels);
     clahe_->apply(channels[0], channels[0]);
     cv::merge(channels, lab);
-    cv::Mat mask;
+    cv::Mat road_mask;
     cv::inRange(
       lab,
       cv::Scalar(c_.lab_l_min, c_.lab_a_min, c_.lab_b_min),
-      cv::Scalar(c_.lab_l_max, c_.lab_a_max, c_.lab_b_max), mask);
-    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, open_kernel_);
-    cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, close_kernel_);
+      cv::Scalar(c_.lab_l_max, c_.lab_a_max, c_.lab_b_max), road_mask);
+    cv::morphologyEx(road_mask, road_mask, cv::MORPH_OPEN, open_kernel_);
+    cv::morphologyEx(road_mask, road_mask, cv::MORPH_CLOSE, close_kernel_);
+
+    // Steering uses paint color rather than every brightness edge. Keeping the
+    // white and yellow ranges separate is essential: one rectangular LAB band
+    // cannot include neutral white and high-b yellow without also admitting the
+    // dark road between them.
+    cv::Mat white_mask, yellow_mask, lane_mask;
+    cv::inRange(
+      lab,
+      cv::Scalar(c_.white_l_min, c_.white_a_min, c_.white_b_min),
+      cv::Scalar(c_.white_l_max, c_.white_a_max, c_.white_b_max), white_mask);
+    cv::inRange(
+      lab,
+      cv::Scalar(c_.yellow_l_min, c_.yellow_a_min, c_.yellow_b_min),
+      cv::Scalar(c_.yellow_l_max, c_.yellow_a_max, c_.yellow_b_max), yellow_mask);
+    cv::bitwise_or(white_mask, yellow_mask, lane_mask);
+    cv::morphologyEx(lane_mask, lane_mask, cv::MORPH_OPEN, open_kernel_);
+    cv::morphologyEx(lane_mask, lane_mask, cv::MORPH_CLOSE, close_kernel_);
     if (debug) {
       debug->roi = cv::Rect(x0, y0, rw, rh);
-      debug->mask = mask.clone();
+      debug->mask = lane_mask.clone();
     }
 
-    auto hough_center = hough(channels[0], debug ? &debug->hough : nullptr);
+    auto hough_center = hough(lane_mask, debug ? &debug->hough : nullptr);
     auto near_center = hough_center;
-    if (!near_center) near_center = contour_center(mask, c_.near_y0, 1.0);
-    const auto mid_center = contour_center(mask, c_.mid_y0, c_.mid_y1);
-    const auto far_center = contour_center(mask, c_.far_y0, c_.far_y1);
+    if (!near_center) near_center = contour_center(road_mask, c_.near_y0, 1.0);
+    const auto mid_center = contour_center(road_mask, c_.mid_y0, c_.mid_y1);
+    const auto far_center = contour_center(road_mask, c_.far_y0, c_.far_y1);
     if (debug) {
       debug->bands = {
-        make_range(mask.rows, c_.near_y0, 1.0),
-        make_range(mask.rows, c_.mid_y0, c_.mid_y1),
-        make_range(mask.rows, c_.far_y0, c_.far_y1)};
+        make_range(road_mask.rows, c_.near_y0, 1.0),
+        make_range(road_mask.rows, c_.mid_y0, c_.mid_y1),
+        make_range(road_mask.rows, c_.far_y0, c_.far_y1)};
       debug->centers = {near_center, mid_center, far_center};
     }
     if (!near_center) {
@@ -268,9 +297,11 @@ public:
     obs.curvature = clamp(std::abs(far - *near_center) / frame.cols * 2.5, 0.0, 1.0);
     obs.curvature = std::max(obs.curvature, clamp(std::abs(mid - *near_center) / frame.cols * 2.0, 0.0, 1.0));
 
-    const int fy0 = std::clamp(static_cast<int>(c_.far_y0 * mask.rows), 0, mask.rows - 1);
-    const int fy1 = std::clamp(static_cast<int>(c_.far_y1 * mask.rows), fy0 + 1, mask.rows);
-    const cv::Mat far_mask = mask.rowRange(fy0, fy1);
+    const int fy0 = std::clamp(
+      static_cast<int>(c_.far_y0 * road_mask.rows), 0, road_mask.rows - 1);
+    const int fy1 = std::clamp(
+      static_cast<int>(c_.far_y1 * road_mask.rows), fy0 + 1, road_mask.rows);
+    const cv::Mat far_mask = road_mask.rowRange(fy0, fy1);
     const int half = far_mask.cols / 2;
     const double left_ratio = cv::countNonZero(far_mask.colRange(0, half)) /
       static_cast<double>(far_mask.rows * half);
@@ -512,6 +543,18 @@ private:
     config_.lab_a_max = declare_parameter<int>("lane.lab_a_max", config_.lab_a_max);
     config_.lab_b_min = declare_parameter<int>("lane.lab_b_min", config_.lab_b_min);
     config_.lab_b_max = declare_parameter<int>("lane.lab_b_max", config_.lab_b_max);
+    config_.white_l_min = declare_parameter<int>("lane.white_l_min", config_.white_l_min);
+    config_.white_l_max = declare_parameter<int>("lane.white_l_max", config_.white_l_max);
+    config_.white_a_min = declare_parameter<int>("lane.white_a_min", config_.white_a_min);
+    config_.white_a_max = declare_parameter<int>("lane.white_a_max", config_.white_a_max);
+    config_.white_b_min = declare_parameter<int>("lane.white_b_min", config_.white_b_min);
+    config_.white_b_max = declare_parameter<int>("lane.white_b_max", config_.white_b_max);
+    config_.yellow_l_min = declare_parameter<int>("lane.yellow_l_min", config_.yellow_l_min);
+    config_.yellow_l_max = declare_parameter<int>("lane.yellow_l_max", config_.yellow_l_max);
+    config_.yellow_a_min = declare_parameter<int>("lane.yellow_a_min", config_.yellow_a_min);
+    config_.yellow_a_max = declare_parameter<int>("lane.yellow_a_max", config_.yellow_a_max);
+    config_.yellow_b_min = declare_parameter<int>("lane.yellow_b_min", config_.yellow_b_min);
+    config_.yellow_b_max = declare_parameter<int>("lane.yellow_b_max", config_.yellow_b_max);
     config_.clahe_clip = declare_parameter<double>("lane.lab_clahe_clip", config_.clahe_clip);
     config_.clahe_tile = declare_parameter<int>("lane.lab_clahe_tile", config_.clahe_tile);
     config_.morph_open = declare_parameter<int>("lane.morph_open_kernel", config_.morph_open);
@@ -582,6 +625,18 @@ private:
         else if (name == "lane.lab_a_max") next.lab_a_max = parameter.as_int();
         else if (name == "lane.lab_b_min") next.lab_b_min = parameter.as_int();
         else if (name == "lane.lab_b_max") next.lab_b_max = parameter.as_int();
+        else if (name == "lane.white_l_min") next.white_l_min = parameter.as_int();
+        else if (name == "lane.white_l_max") next.white_l_max = parameter.as_int();
+        else if (name == "lane.white_a_min") next.white_a_min = parameter.as_int();
+        else if (name == "lane.white_a_max") next.white_a_max = parameter.as_int();
+        else if (name == "lane.white_b_min") next.white_b_min = parameter.as_int();
+        else if (name == "lane.white_b_max") next.white_b_max = parameter.as_int();
+        else if (name == "lane.yellow_l_min") next.yellow_l_min = parameter.as_int();
+        else if (name == "lane.yellow_l_max") next.yellow_l_max = parameter.as_int();
+        else if (name == "lane.yellow_a_min") next.yellow_a_min = parameter.as_int();
+        else if (name == "lane.yellow_a_max") next.yellow_a_max = parameter.as_int();
+        else if (name == "lane.yellow_b_min") next.yellow_b_min = parameter.as_int();
+        else if (name == "lane.yellow_b_max") next.yellow_b_max = parameter.as_int();
         else if (name == "lane.lab_clahe_clip") next.clahe_clip = parameter.as_double();
         else if (name == "lane.lab_clahe_tile") next.clahe_tile = parameter.as_int();
         else if (name == "lane.morph_open_kernel") next.morph_open = parameter.as_int();
@@ -621,8 +676,13 @@ private:
       return rcl_interfaces::msg::SetParametersResult().set__successful(false).set__reason(error.what());
     }
 
-    const bool lab_valid = next.lab_l_min <= next.lab_l_max && next.lab_a_min <= next.lab_a_max &&
-      next.lab_b_min <= next.lab_b_max;
+    const bool lab_valid =
+      next.lab_l_min <= next.lab_l_max && next.lab_a_min <= next.lab_a_max &&
+      next.lab_b_min <= next.lab_b_max &&
+      next.white_l_min <= next.white_l_max && next.white_a_min <= next.white_a_max &&
+      next.white_b_min <= next.white_b_max &&
+      next.yellow_l_min <= next.yellow_l_max && next.yellow_a_min <= next.yellow_a_max &&
+      next.yellow_b_min <= next.yellow_b_max;
     const bool geometry_valid = next.lane_width >= 1 && next.lane_height >= 1 && next.clahe_tile >= 1 &&
       next.morph_open >= 1 && next.morph_close >= 1 && next.lookahead > 0.0 && next.wheelbase > 0.0 &&
       next.max_steer_deg > 0.0 && next.gamma > 0.0;
@@ -1051,7 +1111,8 @@ private:
     cv::arrowedLine(view, steer_origin,
       steering_tip(steer_origin, cmd.steering, static_cast<int>(view.rows * 0.45)),
       cv::Scalar(0, 0, 255), 2, cv::LINE_AA, 0, 0.2);
-    put_outlined_text(view, "mask=LAB " + std::to_string(view.cols) + "x" + std::to_string(view.rows),
+    put_outlined_text(view, "mask=WHITE|YELLOW " + std::to_string(view.cols) + "x" +
+      std::to_string(view.rows),
       cv::Point(8, 20));
     std::ostringstream status;
     status.setf(std::ios::fixed); status.precision(2);

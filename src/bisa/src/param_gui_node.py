@@ -48,7 +48,7 @@ SPEC = {
         ("rate limit", "steering.rate_limit_per_cmd", "f", 0.0, 0.5),
         ("steer sign", "steering.steer_sign", "i", -1, 1),
     ],
-    "LAB Mask": [
+    "LAB Road": [
         ("L min", "lane.lab_l_min", "i", 0, 255),
         ("L max", "lane.lab_l_max", "i", 0, 255),
         ("A min", "lane.lab_a_min", "i", 0, 255),
@@ -59,6 +59,22 @@ SPEC = {
         ("clahe tile", "lane.lab_clahe_tile", "i", 1, 16),
         ("morph open", "lane.morph_open_kernel", "i", 1, 15),
         ("morph close", "lane.morph_close_kernel", "i", 1, 15),
+    ],
+    "Lane White": [
+        ("L min", "lane.white_l_min", "i", 0, 255),
+        ("L max", "lane.white_l_max", "i", 0, 255),
+        ("A min", "lane.white_a_min", "i", 0, 255),
+        ("A max", "lane.white_a_max", "i", 0, 255),
+        ("B min", "lane.white_b_min", "i", 0, 255),
+        ("B max", "lane.white_b_max", "i", 0, 255),
+    ],
+    "Lane Yellow": [
+        ("L min", "lane.yellow_l_min", "i", 0, 255),
+        ("L max", "lane.yellow_l_max", "i", 0, 255),
+        ("A min", "lane.yellow_a_min", "i", 0, 255),
+        ("A max", "lane.yellow_a_max", "i", 0, 255),
+        ("B min", "lane.yellow_b_min", "i", 0, 255),
+        ("B max", "lane.yellow_b_max", "i", 0, 255),
     ],
     "Throttle": [
         ("min speed", "throttle.speed_min", "f", 0.0, 1.0),

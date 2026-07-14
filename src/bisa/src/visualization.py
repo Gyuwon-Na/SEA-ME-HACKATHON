@@ -194,7 +194,10 @@ def draw_lane_mask_view(lane_viz, cmd):
 
     if not lane_viz:
         return None
-    mask = lane_viz.get("road_mask")
+    mask = lane_viz.get("lane_mask")
+    if mask is None:
+        # Backward compatibility with older recorded visualization dictionaries.
+        mask = lane_viz.get("road_mask")
     if mask is None:
         return None
     view = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
@@ -255,7 +258,7 @@ def draw_lane_mask_view(lane_viz, cmd):
 
     err = lane_viz.get("center_error", 0.0)
     draw_hud(view, [
-        f"mask=LAB {width}x{height}",
+        f"mask=WHITE|YELLOW {width}x{height}",
         f"err={err:+.2f} steer={steering:+.2f}",
     ])
     return view

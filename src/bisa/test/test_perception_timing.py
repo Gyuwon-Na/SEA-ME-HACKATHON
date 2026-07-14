@@ -64,3 +64,23 @@ def test_lane_pipeline_prepares_lab_once_per_frame(monkeypatch):
     monkeypatch.setattr(cv2, "cvtColor", counted)
     perception.compute_lane_obs(frame)
     assert calls == 1
+
+
+def test_lane_mask_keeps_white_and_yellow_but_rejects_road_and_skin():
+    """The steering mask is paint-only, not the separate dark-road mask."""
+
+    config = AutonomousConfig()
+    config.lane.morph_open_kernel = 1
+    config.lane.morph_close_kernel = 1
+    perception = LanePerception(config)
+    prepared_lab = np.array([[
+        [230, 128, 128],  # white paint
+        [210, 127, 190],  # yellow paint
+        [90, 128, 135],   # dark road
+        [180, 132, 150],  # skin-like obstacle
+    ]], dtype=np.uint8)
+    frame = np.zeros((1, 4, 3), dtype=np.uint8)
+
+    mask = perception.build_lane_mask(frame, prepared_lab=prepared_lab)
+
+    assert mask.tolist() == [[255, 255, 0, 0]]

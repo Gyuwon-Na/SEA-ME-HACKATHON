@@ -21,19 +21,33 @@ lane:
   # LAB 도로 마스크: CLAHE 적용된 LAB 이미지에 아래 min/max 임계값으로 inRange
   # 이진화. "Lane ROI Mask" 창을 보면서 튜닝.
   # OpenCV 8bit LAB: L 0..255, a/b 0..255 (128 = 무채색).
-  lab_l_min: 0                 # L(명도) 하한
-  lab_l_max: 90                # L 상한 — 어두운 노면만 통과(밝은 배경 제외)
-  lab_a_min: 105               # a채널 하한(무채색 128 근처만)
-  lab_a_max: 150               # a채널 상한
-  lab_b_min: 105               # b채널 하한
-  lab_b_max: 150               # b채널 상한
+  lab_l_min: 20                # L 하한 — 검은 노면의 어두운 부분 유지
+  lab_l_max: 205               # L 상한 — 노면 반사는 유지하고 흰 차선은 제외
+  lab_a_min: 112               # a 하한 — 무채색 노면 범위
+  lab_a_max: 145               # a 상한 — 붉은/주황 물체 제외
+  lab_b_min: 122               # b 하한 — 파란 바닥 제외
+  lab_b_max: 148               # b 상한 — 노란/주황 물체 제외
+  # 실제 주행 차선 마스크 = white 범위 OR yellow 범위. 노면 마스크와 분리해
+  # 사람/물체의 명도 경계가 Hough 차선으로 들어가지 않게 한다.
+  white_l_min: 200             # 밝은 흰색 페인트
+  white_l_max: 255
+  white_a_min: 115             # 무채색 128 주변
+  white_a_max: 140
+  white_b_min: 115
+  white_b_max: 145
+  yellow_l_min: 80             # 그림자진 노란 페인트도 유지
+  yellow_l_max: 255
+  yellow_a_min: 100
+  yellow_a_max: 140
+  yellow_b_min: 165            # 노란색 핵심: 높은 b, 피부/노면 제외
+  yellow_b_max: 255
   lab_clahe_clip: 2.0          # 이진화/캐니 전 L채널 CLAHE 대비제한
   lab_clahe_tile: 8            # CLAHE 타일 그리드 크기
   morph_open_kernel: 3         # 열림 커널 — 작은 잡티 제거
   morph_close_kernel: 5        # 닫힘 커널 — 끊긴 차선 메움
   min_component_area_ratio: 0.006  # 이 면적비 미만 연결요소는 버림(노이즈 컷)
   fork_area_ratio: 0.035       # 갈림길로 인정할 최소 분기 영역 면적비
-  hough_roi_top_ratio: 0.58    # 허프 라인 검출을 이 y비율 아래에서만 수행
+  hough_roi_top_ratio: 0.45    # 곡선의 좌우 차선을 함께 포함하도록 탐색 범위 확장
   hough_canny_low: 50          # 캐니 엣지 하한 임계
   hough_canny_high: 150        # 캐니 엣지 상한 임계
   hough_threshold: 38          # was 45: 커브의 짧은 세그먼트도 라인으로 채택 (표 낮춤)

@@ -87,9 +87,9 @@ class LanePerception:
     def prepare_lane_lab(self, frame_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Returns one CLAHE-equalized LAB image and its L channel.
 
-        Road masking and Canny/Hough both consume the same enhanced L channel.
-        Preparing it once avoids a second BGR->LAB conversion, split, and CLAHE
-        pass for every camera frame.
+        Road masking and white/yellow paint masking consume the same enhanced
+        LAB image. Preparing it once avoids a second BGR->LAB conversion, split,
+        and CLAHE pass for every camera frame.
         """
 
         lab = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2LAB)
@@ -111,6 +111,32 @@ class LanePerception:
         mask = cv2.inRange(lab, lower, upper)
         open_kernel = self._get_morph_kernel(self.config.lane.morph_open_kernel)
         close_kernel = self._get_morph_kernel(self.config.lane.morph_close_kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
+        return mask
+
+    def build_lane_mask(
+        self, frame_bgr: np.ndarray, prepared_lab: np.ndarray | None = None
+    ) -> np.ndarray:
+        """Extracts white and yellow lane paint as one binary steering mask."""
+
+        cfg = self.config.lane
+        lab = prepared_lab
+        if lab is None:
+            lab, _ = self.prepare_lane_lab(frame_bgr)
+        white = cv2.inRange(
+            lab,
+            np.array([cfg.white_l_min, cfg.white_a_min, cfg.white_b_min], dtype=np.uint8),
+            np.array([cfg.white_l_max, cfg.white_a_max, cfg.white_b_max], dtype=np.uint8),
+        )
+        yellow = cv2.inRange(
+            lab,
+            np.array([cfg.yellow_l_min, cfg.yellow_a_min, cfg.yellow_b_min], dtype=np.uint8),
+            np.array([cfg.yellow_l_max, cfg.yellow_a_max, cfg.yellow_b_max], dtype=np.uint8),
+        )
+        mask = cv2.bitwise_or(white, yellow)
+        open_kernel = self._get_morph_kernel(cfg.morph_open_kernel)
+        close_kernel = self._get_morph_kernel(cfg.morph_close_kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
         return mask
@@ -358,32 +384,31 @@ class LanePerception:
         except cv2.error:
             prepared_lab = None
             prepared_l_channel = np.zeros(roi_frame.shape[:2], dtype=np.uint8)
-        mask = self.build_road_mask(roi_frame, prepared_lab=prepared_lab)
+        road_mask = self.build_road_mask(roi_frame, prepared_lab=prepared_lab)
+        lane_mask = self.build_lane_mask(roi_frame, prepared_lab=prepared_lab)
         if collect_viz:
-            # Shown in the lane mask debug view: the binarized road mask, so the
-            # HSV/LAB threshold and morphology sliders have a visible effect.
-            viz_tmp["road_mask"] = mask
+            # The operator view shows only the paint mask used by Canny/Hough.
+            # Road remains separate for centroid fallback and fork decisions.
+            viz_tmp["lane_mask"] = lane_mask
             viz_tmp["frame_size"] = (int(full_width), int(full_height))
-        height, width = mask.shape[:2]
-        mid = self.region_of_interest(mask, self.config.roi.mid_y0, self.config.roi.mid_y1)
-        far = self.region_of_interest(mask, self.config.roi.far_y0, self.config.roi.far_y1)
+        height, width = road_mask.shape[:2]
+        mid = self.region_of_interest(road_mask, self.config.roi.mid_y0, self.config.roi.mid_y1)
+        far = self.region_of_interest(road_mask, self.config.roi.far_y0, self.config.roi.far_y1)
 
-        # Primary lane center follows the reference lane_detector_1029.py exactly:
-        # L-channel CLAHE -> GaussianBlur -> Canny -> Hough lines -> slope-split
-        # average -> lane center from the left/right line x at the ROI top. This
-        # always runs (the PC does the heavy compute), matching the reference which
-        # is purely Hough-line based rather than road-mask based.
+        # Primary lane center uses the color-gated white|yellow paint mask. This
+        # rejects unrelated brightness edges (people, arms, furniture) before
+        # Canny/Hough while retaining both lane colors used on the course.
         hough_center, _, _ = self.average_hough_lanes(
             roi_frame,
             record=collect_viz,
             viz_out=viz_tmp,
-            prepared_l_channel=prepared_l_channel,
+            prepared_l_channel=lane_mask,
         )
         near_center = hough_center
         if near_center is None:
             # Fall back to the black-road-mask centroid only when no lane line was
             # found, so a fully black frame still yields a usable center.
-            near = self.region_of_interest(mask, self.config.roi.near_y0, 1.0)
+            near = self.region_of_interest(road_mask, self.config.roi.near_y0, 1.0)
             near_center = self.contour_center_x(near, self.config.lane.min_component_area_ratio)
 
         # Far/mid centroids stay mask-based; they feed curvature and fork cues
@@ -416,7 +441,7 @@ class LanePerception:
         if mid_center is not None:
             curvature = max(curvature, clamp(abs(mid_or_near - near_center) / max(float(full_width), 1.0) * 2.0, 0.0, 1.0))
 
-        fork_seen, left_branch, right_branch = self.detect_fork_candidates(mask)
+        fork_seen, left_branch, right_branch = self.detect_fork_candidates(road_mask)
         self.prev_center_error = clamp(center_error, -1.0, 1.0)
         if collect_viz:
             self._record_obs_viz(width, height, near_center, mid_center, far_center,

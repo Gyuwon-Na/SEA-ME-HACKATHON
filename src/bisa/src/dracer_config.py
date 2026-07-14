@@ -54,12 +54,26 @@ class LaneVisionConfig:
     # LAB image using these per-channel min/max bounds. Tune them live from the
     # "Lane ROI Mask" debug window; OpenCV 8-bit LAB ranges are L 0..255 and
     # a/b 0..255 with 128 as the neutral (gray) point.
-    lab_l_min: int = 0
-    lab_l_max: int = 90
-    lab_a_min: int = 105
-    lab_a_max: int = 150
-    lab_b_min: int = 105
-    lab_b_max: int = 150
+    lab_l_min: int = 20
+    lab_l_max: int = 205
+    lab_a_min: int = 112
+    lab_a_max: int = 145
+    lab_b_min: int = 122
+    lab_b_max: int = 148
+    # Steering mask is the union of a neutral bright-white band and a high-b
+    # yellow band. It intentionally stays separate from the road mask above.
+    white_l_min: int = 200
+    white_l_max: int = 255
+    white_a_min: int = 115
+    white_a_max: int = 140
+    white_b_min: int = 115
+    white_b_max: int = 145
+    yellow_l_min: int = 80
+    yellow_l_max: int = 255
+    yellow_a_min: int = 100
+    yellow_a_max: int = 140
+    yellow_b_min: int = 165
+    yellow_b_max: int = 255
     # CLAHE applied to the L channel before LAB thresholding AND before the
     # Canny/Hough lane-line pass (previously hardcoded clip=2.0 tile=8).
     lab_clahe_clip: float = 2.0
@@ -68,7 +82,7 @@ class LaneVisionConfig:
     morph_close_kernel: int = 5
     min_component_area_ratio: float = 0.006
     fork_area_ratio: float = 0.035
-    hough_roi_top_ratio: float = 0.58
+    hough_roi_top_ratio: float = 0.45
     hough_canny_low: int = 50
     hough_canny_high: int = 150
     hough_threshold: int = 45

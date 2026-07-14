@@ -112,13 +112,13 @@ throttle:
   s_curve_cap: 0.22        # IN 진입/랩 골격용 속도 상한
   fork_approach_cap: 0.22  # 표지판 확정 직후 방향별 선제 강제 조향 속도 상한
   fork_commit_cap: 0.22    # 갈림길 방향 강제 조향은 가장 낮은 별도 상한 사용
-  post_fork_cap: 0.30      # 갈림길 이후 일반 차선의 직선에서만 전역 최고속 허용
+  post_fork_cap: 0.25      # 갈림길 이후 일반 차선의 직선에서만 전역 최고속 허용
   post_fork_min: 0.20      # 전 구간에서 동일한 전역 최저속까지 감속 허용
-  ramp_up_per_cmd: 0.015   # 20Hz에서 틱당 가속량(감속은 즉시 반영)
-  steer_slowdown: 0.22     # 조향 클수록 감속하는 계수
-  curvature_slowdown: 0.06 # 곡률 클수록 감속하는 계수
-  straight_steer_deadband: 0.05     # 이 이하 조향 노이즈는 직선으로 간주
-  straight_curvature_deadband: 0.05 # 이 이하 곡률 노이즈는 직선으로 간주
+  ramp_up_per_cmd: 0.005   # 20Hz에서 틱당 가속량(감속은 즉시 반영)
+  steer_slowdown: 0.05     # 조향 클수록 감속하는 계수
+  curvature_slowdown: 0.025 # 곡률 클수록 감속하는 계수
+  straight_steer_deadband: 0.06     # 이 이하 조향 노이즈는 직선으로 간주
+  straight_curvature_deadband: 0.06 # 이 이하 곡률 노이즈는 직선으로 간주
 
 # Pure pursuit steering. center_error(정규화 오차)가 lateral_scale_m 미터의
 # 횡방향 오프셋으로 변환되고, lookahead_m 앞의 목표점을 향한 자전거 모델 조향각
@@ -126,10 +126,10 @@ throttle:
 # curve_blend 는 도로 굽어짐(signed curvature)만큼 목표점을 이동시킴.
 steering:
   steer_sign: 1              # 조향 부호(좌우 반대로 나가면 -1)
-  lookahead_m: 0.60          # 직선 순수추종 전방주시 거리(m)
+  lookahead_m: 0.62          # 직선 순수추종 전방주시 거리(m)
   curve_lookahead_min_m: 0.38 # 최대 곡률에서의 최소 전방주시(짧은 맵 코너용)
-  curve_response_power: 0.65  # 1보다 작아 커브 진입부터 반응하되 sqrt보다 완만
-  curve_steer_boost: 0.15     # 커브에서만 최대 20% 조향 증폭(직선=0% 증폭)
+  curve_response_power: 0.80  # 1보다 작아 커브 진입부터 반응하되 sqrt보다 완만
+  curve_steer_boost: 0.10     # 커브에서만 최대 20% 조향 증폭(직선=0% 증폭)
   fork_curve_scale: 0.25      # 갈림길 ROI가 만든 가짜 곡률/상쇄 영향을 25%로 제한
   fork_forced_error: 0.3    # LEFT(+)/RIGHT(-)에 동일 크기로 적용하는 방향 목표
   wheelbase_m: 0.17          # 실차 전·후차축 거리(자전거 모델, m)
@@ -137,7 +137,7 @@ steering:
   max_steer_deg: 35.0        # 조향각 정규화 기준(풀락 각도)
   pp_gain: 1.0               # 순수추종 조향 게인
   curve_blend: 1.0           # 곡률로 목표점 이동시키는 정도
-  rate_limit_per_cmd: 0.12   # 20Hz 기준 풀 조향까지 약 0.4s, 급커브 응답 개선
+  rate_limit_per_cmd: 0.09   # 20Hz 기준 풀 조향까지 약 0.4s, 급커브 응답 개선
   straight_limit: 0.60       # 출발 직후 완만한 상단 커브 허용
   s_curve_limit: 0.95        # 원형교차로/S자 최대 조향(1.0 풀락은 여유로 보존)
   fork_approach_limit: 0.35  # 표지판 방향 펄스는 풀 조향의 35% 이내로 제한

@@ -45,6 +45,7 @@ double evaluate_curve(const cv::Vec3d & curve, double y, int top, int bottom) {
 }
 
 enum class RouteMode {OUT, IN, LANE};
+enum class ForkDirection {NONE, LEFT, RIGHT};
 
 RouteMode parse_route_mode(std::string value) {
   std::transform(value.begin(), value.end(), value.begin(),
@@ -88,6 +89,8 @@ const char * state_name(MissionState state) {
 struct LaneObs {
   bool valid{false};
   bool both_lanes{false};
+  bool branch_pair_selected{false};
+  bool branch_scene_ambiguous{false};
   double center_error{0.0};
   double curvature{0.0};
   double signed_curvature{0.0};
@@ -313,7 +316,8 @@ public:
   }
 
   LaneObs process(
-    const cv::Mat & frame, bool include_yellow, LaneDebug * debug = nullptr)
+    const cv::Mat & frame, bool include_yellow,
+    ForkDirection fork_direction = ForkDirection::NONE, LaneDebug * debug = nullptr)
   {
     LaneObs obs;
     if (frame.empty()) return obs;
@@ -388,9 +392,12 @@ public:
     const std::optional<double> previous_center_local = previous_center_ ?
       std::optional<double>(*previous_center_ - x0) : std::nullopt;
     bool both_lanes = false;
+    bool branch_pair_selected = false;
+    bool branch_scene_ambiguous = false;
     auto hough_center = hough(
       lane_mask, vehicle_x, filtered_curvature_, previous_center_local,
-      &both_lanes, debug ? &debug->hough : nullptr);
+      fork_direction, &both_lanes, &branch_pair_selected, &branch_scene_ambiguous,
+      debug ? &debug->hough : nullptr);
     auto near_center = hough_center;
     // OUT deliberately has no road-mask fallback: when white paint is absent,
     // hold the previous command instead of snapping toward the yellow IN split.
@@ -415,6 +422,8 @@ public:
     previous_center_ = full_center;
     obs.valid = true;
     obs.both_lanes = both_lanes;
+    obs.branch_pair_selected = branch_pair_selected;
+    obs.branch_scene_ambiguous = branch_scene_ambiguous;
     obs.center_error = clamp((frame.cols / 2.0 - full_center) / (frame.cols / 2.0), -1.0, 1.0);
     previous_error_ = obs.center_error;
     const double far = far_center.value_or(*near_center);
@@ -502,9 +511,13 @@ private:
 
   std::optional<double> hough(
     const cv::Mat & lane_mask, double vehicle_x, double curvature_hint,
-    std::optional<double> previous_center, bool * both_lanes, HoughDebug * debug)
+    std::optional<double> previous_center, ForkDirection fork_direction,
+    bool * both_lanes, bool * branch_pair_selected,
+    bool * branch_scene_ambiguous, HoughDebug * debug)
   {
     if (both_lanes) *both_lanes = false;
+    if (branch_pair_selected) *branch_pair_selected = false;
+    if (branch_scene_ambiguous) *branch_scene_ambiguous = false;
     cv::Mat blur, edges;
     cv::GaussianBlur(lane_mask, blur, cv::Size(5, 5), 0.0);
     cv::Canny(blur, edges, c_.canny_low, c_.canny_high);
@@ -524,7 +537,7 @@ private:
       cv::Vec4i segment;
       double reference_x;
     };
-    std::vector<Candidate> left, right;
+    std::vector<Candidate> left, right, all;
     for (const auto & line : lines) {
       const double dx = line[2] - line[0];
       const double dy = line[3] - line[1];
@@ -536,10 +549,12 @@ private:
       {
         continue;
       }
+      const Candidate candidate{line, reference_x};
+      all.push_back(candidate);
       if (reference_x < vehicle_x) {
-        left.push_back({line, reference_x});
+        left.push_back(candidate);
       } else if (reference_x > vehicle_x) {
-        right.push_back({line, reference_x});
+        right.push_back(candidate);
       }
     }
     if (debug) {
@@ -612,6 +627,9 @@ private:
       return solve_points(points, quadratic);
     };
 
+    const auto target = [top, bottom](const cv::Vec3d & curve) {
+      return evaluate_curve(curve, top, top, bottom);
+    };
     const double cluster_limit = std::max(16.0, lane_mask.cols * 0.12);
     auto select_curve = [&](const std::vector<Candidate> & candidates, bool is_left)
       -> std::optional<cv::Vec3d>
@@ -632,16 +650,85 @@ private:
       return fit_curve(selected);
     };
 
-    const auto left_curve = select_curve(left, true);
-    const auto right_curve = select_curve(right, false);
+    auto left_curve = select_curve(left, true);
+    auto right_curve = select_curve(right, false);
+
+    // At the island/fork, both boundaries of the chosen corridor can lie on
+    // the same side of the camera center. The normal nearest-left +
+    // nearest-right pairing then combines an island edge with the opposite
+    // outer edge and steers into the middle. Cluster every visible boundary,
+    // form adjacent lane-width pairs, and choose the outermost valid corridor
+    // requested by the sign.
+    if (fork_direction != ForkDirection::NONE && all.size() >= 2U) {
+      std::sort(all.begin(), all.end(), [](const Candidate & a, const Candidate & b) {
+        return a.reference_x < b.reference_x;
+      });
+      std::vector<std::vector<Candidate>> clusters;
+      std::vector<double> cluster_means;
+      for (const auto & candidate : all) {
+        if (clusters.empty() ||
+          std::abs(candidate.reference_x - cluster_means.back()) > cluster_limit)
+        {
+          clusters.push_back({candidate});
+          cluster_means.push_back(candidate.reference_x);
+        } else {
+          const double count = static_cast<double>(clusters.back().size());
+          cluster_means.back() =
+            (cluster_means.back() * count + candidate.reference_x) / (count + 1.0);
+          clusters.back().push_back(candidate);
+        }
+      }
+
+      struct BoundaryFit {
+        cv::Vec3d curve;
+        double reference_x;
+        double target_x;
+        std::vector<Candidate> candidates;
+      };
+      std::vector<BoundaryFit> boundaries;
+      for (std::size_t i = 0; i < clusters.size(); ++i) {
+        const auto curve = fit_curve(clusters[i]);
+        if (!curve) continue;
+        boundaries.push_back({*curve, cluster_means[i], target(*curve), clusters[i]});
+      }
+
+      std::optional<std::size_t> selected_pair;
+      int valid_pair_count = 0;
+      const double minimum_width = lane_mask.cols * c_.lane_width_min;
+      const double maximum_width = lane_mask.cols * c_.lane_width_max;
+      for (std::size_t i = 0; i + 1 < boundaries.size(); ++i) {
+        const double width = boundaries[i + 1].target_x - boundaries[i].target_x;
+        if (width < minimum_width || width > maximum_width) continue;
+        ++valid_pair_count;
+        if (!selected_pair || fork_direction == ForkDirection::RIGHT) {
+          selected_pair = i;
+        }
+      }
+      if (branch_scene_ambiguous) {
+        *branch_scene_ambiguous = valid_pair_count >= 2;
+      }
+      if (selected_pair) {
+        const auto & outer = boundaries[*selected_pair];
+        const auto & inner = boundaries[*selected_pair + 1];
+        left_curve = outer.curve;
+        right_curve = inner.curve;
+        if (branch_pair_selected) *branch_pair_selected = true;
+        if (debug) {
+          debug->selected_segments.clear();
+          for (const auto & candidate : outer.candidates) {
+            debug->selected_segments.push_back(candidate.segment);
+          }
+          for (const auto & candidate : inner.candidates) {
+            debug->selected_segments.push_back(candidate.segment);
+          }
+        }
+      }
+    }
     if (debug) {
       debug->left_curve = left_curve;
       debug->right_curve = right_curve;
     }
     if (!left_curve && !right_curve) return std::nullopt;
-    const auto target = [top, bottom](const cv::Vec3d & curve) {
-      return evaluate_curve(curve, top, top, bottom);
-    };
     const std::optional<double> left_target = left_curve ?
       std::optional<double>(target(*left_curve)) : std::nullopt;
     const std::optional<double> right_target = right_curve ?
@@ -1260,17 +1347,25 @@ private:
     LaneDebug lane_debug;
     LaneObs observation;
     bool include_yellow = true;
+    ForkDirection fork_direction = ForkDirection::NONE;
     int aruco_target_id = 3;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       include_yellow = route_mode_ != RouteMode::OUT || !config_.out_white_only;
       aruco_target_id = config_.aruco_target_id;
+      if (state_ == MissionState::OUT_FORK_SIGN_ADVANCE ||
+        state_ == MissionState::OUT_FORK_COMMIT)
+      {
+        fork_direction = fork_decision_ == "LEFT" ? ForkDirection::LEFT :
+          fork_decision_ == "RIGHT" ? ForkDirection::RIGHT : ForkDirection::NONE;
+      }
     }
     {
       std::lock_guard<std::mutex> lane_lock(lane_mutex_);
       if (lane_reset_requested_.exchange(false)) lane_.reset_fork_history();
       observation = lane_.process(
-        frame, include_yellow, publish_debug_ ? &lane_debug : nullptr);
+        frame, include_yellow, fork_direction,
+        publish_debug_ ? &lane_debug : nullptr);
     }
     bool marker = false;
     std::vector<int> ids;
@@ -1410,12 +1505,13 @@ private:
     if (state_ == next) return;
     RCLCPP_INFO(get_logger(), "mission state: %s -> %s", state_name(state_), state_name(next));
     if (next == MissionState::OUT_FORK_SIGN_ADVANCE) {
-      fork_geometry_observed_ = false;
-      fork_direction_progressed_ = false;
+      fork_scene_observed_ = false;
       fork_pair_streak_ = 0;
+      fork_clear_streak_ = 0;
     }
     if (next == MissionState::OUT_FORK_COMMIT) {
       fork_pair_streak_ = 0;
+      fork_clear_streak_ = 0;
     }
     state_ = next;
     entered_ = now_sec;
@@ -1446,7 +1542,8 @@ private:
 
       case MissionState::OUT_FORK_SIGN_ADVANCE: {
         // Apply the same signed directional nudge for LEFT and RIGHT.
-        fork_geometry_observed_ = fork_geometry_observed_ || lane.fork_seen;
+        fork_scene_observed_ =
+          fork_scene_observed_ || lane.branch_scene_ambiguous;
         auto cmd = controller_.directional_fork(
           lane, fork_decision_, config_.fork_approach_cap,
           config_.fork_approach_limit);
@@ -1459,22 +1556,14 @@ private:
 
       case MissionState::OUT_FORK_COMMIT: {
         const double elapsed = now_sec - entered_;
-        constexpr double direction_progress_error = 0.14;
         constexpr int pair_confirm_ticks = 3;
-        const double signed_progress = fork_decision_ == "LEFT" ?
-          lane.center_error : -lane.center_error;
-        if (lane.valid && signed_progress >= direction_progress_error) {
-          fork_direction_progressed_ = true;
-        }
-        fork_geometry_observed_ = fork_geometry_observed_ || lane.fork_seen;
-        // At a visible fork, generic Hough fitting can pair the two closest
-        // lines around the old center and pull the vehicle straight. Do not
-        // grant that pair steering authority until pixels show progress toward
-        // the signed branch and a non-fork two-boundary lane is stable.
-        const bool branch_evidence =
-          fork_geometry_observed_ || fork_direction_progressed_;
+        constexpr int clear_confirm_ticks = 3;
+        fork_scene_observed_ =
+          fork_scene_observed_ || lane.branch_scene_ambiguous;
+        // Only the sign-scoped outer-corridor pair may take steering authority.
+        // A generic center pair is never accepted while the island is visible.
         const bool pair_candidate =
-          branch_evidence && lane.valid && lane.both_lanes && !lane.fork_seen;
+          lane.valid && lane.both_lanes && lane.branch_pair_selected;
         fork_pair_streak_ = pair_candidate ?
           std::min(fork_pair_streak_ + 1, pair_confirm_ticks) : 0;
         const bool pair_locked = fork_pair_streak_ >= pair_confirm_ticks;
@@ -1482,17 +1571,22 @@ private:
           controller_.follow(lane, config_.fork_commit_cap, config_.fork_limit) :
           controller_.directional_fork(
             lane, fork_decision_, config_.fork_commit_cap, config_.fork_limit);
+        const bool island_cleared =
+          fork_scene_observed_ && pair_locked && !lane.branch_scene_ambiguous;
+        fork_clear_streak_ = island_cleared ?
+          std::min(fork_clear_streak_ + 1, clear_confirm_ticks) : 0;
         const bool reacquired =
-          pair_locked && std::abs(lane.center_error) < 0.25;
+          fork_clear_streak_ >= clear_confirm_ticks && std::abs(lane.center_error) < 0.25;
         if ((reacquired && elapsed >= config_.fork_commit_min_sec) ||
           elapsed >= config_.fork_commit_timeout_sec)
         {
           RCLCPP_INFO(
             get_logger(),
-            "fork alignment release: fork_seen=%s progressed=%s pair_ticks=%d centered=%s timeout=%s",
-            fork_geometry_observed_ ? "true" : "false",
-            fork_direction_progressed_ ? "true" : "false",
+            "fork alignment release: scene=%s branch_pair=%s pair_ticks=%d clear_ticks=%d centered=%s timeout=%s",
+            fork_scene_observed_ ? "true" : "false",
+            lane.branch_pair_selected ? "true" : "false",
             fork_pair_streak_,
+            fork_clear_streak_,
             std::abs(lane.center_error) < 0.25 ? "true" : "false",
             elapsed >= config_.fork_commit_timeout_sec ? "true" : "false");
           transition(MissionState::OUT_RESUME, now_sec);
@@ -1800,7 +1894,9 @@ private:
     status << "err=" << std::showpos << lane.center_error <<
       " curv=" << std::noshowpos << lane.curvature <<
       " steer=" << std::showpos << cmd.steering <<
-      " pair=" << (lane.both_lanes ? "2" : "1");
+      " pair=" << (lane.both_lanes ? "2" : "1") <<
+      " branch=" << (lane.branch_pair_selected ? "Y" : "N") <<
+      " multi=" << (lane.branch_scene_ambiguous ? "Y" : "N");
     put_outlined_text(view, status.str(), cv::Point(8, 42));
     return view;
   }
@@ -1892,7 +1988,9 @@ private:
       " curv=" << std::noshowpos << lane.curvature <<
       " scurv=" << std::showpos << lane.signed_curvature <<
       " steer=" << cmd.steering <<
-      " pair=" << (lane.both_lanes ? "2" : "1");
+      " pair=" << (lane.both_lanes ? "2" : "1") <<
+      " branch=" << (lane.branch_pair_selected ? "Y" : "N") <<
+      " multi=" << (lane.branch_scene_ambiguous ? "Y" : "N");
     put_outlined_text(frame, command_text.str(), cv::Point(8, 44));
     put_outlined_text(frame, "light=" + std::string(light == 1 ? "GREEN" : light == 2 ? "RED" : "none"),
       cv::Point(8, frame.rows - 12), 0.65,
@@ -1921,9 +2019,8 @@ private:
   double aruco_pause_started_{0.0};
   int light_state_{0}, green_streak_{0}, red_streak_{0};
   std::atomic<bool> lane_reset_requested_{false};
-  bool fork_geometry_observed_{false};
-  bool fork_direction_progressed_{false};
-  int fork_pair_streak_{0};
+  bool fork_scene_observed_{false};
+  int fork_pair_streak_{0}, fork_clear_streak_{0};
   uint64_t detection_sequence_{0}, last_light_sequence_{0};
   int32_t detection_source_sec_{0};
   uint32_t detection_source_nanosec_{0};

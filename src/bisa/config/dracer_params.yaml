@@ -207,5 +207,5 @@ mission:
   # 표지판 방향은 아주 짧게만 넣고, 곧바로 양쪽 흰 차선을 재검출해 중앙 정렬한다.
   fork_sign_advance_sec: 0.4    # 방향별 약한 조향 펄스 유지 시간(s)
   fork_commit_min_sec: 0.3      # 양차선 중앙 정렬을 유지할 최소 시간(s)
-  fork_commit_timeout_sec: 1.0  # 양차선이 늦게 보여도 이 시간 후 일반 차선 추종으로 전환
+  fork_commit_timeout_sec: 3.0  # 중앙 섬 통과/선택 코스 재정렬의 최종 안전 타임아웃
   debug_log_hz: 1.0             # 상태 로그 출력 주기(Hz)

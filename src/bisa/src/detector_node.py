@@ -30,6 +30,10 @@ CLASS_IDS = {
 }
 
 LIVE_PARAMETER_PATHS = {
+    "roi.detector_light_left": ("roi", "detector_light", 0),
+    "roi.detector_light_top": ("roi", "detector_light", 1),
+    "roi.detector_light_right": ("roi", "detector_light", 2),
+    "roi.detector_light_bottom": ("roi", "detector_light", 3),
     "detector.imgsz": ("detector", "imgsz"),
     "detector.inference_hz": ("detector", "inference_hz"),
     "detector.conf.traffic_green": ("detector", "conf", "traffic_green"),
@@ -81,6 +85,7 @@ class BisaDetectorNode(Node):
         self.declare_parameter("model_path", _default_model())
         self.declare_parameter("image_topic", "/camera/image/compressed")
         self.declare_parameter("detections_topic", "/bisa/detections")
+        self.declare_parameter("mission_state_topic", "/bisa/mission_state")
         # CPU is the verified production backend on TOPST. The PowerVR Vulkan
         # path remains opt-in because same-frame tests returned wrong boxes.
         self.declare_parameter("detector.device", "cpu")
@@ -114,6 +119,7 @@ class BisaDetectorNode(Node):
         self.infer_time_sum = 0.0
         self.report_started = time.perf_counter()
         self._status = (False, "waiting for first camera frame")
+        self.mission_state = "OUT_WAIT_GREEN"
 
         image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -134,6 +140,12 @@ class BisaDetectorNode(Node):
             self.image_callback,
             image_qos,
         )
+        self.create_subscription(
+            String,
+            str(self.get_parameter("mission_state_topic").value),
+            lambda msg: setattr(self, "mission_state", msg.data),
+            1,
+        )
         self.create_timer(1.0, self._republish_status)
         self._publish_status(False, "waiting for first camera frame")
 
@@ -141,15 +153,21 @@ class BisaDetectorNode(Node):
     def _config_value(config, path):
         value = config
         for part in path:
-            value = value[part] if isinstance(value, dict) else getattr(value, part)
+            if isinstance(value, (dict, list)):
+                value = value[part]
+            else:
+                value = getattr(value, part)
         return value
 
     @staticmethod
     def _set_config_value(config, path, value) -> None:
         target = config
         for part in path[:-1]:
-            target = target[part] if isinstance(target, dict) else getattr(target, part)
-        if isinstance(target, dict):
+            if isinstance(target, (dict, list)):
+                target = target[part]
+            else:
+                target = getattr(target, part)
+        if isinstance(target, (dict, list)):
             target[path[-1]] = value
         else:
             setattr(target, path[-1], value)
@@ -180,6 +198,7 @@ class BisaDetectorNode(Node):
         detector = candidate.detector
         color = candidate.color_correction
         light = candidate.traffic_light
+        light_roi = candidate.roi.detector_light
         valid = (
             detector.imgsz >= 32
             and detector.inference_hz > 0.0
@@ -190,6 +209,10 @@ class BisaDetectorNode(Node):
             and 0 <= light.red_h1_hi <= 180
             and 0 <= light.red_h2_lo <= 180
             and 0.0 <= light.row_min_ratio <= 1.0
+            and len(light_roi) == 4
+            and all(0.0 <= float(value) <= 1.0 for value in light_roi)
+            and light_roi[0] < light_roi[2]
+            and light_roi[1] < light_roi[3]
         )
         if not valid:
             return SetParametersResult(
@@ -240,9 +263,10 @@ class BisaDetectorNode(Node):
 
         now_sec = self.get_clock().now().nanoseconds / 1e9
         processed = preprocess_frame(frame, self.config.color_correction)
+        inference_roi = self.detector.inference_roi(self.mission_state)
         previous_infer_time = self.detector.last_infer_time
         started = time.perf_counter()
-        detections = self.detector.infer(processed, now_sec)
+        detections = self.detector.infer(processed, now_sec, inference_roi)
         if self.detector.last_infer_time == previous_infer_time:
             return
         elapsed = time.perf_counter() - started
@@ -271,6 +295,9 @@ class BisaDetectorNode(Node):
                     *[float(value) for value in detection.bbox],
                 ]
             )
+        # Optional trailer: old consumers ignore it; the C++ debug renderer uses
+        # it to show the exact live-tuned crop on the matching source frame.
+        payload.extend(float(value) for value in inference_roi)
         self.packet_pub.publish(Float64MultiArray(data=payload))
 
         self.infer_count += 1
@@ -292,7 +319,6 @@ class BisaDetectorNode(Node):
             self.infer_time_sum = 0.0
             self.report_started = time.perf_counter()
 
-
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = BisaDetectorNode()
@@ -302,4 +328,5 @@ def main(args=None) -> None:
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()

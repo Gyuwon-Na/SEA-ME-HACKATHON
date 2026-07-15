@@ -6,9 +6,8 @@ low-level control, operator gamepad, AND the perception + mission FSM + control
 node — runs on the car's TOPST (aarch64 Cortex-A72 + PowerVR GPU) chip. Nodes
 talk over localhost DDS, so NO network / WiFi dongle is required to drive.
 
-Contrast:
-  vehicle.launch.py  -> car streams camera to the PC, PC computes (driving.launch)
-  onboard.launch.py  -> car computes everything itself (this file)
+This is the production launch: the car computes everything itself. A PC may
+optionally run viz_node and param_gui_node over ROS for live tuning.
 
 YOLO runs via the NCNN backend on the TOPST CPU. Vehicle same-frame A/B tests
 showed that the PowerVR Vulkan path produced incorrect bounding-box coordinates,
@@ -65,6 +64,7 @@ def generate_launch_description():
     image_topic = LaunchConfiguration("image_topic")
     control_topic = LaunchConfiguration("control_topic")
     detections_topic = LaunchConfiguration("detections_topic")
+    mission_state_topic = LaunchConfiguration("mission_state_topic")
     enable_camera = LaunchConfiguration("enable_camera")
     enable_joystick = LaunchConfiguration("enable_joystick")
     enable_actuation = LaunchConfiguration("enable_actuation")
@@ -99,6 +99,7 @@ def generate_launch_description():
         DeclareLaunchArgument("image_topic", default_value="/camera/image/compressed"),
         DeclareLaunchArgument("control_topic", default_value="/control"),
         DeclareLaunchArgument("detections_topic", default_value="/bisa/detections"),
+        DeclareLaunchArgument("mission_state_topic", default_value="/bisa/mission_state"),
         # Disable only for rosbag replay; production keeps the physical camera.
         DeclareLaunchArgument("enable_camera", default_value="true"),
         # Set false if no gamepad dongle is plugged into the car.
@@ -188,6 +189,7 @@ def generate_launch_description():
                 "model_path": model_path,
                 "image_topic": image_topic,
                 "detections_topic": detections_topic,
+                "mission_state_topic": mission_state_topic,
                 "opencv_num_threads": opencv_threads,
                 "detector.device": LaunchConfiguration("device"),
                 "detector.imgsz": imgsz,
@@ -209,6 +211,7 @@ def generate_launch_description():
                 "image_topic": image_topic,
                 "control_topic": control_topic,
                 "detections_topic": detections_topic,
+                "mission_state_topic": mission_state_topic,
                 "publish_debug_image": publish_debug_image,
                 "debug_image_hz": debug_image_hz,
                 "perception_hz": pipeline_hz,

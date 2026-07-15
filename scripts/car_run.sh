@@ -7,9 +7,9 @@
 # running on the car and the vehicle does NOT stop. Reconnect and re-attach
 # to get your screen back.
 #
-# The car runs:   ros2 launch bisa vehicle.launch.py   (camera_node + control_node)
-# The PC runs:    ros2 launch bisa driving.launch.py route_mode:=OUT
-# Both machines must share the same ROS_DOMAIN_ID and LAN.
+# The car runs the complete onboard stack: camera + NCNN ROI detector + C++
+# mission/control core + low-level control. A PC is only needed for optional
+# viz_node / param_gui_node tuning over the same ROS_DOMAIN_ID and LAN.
 #
 # Usage (on the car):
 #   bash scripts/car_run.sh            # start (idempotent) then attach
@@ -71,7 +71,7 @@ start() {
 
   disable_wifi_powersave
 
-  info "Starting vehicle.launch.py in tmux session '$SESSION'"
+  info "Starting onboard.launch.py in tmux session '$SESSION'"
   info "  workspace   = $WS"
   info "  ROS distro  = $ROS_DISTRO_NAME"
   info "  ROS_DOMAIN_ID = $DOMAIN"
@@ -81,7 +81,7 @@ start() {
   tmux send-keys -t "$SESSION" "source /opt/ros/${ROS_DISTRO_NAME}/setup.bash" C-m
   tmux send-keys -t "$SESSION" "source '${WS}/install/setup.bash'" C-m
   tmux send-keys -t "$SESSION" "export ROS_DOMAIN_ID=${DOMAIN} ROS_LOCALHOST_ONLY=0" C-m
-  tmux send-keys -t "$SESSION" "ros2 launch bisa vehicle.launch.py" C-m
+  tmux send-keys -t "$SESSION" "ros2 launch bisa onboard.launch.py" C-m
 
   info "Started. The car keeps running even if SSH drops."
   info "  Attach (watch logs): tmux attach -t $SESSION      (detach: Ctrl+b then d)"

@@ -6,8 +6,8 @@
 # installs the Python dependencies the compute node needs, builds the workspace,
 # and prints how to match the ROS domain and launch.
 #
-# The car runs:   ros2 launch bisa vehicle.launch.py
-# The PC runs:    ros2 launch bisa driving.launch.py route_mode:=OUT
+# The car runs the full stack with: ros2 launch bisa onboard.launch.py
+# The PC only runs optional viz_node / param_gui_node tuning tools.
 #
 # Both machines must be on the same LAN and use the SAME ROS_DOMAIN_ID.
 #
@@ -102,8 +102,8 @@ NEXT STEPS
        source /opt/ros/humble/setup.bash
        source $WS/install/setup.bash
 
-  4. On the CAR:   ros2 launch bisa vehicle.launch.py
-     On THIS PC:   ros2 launch bisa driving.launch.py route_mode:=OUT
+  4. On the CAR:   ros2 launch bisa onboard.launch.py
+     On THIS PC:   ros2 run bisa viz_node  (optional)
 
   5. Check topics on the PC:
        ros2 topic echo /detect_green

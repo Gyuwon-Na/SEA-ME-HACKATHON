@@ -4,7 +4,9 @@ roi:
   mid_y1: 0.75                               # 중거리 밴드 하단 y비율
   far_y0: 0.32                               # 원거리 밴드 상단 y비율
   far_y1: 0.58                               # 원거리 밴드 하단 y비율
-  detector_light: [0.20, 0.00, 0.80, 0.55]  # 신호등 검출 허용 ROI(x0,y0,x1,y1 비율) — 상단 중앙만
+  # 신호등 추론 ROI(left, top, right, bottom 비율). 이 영역만 NCNN의 고정
+  # 320x320 입력으로 확대하며, Param GUI 슬라이더로 주행 중 조정할 수 있다.
+  detector_light: [0.20, 0.00, 0.80, 0.55]
   detector_sign: [0.10, 0.05, 0.90, 0.70]   # 표지판 검출 허용 ROI(비율) — 이 밖 검출은 버림
 
 # Lane-only ROI. Camera stays full size for light/sign/aruco detection; only the

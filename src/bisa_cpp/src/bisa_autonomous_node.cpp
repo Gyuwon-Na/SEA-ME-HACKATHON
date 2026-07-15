@@ -55,6 +55,12 @@ RouteMode parse_route_mode(std::string value) {
   return RouteMode::OUT;
 }
 
+constexpr bool should_latch_red(bool has_started, int light) {
+  return has_started && light == 2;
+}
+
+static_assert(should_latch_red(true, 2) && !should_latch_red(false, 2));
+
 enum class MissionState {
   LANE_TEST,
   OUT_WAIT_GREEN,
@@ -1414,7 +1420,7 @@ private:
     const int light = static_cast<int>(msg->data[3]);
     const int count = std::max(0, static_cast<int>(msg->data[4]));
     std::vector<Detection> detections;
-    std::array<double, 4> light_roi{0.155, 0.030, 0.640, 0.710};
+    std::array<double, 4> light_roi{0.00, 0.00, 0.80, 0.85};
     bool left = false, right = false;
     for (int i = 0; i < count; ++i) {
       const std::size_t base = 5 + static_cast<std::size_t>(i) * 6;
@@ -1451,6 +1457,18 @@ private:
     light_received_ = now();
     detections_ = detections;
     light_roi_ = light_roi;
+    if (should_latch_red(has_started_, light) && !red_stop_latched_.exchange(true)) {
+      controller_.stop();
+      control_msgs::msg::Control stop;
+      stop.header.stamp = now();
+      stop.steering = 0.0F;
+      stop.throttle = 0.0F;
+      {
+        std::lock_guard<std::mutex> output_lock(control_output_mutex_);
+        control_pub_->publish(stop);
+      }
+      RCLCPP_WARN(get_logger(), "global red-light stop latched immediately");
+    }
     sign_history_.push_back((left ? 1 : 0) | (right ? 2 : 0));
     while (static_cast<int>(sign_history_.size()) > config_.sign_vote_n) sign_history_.pop_front();
     const double report_sec = std::chrono::duration<double>(
@@ -1481,11 +1499,10 @@ private:
   void update_light(double now_sec) {
     const double age = (now() - light_received_).seconds();
     const int fresh = age >= 0.0 && age <= config_.light_stale_sec ? light_state_ : 0;
-    if (fresh == 0) { green_streak_ = red_streak_ = 0; return; }
+    if (fresh == 0) { green_streak_ = 0; return; }
     if (detection_sequence_ == last_light_sequence_) return;
     last_light_sequence_ = detection_sequence_;
     green_streak_ = fresh == 1 ? green_streak_ + 1 : 0;
-    red_streak_ = fresh == 2 ? red_streak_ + 1 : 0;
     (void)now_sec;
   }
 
@@ -1652,20 +1669,7 @@ private:
         entered_ += std::max(0.0, now_sec - aruco_pause_started_);
         RCLCPP_INFO(get_logger(), "global ArUco stop cleared; resume mission");
       }
-      // Never latch the vehicle on a single detector frame.  The detector can
-      // briefly classify a sign or reflection as red; use the same confirmed
-      // streak required by the mission light gate before making this permanent
-      // stop decision.
-      if (has_started_ && red_streak_ >= config_.light_confirm_frames &&
-        !red_stop_latched_)
-      {
-        red_stop_latched_ = true;
-        RCLCPP_WARN(
-          get_logger(), "global red-light stop latched after %d confirmed frames",
-          red_streak_);
-      }
-
-      if (red_stop_latched_ || aruco_stop_active_) {
+      if (red_stop_latched_.load() || aruco_stop_active_) {
         controller_.stop();
         cmd = {};
       } else {
@@ -1681,11 +1685,17 @@ private:
       mission_state = state_name(state_);
       speed_max = config_.speed_max;
     }
-    control_msgs::msg::Control output;
-    output.header.stamp = now();
-    output.steering = static_cast<float>(clamp(cmd.steering, -1.0, 1.0));
-    output.throttle = static_cast<float>(clamp(cmd.throttle, 0.0, speed_max));
-    control_pub_->publish(output);
+    {
+      std::lock_guard<std::mutex> output_lock(control_output_mutex_);
+      const bool red_latched = red_stop_latched_.load();
+      control_msgs::msg::Control output;
+      output.header.stamp = now();
+      output.steering = red_latched ? 0.0F :
+        static_cast<float>(clamp(cmd.steering, -1.0, 1.0));
+      output.throttle = red_latched ? 0.0F :
+        static_cast<float>(clamp(cmd.throttle, 0.0, speed_max));
+      control_pub_->publish(output);
+    }
     green_pub_->publish(std_msgs::msg::Bool().set__data(light == 1));
     red_pub_->publish(std_msgs::msg::Bool().set__data(light == 2));
     sign_pub_->publish(std_msgs::msg::String().set__data(decision.value_or("none")));
@@ -1996,21 +2006,22 @@ private:
   Config config_;
   LaneProcessor lane_;
   Controller controller_;
-  std::mutex mutex_, image_mutex_, lane_mutex_;
+  std::mutex mutex_, image_mutex_, lane_mutex_, control_output_mutex_;
   sensor_msgs::msg::CompressedImage::SharedPtr pending_image_;
   LaneObs latest_lane_;
   LaneDebug latest_lane_debug_;
   cv::Mat latest_frame_;
   std::vector<Detection> detections_;
-  std::array<double, 4> light_roi_{0.155, 0.030, 0.640, 0.710};
+  std::array<double, 4> light_roi_{0.00, 0.00, 0.80, 0.85};
   std::vector<int> marker_ids_;
   std::vector<std::vector<cv::Point2f>> marker_corners_;
   std::deque<int> sign_history_;
   Command last_command_;
   bool target_marker_{false}, publish_debug_{false};
-  bool has_started_{false}, aruco_stop_active_{false}, red_stop_latched_{false};
+  bool has_started_{false}, aruco_stop_active_{false};
+  std::atomic<bool> red_stop_latched_{false};
   double aruco_pause_started_{0.0};
-  int light_state_{0}, green_streak_{0}, red_streak_{0};
+  int light_state_{0}, green_streak_{0};
   std::atomic<bool> lane_reset_requested_{false};
   bool fork_scene_observed_{false};
   int fork_pair_streak_{0}, fork_clear_streak_{0};

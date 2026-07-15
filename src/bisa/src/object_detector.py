@@ -225,6 +225,7 @@ class BestPthDetector:
             "source": source,
             "imgsz": int(self.config.detector.imgsz),
             "device": self.device,
+            "conf": min(float(value) for value in self.config.detector.conf.values()),
             "verbose": False,
         }
         # Ultralytics creates ncnn.Net lazily inside the first predict() and

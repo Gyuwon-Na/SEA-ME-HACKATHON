@@ -95,6 +95,7 @@ SPEC = {
         ("post-fork cap", "throttle.post_fork_cap", "f", 0.0, 1.0),
     ],
     "OUT Mission": [
+        ("sign stop delay", "mission.sign_stop_delay_sec", "f", 0.0, 5.0),
         ("sign advance seconds", "mission.fork_sign_advance_sec", "f", 0.0, 5.0),
         ("fork min seconds", "mission.fork_commit_min_sec", "f", 0.0, 5.0),
         ("fork timeout seconds", "mission.fork_commit_timeout_sec", "f", 0.0, 8.0),

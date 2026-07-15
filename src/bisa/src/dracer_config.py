@@ -294,6 +294,7 @@ class MissionConfig:
 
     route_mode: str = "OUT"
     control_hz: float = 10.0
+    sign_stop_delay_sec: float = 1.0
     fork_sign_advance_sec: float = 1.5
     fork_commit_min_sec: float = 0.8
     fork_commit_timeout_sec: float = 1.8

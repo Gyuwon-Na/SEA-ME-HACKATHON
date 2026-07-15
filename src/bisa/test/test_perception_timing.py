@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from bisa.dracer_config import AutonomousConfig
-from bisa.lane_perception import LaneObs, LanePerception, PathCandidate
+from bisa.lane_perception import LaneObs, LanePerception
 from bisa.mission_controller import (
     LaneController,
     fresh_light_state,
@@ -165,12 +165,11 @@ class _SignDetector:
         return 99 if name == self.direction else 0
 
 
-def test_out_fsm_curve_follows_until_sign_then_resumes_after_fork():
+@pytest.mark.parametrize("sign_name", ["sign_left", "sign_right"])
+def test_out_fsm_stops_one_second_after_circular_sign(sign_name):
     config = AutonomousConfig()
     config.detector.light_confirm_frames = 1
-    config.mission.fork_sign_advance_sec = 0.2
-    config.mission.fork_commit_min_sec = 0.1
-    config.mission.fork_commit_timeout_sec = 0.3
+    config.mission.sign_stop_delay_sec = 1.0
     controller = LaneController(config)
     fsm = make_course_fsm(config, controller)
     lane = LaneObs(valid=True)
@@ -184,56 +183,21 @@ def test_out_fsm_curve_follows_until_sign_then_resumes_after_fork():
     assert fsm.state == "OUT_TO_FORK"
     assert config.throttle.speed_min <= cmd.throttle <= config.throttle.speed_max
 
-    left = _SignDetector("sign_left")
-    fsm.step(lane, left, 20.1)
-    assert fsm.state == "OUT_FORK_SIGN_ADVANCE"
-    advance_cmd = fsm.step(lane, left, 20.15)
-    assert advance_cmd.steering > 0.0
-    fsm.step(lane, left, 20.4)
-    assert fsm.state == "OUT_FORK_COMMIT"
+    sign = _SignDetector(sign_name)
+    detected_cmd = fsm.step(lane, sign, 20.1)
+    assert fsm.state == "OUT_SIGN_STOP_DELAY"
+    assert detected_cmd.throttle > 0.0
 
-    fork_lane = LaneObs(
-        valid=True,
-        fork_seen=True,
-        left_branch=PathCandidate(0.55, 0.1, 100.0),
-    )
-    cmd = fsm.step(fork_lane, left, 20.5)
-    assert cmd.steering > 0.0
-    for now in (20.6, 20.7, 20.8):
-        fsm.step(lane, left, now)
-    assert fsm.state == "OUT_RESUME"
-    assert fsm.consume_lane_reset_request()
+    delay_cmd = fsm.step(lane, no_sign, 21.09)
+    assert fsm.state == "OUT_SIGN_STOP_DELAY"
+    assert delay_cmd.throttle > 0.0
 
-    # ArUco pause and final red stop are handled above the FSM by the autonomous
-    # node, so these observations must not create hidden mission-state stops.
-    fsm.step(lane, no_sign, 20.9, light_state="red", light_seq=2)
-    assert fsm.state == "OUT_RESUME"
-    fsm.step(lane, no_sign, 21.0, marker_visible=True)
-    fsm.step(lane, no_sign, 21.1, marker_visible=True)
-    assert fsm.state == "OUT_RESUME"
+    stop_cmd = fsm.step(lane, no_sign, 21.11)
+    assert fsm.state == "OUT_SIGN_STOPPED"
+    assert stop_cmd.throttle == pytest.approx(0.0)
+    assert stop_cmd.steering == pytest.approx(0.0)
 
-
-@pytest.mark.parametrize(
-    ("sign_name", "expected_sign"),
-    [("sign_left", 1.0), ("sign_right", -1.0)],
-)
-def test_out_sign_advance_forces_direction_before_x_is_visible(sign_name, expected_sign):
-    """A confirmed sign must steer immediately even with no X branch contour."""
-
-    config = AutonomousConfig()
-    config.detector.light_confirm_frames = 1
-    config.steering.rate_limit_per_cmd = 1.0
-    fsm = make_course_fsm(config, LaneController(config))
-    lane = LaneObs(valid=True, center_error=0.0, fork_seen=False)
-    no_sign = _SignDetector()
-
-    fsm.step(lane, no_sign, 1.0, light_state="green", light_seq=1)
-    fsm.step(lane, _SignDetector(sign_name), 1.1)
-    cmd = fsm.step(lane, _SignDetector(sign_name), 1.15)
-
-    assert fsm.state == "OUT_FORK_SIGN_ADVANCE"
-    assert cmd.steering * expected_sign > 0.0
-    assert abs(cmd.steering) > 0.05
+    assert fsm.step(lane, sign, 30.0) == stop_cmd
 
 
 def test_lane_perception_reset_clears_all_pre_fork_fit_history():

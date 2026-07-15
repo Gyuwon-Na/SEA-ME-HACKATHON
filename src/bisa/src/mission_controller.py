@@ -317,8 +317,21 @@ class OutCourseFSM(BaseCourseFSM):
             decision = self.fork_decision_update(detector)
             if decision is not None:
                 self.fork_decision = decision
-                self.transition("OUT_FORK_SIGN_ADVANCE", now)
+                self.transition("OUT_SIGN_STOP_DELAY", now)
             return cmd
+
+        if self.state == "OUT_SIGN_STOP_DELAY":
+            if self.elapsed(now) >= self.config.mission.sign_stop_delay_sec:
+                self.controller.prev_throttle = 0.0
+                self.transition("OUT_SIGN_STOPPED", now)
+                return ControlCmd(0.0, 0.0)
+            return self.controller.follow_with_startup(
+                lane, self.config.throttle.speed_max, self.config.steering.s_curve_limit
+            )
+
+        if self.state == "OUT_SIGN_STOPPED":
+            self.controller.prev_throttle = 0.0
+            return ControlCmd(0.0, 0.0)
 
         if self.state == "OUT_FORK_SIGN_ADVANCE":
             cmd = self.control_directional_fork(

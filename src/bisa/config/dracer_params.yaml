@@ -204,9 +204,9 @@ traffic_light:
 mission:
   route_mode: OUT               # 코스 모드(OUT/IN/LANE), 각 FSM은 완전히 분리
   control_hz: 20.0              # 제어 루프 주기(Hz)
-  # OUT은 초록불 뒤 별도 ENTRY/S 상태 없이 흰 차선을 곡률 기반 추종하다가
-  # 표지판 투표가 확정될 때만 fork 접근 상태로 넘어간다.
-  # 표지판 방향은 아주 짧게만 넣고, 곧바로 양쪽 흰 차선을 재검출해 중앙 정렬한다.
+  # S자 구간은 통과했다고 가정한다. 좌/우 원형 표지판 중 하나가 확정되면
+  # 차선을 계속 추종하다가 아래 시간 뒤 정지한다.
+  sign_stop_delay_sec: 1.0      # 표지판 인식 후 정지까지 주행 시간(s)
   fork_sign_advance_sec: 0.4    # 방향별 약한 조향 펄스 유지 시간(s)
   fork_commit_min_sec: 0.3      # 양차선 중앙 정렬을 유지할 최소 시간(s)
   fork_commit_timeout_sec: 3.0  # 중앙 섬 통과/선택 코스 재정렬의 최종 안전 타임아웃

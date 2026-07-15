@@ -175,6 +175,7 @@ def generate_launch_description():
             parameters=[{
                 "calibration_mode": False,
                 "start_in_manual": False,
+                "debug_log_enable": False,
             }],
         ),
 

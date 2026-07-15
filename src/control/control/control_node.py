@@ -92,8 +92,8 @@ class ControlNode(Node):
             f'  vehicle_config_file={self.vehicle_config_file}'
         )
 
-        # Drive mode is chosen at runtime by the joystick (manual_mode flag).
-        # use_joystick_control only seeds the initial mode for backward compat.
+        # Start in the requested mode; the joystick may switch AUTO/MANUAL at
+        # runtime without affecting the autonomous publisher.
         self.manual_mode = self.use_joystick_control
         self.e_stop_active = False
         self.last_steering = self.steer_trim
@@ -106,6 +106,7 @@ class ControlNode(Node):
         self.manual_steering = self.steer_trim
         self.manual_throttle = 0.0
         self.last_joystick_time = None
+        self.command_stale = None
 
         # Board-priority voltage guard (see power_guard.py for the behavior).
         # A bad tuning value must not brick the whole actuator node: fall back
@@ -168,8 +169,18 @@ class ControlNode(Node):
 
         # Failsafe: if the active source is stale (never arrived or dropped out),
         # cut throttle but keep steering so the car coasts straight to a stop.
-        if last_time is None or (self.now_sec() - last_time) > self.command_timeout_sec:
+        age = None if last_time is None else self.now_sec() - last_time
+        stale = age is None or age > self.command_timeout_sec
+        if stale:
             throttle = 0.0
+            if self.command_stale is False:
+                self.get_logger().warning(
+                    f'{"MANUAL joystick" if self.manual_mode else "AUTO /control"} '
+                    f'command timed out ({age:.3f}s); throttle cut to zero'
+                )
+        elif self.command_stale is True:
+            self.get_logger().info('Control command stream recovered')
+        self.command_stale = stale
 
         # Board-priority guard: scale the motor command down while the pack
         # voltage is sagging toward the 5V regulator's dropout. Applies to both

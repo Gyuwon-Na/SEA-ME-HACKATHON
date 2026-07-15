@@ -55,11 +55,15 @@ RouteMode parse_route_mode(std::string value) {
   return RouteMode::OUT;
 }
 
-constexpr bool should_latch_red(bool has_started, int light) {
-  return has_started && light == 2;
+constexpr bool should_latch_red(bool has_started, int light, int streak, int required) {
+  return has_started && light == 2 && streak >= required;
 }
 
-static_assert(should_latch_red(true, 2) && !should_latch_red(false, 2));
+constexpr int kRedConfirmFrames = 3;
+static_assert(
+  should_latch_red(true, 2, kRedConfirmFrames, kRedConfirmFrames) &&
+  !should_latch_red(true, 2, kRedConfirmFrames - 1, kRedConfirmFrames) &&
+  !should_latch_red(false, 2, kRedConfirmFrames, kRedConfirmFrames));
 
 enum class MissionState {
   LANE_TEST,
@@ -1457,7 +1461,12 @@ private:
     light_received_ = now();
     detections_ = detections;
     light_roi_ = light_roi;
-    if (should_latch_red(has_started_, light) && !red_stop_latched_.exchange(true)) {
+    red_streak_ = has_started_ && light == 2 ?
+      std::min(red_streak_ + 1, kRedConfirmFrames) : 0;
+    if (should_latch_red(
+        has_started_, light, red_streak_, kRedConfirmFrames) &&
+      !red_stop_latched_.exchange(true))
+    {
       controller_.stop();
       control_msgs::msg::Control stop;
       stop.header.stamp = now();
@@ -1467,7 +1476,9 @@ private:
         std::lock_guard<std::mutex> output_lock(control_output_mutex_);
         control_pub_->publish(stop);
       }
-      RCLCPP_WARN(get_logger(), "global red-light stop latched immediately");
+      RCLCPP_WARN(
+        get_logger(), "global red-light stop latched after %d consecutive detections",
+        red_streak_);
     }
     sign_history_.push_back((left ? 1 : 0) | (right ? 2 : 0));
     while (static_cast<int>(sign_history_.size()) > config_.sign_vote_n) sign_history_.pop_front();
@@ -2021,7 +2032,7 @@ private:
   bool has_started_{false}, aruco_stop_active_{false};
   std::atomic<bool> red_stop_latched_{false};
   double aruco_pause_started_{0.0};
-  int light_state_{0}, green_streak_{0};
+  int light_state_{0}, green_streak_{0}, red_streak_{0};
   std::atomic<bool> lane_reset_requested_{false};
   bool fork_scene_observed_{false};
   int fork_pair_streak_{0}, fork_clear_streak_{0};

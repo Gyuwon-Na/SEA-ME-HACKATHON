@@ -13,6 +13,7 @@
 #
 # Optional environment overrides:
 #   ROS_DOMAIN_ID=2 SESSION=dracer WS=~/D-Racer-Kit bash scripts/car_run.sh start
+#   CAR_ROS_LOCALHOST_ONLY=0 bash scripts/car_run.sh start  # PC GUI/viz tuning only
 #   LAUNCH_FILE=vehicle.launch.py bash scripts/car_run.sh start
 #
 set -euo pipefail
@@ -20,6 +21,7 @@ set -euo pipefail
 SESSION="${SESSION:-dracer}"
 ROS_DISTRO_NAME="${ROS_DISTRO:-humble}"
 DOMAIN="${ROS_DOMAIN_ID:-2}"
+LOCALHOST_ONLY="${CAR_ROS_LOCALHOST_ONLY:-1}"
 LAUNCH_FILE="${LAUNCH_FILE:-onboard.launch.py}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -66,7 +68,7 @@ run_launch() {
   source "$WS/install/setup.bash"
   set -u
   export ROS_DOMAIN_ID="$DOMAIN"
-  export ROS_LOCALHOST_ONLY=0
+  export ROS_LOCALHOST_ONLY="$LOCALHOST_ONLY"
   cd "$WS"
   exec ros2 launch bisa "$LAUNCH_FILE" "$@"
 }
@@ -101,6 +103,7 @@ start() {
     "WS=$WS"
     "ROS_DISTRO=$ROS_DISTRO_NAME"
     "ROS_DOMAIN_ID=$DOMAIN"
+    "ROS_LOCALHOST_ONLY=$LOCALHOST_ONLY"
     "LAUNCH_FILE=$LAUNCH_FILE"
     "$SCRIPT_PATH"
     __run
@@ -110,7 +113,7 @@ start() {
   printf -v command_string '%q ' "${command[@]}"
 
   info "Starting $LAUNCH_FILE in detached tmux session '$SESSION'"
-  info "  workspace=$WS  ROS_DOMAIN_ID=$DOMAIN"
+  info "  workspace=$WS  ROS_DOMAIN_ID=$DOMAIN  ROS_LOCALHOST_ONLY=$LOCALHOST_ONLY"
   tmux new-session -d -s "$SESSION" -n onboard "$command_string"
 
   # Catch immediate setup/launch failures while keeping normal startup fast.

@@ -31,7 +31,7 @@ lane:
   lab_b_max: 148               # b 상한 — 노란/주황 물체 제외
   # 흰색/노란색은 반드시 별도 마스크로 유지한다. OUT은 white만 사용하고,
   # IN은 추후 점선 기반 진입/탈출을 위해 white|yellow를 사용한다.
-  white_l_min: 200             # 밝은 흰색 페인트
+  white_l_min: 223             # 밝은 흰색 페인트
   white_l_max: 255
   white_a_min: 115             # 무채색 128 주변
   white_a_max: 140
@@ -95,7 +95,7 @@ detector:
   # + 상태 게이팅 + 연속 투표가 오탐을 걸러주므로 낮춰도 비교적 안전.
   conf:
     traffic_green: 0.40  # green 검출 최소 신뢰도
-    traffic_red: 0.5    # 원거리 red 후보; 색 후처리 통과 시에만 최종 인정
+    traffic_red: 0.7    # 원거리 red 후보; 색 후처리 통과 시에만 최종 인정
     sign_left: 0.65      # 좌 표지 최소 신뢰도
     sign_right: 0.65     # 우 표지 최소 신뢰도
   sign_vote_k: 9         # 최근 n프레임 중 k회 이상 잡히면 표지 방향 확정

@@ -257,7 +257,6 @@ class BaseCourseFSM:
             return "RIGHT"
         return None
 
-
 class OutCourseFSM(BaseCourseFSM):
     """Production OUT FSM, isolated from every IN-course transition."""
 
@@ -312,13 +311,32 @@ class OutCourseFSM(BaseCourseFSM):
 
         if self.state == "OUT_TO_FORK":
             cmd = self.controller.follow_with_startup(
-                lane, self.config.throttle.speed_max, self.config.steering.s_curve_limit
+                lane, self.config.throttle.launch_cap, self.config.steering.s_curve_limit
             )
+            if self.fork_decision_update(detector) is not None:
+                self.transition("OUT_SIGN_APPROACH", now)
+            return cmd
+
+        if self.state == "OUT_SIGN_APPROACH":
+            if self.elapsed(now) >= self.config.mission.sign_stop_delay_sec:
+                self.controller.prev_throttle = 0.0
+                detector.clear()
+                self.transition("OUT_SIGN_VOTE_STOP", now)
+                return ControlCmd(0.0, 0.0)
+            return self.controller.follow_with_startup(
+                lane, self.config.throttle.launch_cap, self.config.steering.s_curve_limit
+            )
+
+        if self.state == "OUT_SIGN_VOTE_STOP":
+            self.controller.prev_throttle = 0.0
             decision = self.fork_decision_update(detector)
             if decision is not None:
                 self.fork_decision = decision
                 self.transition("OUT_FORK_SIGN_ADVANCE", now)
-            return cmd
+            elif self.elapsed(now) >= self.config.mission.sign_stop_delay_sec:
+                detector.clear()
+                self.transition("OUT_TO_FORK", now)
+            return ControlCmd(0.0, 0.0)
 
         if self.state == "OUT_FORK_SIGN_ADVANCE":
             cmd = self.control_directional_fork(

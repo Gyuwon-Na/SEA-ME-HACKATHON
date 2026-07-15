@@ -24,7 +24,7 @@ class RoiConfig:
     detector_light: list[float] = field(
         default_factory=lambda: [0.00, 0.00, 0.80, 0.85]
     )
-    detector_sign: list[float] = field(default_factory=lambda: [0.10, 0.05, 0.90, 0.70])
+    detector_sign: list[float] = field(default_factory=lambda: [0.00, 0.00, 1.00, 1.00])
 
 
 @dataclass
@@ -132,8 +132,8 @@ class DetectorConfig:
     conf: dict[str, float] = field(default_factory=lambda: {
         "traffic_green": 0.40,
         "traffic_red": 0.40,
-        "sign_left": 0.65,
-        "sign_right": 0.65,
+        "sign_left": 0.35,
+        "sign_right": 0.35,
     })
     sign_vote_k: int = 9
     sign_vote_n: int = 15
@@ -294,6 +294,7 @@ class MissionConfig:
 
     route_mode: str = "OUT"
     control_hz: float = 10.0
+    sign_stop_delay_sec: float = 1.0
     fork_sign_advance_sec: float = 1.5
     fork_commit_min_sec: float = 0.8
     fork_commit_timeout_sec: float = 1.8

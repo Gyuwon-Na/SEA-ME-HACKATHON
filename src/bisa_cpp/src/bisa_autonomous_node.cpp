@@ -72,6 +72,8 @@ enum class MissionState {
   LANE_TEST,
   OUT_WAIT_GREEN,
   OUT_TO_FORK,
+  OUT_SIGN_APPROACH,
+  OUT_SIGN_VOTE_STOP,
   OUT_FORK_SIGN_ADVANCE,
   OUT_FORK_COMMIT,
   OUT_RESUME,
@@ -87,6 +89,8 @@ const char * state_name(MissionState state) {
     case MissionState::LANE_TEST: return "LANE_TEST";
     case MissionState::OUT_WAIT_GREEN: return "OUT_WAIT_GREEN";
     case MissionState::OUT_TO_FORK: return "OUT_TO_FORK";
+    case MissionState::OUT_SIGN_APPROACH: return "OUT_SIGN_APPROACH";
+    case MissionState::OUT_SIGN_VOTE_STOP: return "OUT_SIGN_VOTE_STOP";
     case MissionState::OUT_FORK_SIGN_ADVANCE: return "OUT_FORK_SIGN_ADVANCE";
     case MissionState::OUT_FORK_COMMIT: return "OUT_FORK_COMMIT";
     case MissionState::OUT_RESUME: return "OUT_RESUME";
@@ -191,6 +195,7 @@ struct Config {
   double contrast{1.0}, saturation{1.0}, gamma{1.0};
   int sign_vote_k{6}, sign_vote_n{10}, light_confirm_frames{8};
   double light_stale_sec{0.75};
+  double sign_stop_delay_sec{1.0};
   double fork_sign_advance_sec{1.5};
   double fork_commit_min_sec{0.8}, fork_commit_timeout_sec{1.8};
   int aruco_target_id{3}, aruco_confirm_frames{2}, aruco_clear_frames{3};
@@ -288,6 +293,7 @@ Config load_config(const std::string & path) {
   read_value(color, "saturation", c.saturation);
   read_value(color, "gamma", c.gamma);
   const auto mission = root["mission"];
+  read_value(mission, "sign_stop_delay_sec", c.sign_stop_delay_sec);
   read_value(mission, "fork_sign_advance_sec", c.fork_sign_advance_sec);
   read_value(mission, "fork_commit_min_sec", c.fork_commit_min_sec);
   read_value(mission, "fork_commit_timeout_sec", c.fork_commit_timeout_sec);
@@ -1112,6 +1118,8 @@ private:
     config_.straight_curvature_deadband = declare_parameter<double>(
       "throttle.straight_curvature_deadband", config_.straight_curvature_deadband);
 
+    config_.sign_stop_delay_sec = declare_parameter<double>(
+      "mission.sign_stop_delay_sec", config_.sign_stop_delay_sec);
     config_.fork_sign_advance_sec = declare_parameter<double>(
       "mission.fork_sign_advance_sec", config_.fork_sign_advance_sec);
     config_.fork_commit_min_sec = declare_parameter<double>(
@@ -1252,6 +1260,9 @@ private:
         else if (name == "throttle.straight_curvature_deadband") {
           next.straight_curvature_deadband = parameter.as_double();
         }
+        else if (name == "mission.sign_stop_delay_sec") {
+          next.sign_stop_delay_sec = parameter.as_double();
+        }
         else if (name == "mission.fork_sign_advance_sec") {
           next.fork_sign_advance_sec = parameter.as_double();
         }
@@ -1308,7 +1319,8 @@ private:
       next.straight_steer_deadband <= 1.0 && next.straight_curvature_deadband >= 0.0 &&
       next.straight_curvature_deadband <= 1.0 && next.fork_forced_error >= 0.0 &&
       next.fork_forced_error <= 1.0 &&
-      next.fork_sign_advance_sec >= 0.0 && next.fork_commit_min_sec >= 0.0 &&
+      next.sign_stop_delay_sec >= 0.0 && next.fork_sign_advance_sec >= 0.0 &&
+      next.fork_commit_min_sec >= 0.0 &&
       next.fork_commit_timeout_sec >= next.fork_commit_min_sec &&
       next.aruco_confirm_frames >= 1 && next.aruco_clear_frames >= 1;
     if (!lab_valid || !geometry_valid || !speed_valid || std::abs(next.steer_sign) != 1) {
@@ -1562,13 +1574,33 @@ private:
         // speed_min. OUT perception is white-only, so an adjacent yellow IN
         // split cannot influence center, curvature, or steering.
         auto cmd = controller_.follow_with_startup(
-          lane, config_.speed_max, config_.straight_limit);
-        if (auto decision = sign_decision()) {
-          fork_decision_ = *decision;
-          transition(MissionState::OUT_FORK_SIGN_ADVANCE, now_sec);
+          lane, config_.launch_cap, config_.straight_limit);
+        if (sign_decision()) {
+          transition(MissionState::OUT_SIGN_APPROACH, now_sec);
         }
         return cmd;
       }
+
+      case MissionState::OUT_SIGN_APPROACH:
+        if (now_sec - entered_ >= config_.sign_stop_delay_sec) {
+          controller_.stop();
+          sign_history_.clear();
+          transition(MissionState::OUT_SIGN_VOTE_STOP, now_sec);
+          return {};
+        }
+        return controller_.follow_with_startup(
+          lane, config_.launch_cap, config_.straight_limit);
+
+      case MissionState::OUT_SIGN_VOTE_STOP:
+        controller_.stop();
+        if (auto decision = sign_decision()) {
+          fork_decision_ = *decision;
+          transition(MissionState::OUT_FORK_SIGN_ADVANCE, now_sec);
+        } else if (now_sec - entered_ >= config_.sign_stop_delay_sec) {
+          sign_history_.clear();
+          transition(MissionState::OUT_TO_FORK, now_sec);
+        }
+        return {};
 
       case MissionState::OUT_FORK_SIGN_ADVANCE: {
         // Apply the same signed directional nudge for LEFT and RIGHT.
@@ -1858,6 +1890,28 @@ private:
     (void)lane;
   }
 
+  static void draw_virtual_fork_target(
+    cv::Mat & frame, const std::string & state, const std::string & decision,
+    const Config & config)
+  {
+    if (decision.empty() ||
+      (state != "OUT_FORK_SIGN_ADVANCE" && state != "OUT_FORK_COMMIT"))
+    {
+      return;
+    }
+    const cv::Point vehicle(frame.cols / 2, frame.rows - 1);
+    const double side = decision == "LEFT" ? -1.0 : 1.0;
+    const cv::Point target(
+      std::clamp(cvRound(vehicle.x + side * config.fork_forced_error * vehicle.x),
+        0, frame.cols - 1),
+      std::clamp(cvRound(frame.rows * 0.42), 0, frame.rows - 1));
+    const cv::Scalar color(255, 0, 255);
+    cv::arrowedLine(frame, vehicle, target, color, 4, cv::LINE_AA, 0, 0.12);
+    cv::circle(frame, target, 8, color, -1, cv::LINE_AA);
+    put_outlined_text(frame, "VIRTUAL " + decision,
+      cv::Point(std::max(4, target.x - 62), std::max(18, target.y - 12)), 0.5, color);
+  }
+
   static cv::Mat make_lane_mask_view(
     const LaneDebug & debug, const LaneObs & lane, const Command & cmd, int frame_width)
   {
@@ -1951,6 +2005,7 @@ private:
     std::vector<std::vector<cv::Point2f>> marker_corners;
     std::array<double, 4> light_roi;
     std::string state;
+    std::string fork_decision;
     int light{0};
     Config config;
     rclcpp::Time frame_stamp{0, 0, RCL_ROS_TIME};
@@ -1959,6 +2014,7 @@ private:
       if (latest_frame_.empty()) return;
       lane_debug = latest_lane_debug_; lane = latest_lane_;
       cmd = last_command_; state = state_name(state_);
+      fork_decision = fork_decision_;
       markers = marker_ids_; marker_corners = marker_corners_;
       light = light_state_; config = config_;
       light_roi = light_roi_;
@@ -1968,6 +2024,7 @@ private:
     }
     frame = corrected_debug_frame(frame, config);
     draw_lane_debug(frame, lane_debug, lane, cmd);
+    draw_virtual_fork_target(frame, state, fork_decision, config);
     const cv::Point roi_tl(
       cvRound(light_roi[0] * frame.cols), cvRound(light_roi[1] * frame.rows));
     const cv::Point roi_br(

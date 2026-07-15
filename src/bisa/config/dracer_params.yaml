@@ -7,7 +7,9 @@ roi:
   # 신호등 추론 ROI(left, top, right, bottom 비율). 이 영역만 NCNN의 고정
   # 320x320 입력으로 확대하며, Param GUI 슬라이더로 주행 중 조정할 수 있다.
   detector_light: [0.00, 0.00, 0.80, 0.85]
-  detector_sign: [0.10, 0.05, 0.90, 0.70]   # 표지판 검출 허용 ROI(비율) — 이 밖 검출은 버림
+  # 초록불 출발 뒤에는 이 영역을 NCNN 320 입력으로 한 번만 축소한다. 전체 화면을
+  # 유지해야 하단 표지판과 이후 빨간불을 같은 단일 추론으로 놓치지 않는다.
+  detector_sign: [0.00, 0.00, 1.00, 1.00]
 
 # Lane-only ROI. Camera stays full size for light/sign/aruco detection; only the
 # lane pipeline is cropped to this box. width/height are slider-adjustable live.
@@ -96,8 +98,8 @@ detector:
   conf:
     traffic_green: 0.40  # green 검출 최소 신뢰도
     traffic_red: 0.7    # 원거리 red 후보; 색 후처리 통과 시에만 최종 인정
-    sign_left: 0.65      # 좌 표지 최소 신뢰도
-    sign_right: 0.65     # 우 표지 최소 신뢰도
+    sign_left: 0.35      # 좌 표지 후보; 6/10 시간 투표로 단발 오탐 제거
+    sign_right: 0.35     # 우 표지 후보; 6/10 시간 투표로 단발 오탐 제거
   sign_vote_k: 9         # 최근 n프레임 중 k회 이상 잡히면 표지 방향 확정
   sign_vote_n: 15        # 표지 투표 창(프레임 수)
   # 신호등: classify_light verdict(튜너가 보여주는 값)로 green이면 출발/red면 정지.
@@ -110,7 +112,7 @@ throttle:
   # 직선 deadband 안에서는 speed_max, 조향/곡률이 커지면 speed_min 쪽으로 감속한다.
   speed_min: 0.20          # 이동 속도밴드 하한(정지 아닌 최저속)
   speed_max: 0.24          # 직선 목표 최고속
-  launch_cap: 0.22         # 호환용(OUT은 초록~표지판까지 speed_max+곡률 스케줄 사용)
+  launch_cap: 0.22         # OUT 초록불 출발부터 표지판 정지 전까지의 최고속
   s_curve_cap: 0.22        # IN 진입/랩 골격용 속도 상한
   fork_approach_cap: 0.22  # 표지판 확정 직후 방향별 선제 강제 조향 속도 상한
   fork_commit_cap: 0.22    # 갈림길 방향 강제 조향은 가장 낮은 별도 상한 사용
@@ -204,9 +206,10 @@ traffic_light:
 mission:
   route_mode: OUT               # 코스 모드(OUT/IN/LANE), 각 FSM은 완전히 분리
   control_hz: 20.0              # 제어 루프 주기(Hz)
-  # OUT은 초록불 뒤 별도 ENTRY/S 상태 없이 흰 차선을 곡률 기반 추종하다가
-  # 표지판 투표가 확정될 때만 fork 접근 상태로 넘어간다.
-  # 표지판 방향은 아주 짧게만 넣고, 곧바로 양쪽 흰 차선을 재검출해 중앙 정렬한다.
+  # 표지판이 처음 보이면 1초 더 차선을 따라간 뒤 정지하고, 정지 위치에서 새로
+  # 모은 표지판 투표로 방향을 확정한다. 이후 가상 목표점을 향해 조향하다가
+  # 선택 방향의 양쪽 차선이 안정적으로 잡히면 다시 일반 차선 추종으로 넘긴다.
+  sign_stop_delay_sec: 1.0      # 표지판 투표 후 추가 주행 시간 + 정지 재투표 최대시간(s)
   fork_sign_advance_sec: 0.4    # 방향별 약한 조향 펄스 유지 시간(s)
   fork_commit_min_sec: 0.3      # 양차선 중앙 정렬을 유지할 최소 시간(s)
   fork_commit_timeout_sec: 3.0  # 중앙 섬 통과/선택 코스 재정렬의 최종 안전 타임아웃

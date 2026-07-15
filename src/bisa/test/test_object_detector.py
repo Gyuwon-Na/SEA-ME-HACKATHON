@@ -41,7 +41,8 @@ def test_light_roi_bounds_stay_inside_frame_and_non_empty():
     )
 
 
-def test_inference_roi_uses_configured_crop():
+def test_inference_roi_switches_from_light_crop_to_full_frame():
     detector = BestPthDetector(AutonomousConfig(), "unused")
 
-    assert detector.inference_roi() == [0.00, 0.00, 0.80, 0.85]
+    assert detector.inference_roi("OUT_WAIT_GREEN") == [0.00, 0.00, 0.80, 0.85]
+    assert detector.inference_roi("OUT_TO_FORK") == [0.00, 0.00, 1.00, 1.00]

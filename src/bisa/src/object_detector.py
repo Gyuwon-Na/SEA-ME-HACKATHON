@@ -37,6 +37,11 @@ class DetectionBuffer:
 
         self.frames.append(list(detections))
 
+    def clear(self) -> None:
+        """Drops old frames before starting a fresh stationary vote."""
+
+        self.frames.clear()
+
     def count(self, cls: str, last_n: int) -> int:
         """Counts how many of the latest frames contained a class."""
 
@@ -353,10 +358,15 @@ class BestPthDetector:
 
         return self.roi_bounds(frame_shape, self.config.roi.detector_light)
 
-    def inference_roi(self) -> list[float]:
-        """Keeps the live-tuned inference crop fixed for the whole mission."""
+    def inference_roi(self, mission_state: str) -> list[float]:
+        """Uses the light crop before launch and one full-frame pass afterwards."""
 
-        return list(self.config.roi.detector_light)
+        roi = (
+            self.config.roi.detector_light
+            if mission_state.endswith("WAIT_GREEN")
+            else self.config.roi.detector_sign
+        )
+        return list(roi)
 
     @staticmethod
     def roi_bounds(

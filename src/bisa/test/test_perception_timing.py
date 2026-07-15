@@ -160,9 +160,41 @@ def test_out_lane_mask_excludes_yellow_split_line():
 class _SignDetector:
     def __init__(self, direction=None):
         self.direction = direction
+        self.clear_count = 0
 
     def count(self, name, _window):
         return 99 if name == self.direction else 0
+
+    def clear(self):
+        self.clear_count += 1
+        self.direction = None
+
+
+class _WeakSignDetector(_SignDetector):
+    def count(self, name, _window):
+        return 1 if name == self.direction else 0
+
+
+def test_out_fsm_ignores_one_frame_sign_and_vote_stop_times_out():
+    config = AutonomousConfig()
+    config.detector.light_confirm_frames = 1
+    fsm = make_course_fsm(config, LaneController(config))
+    lane = LaneObs(valid=True)
+    weak = _WeakSignDetector("sign_left")
+
+    fsm.step(lane, weak, 1.0, light_state="green", light_seq=1)
+    fsm.step(lane, weak, 1.1)
+    assert fsm.state == "OUT_TO_FORK"
+
+    sign = _SignDetector("sign_left")
+    fsm.step(lane, sign, 1.2)
+    fsm.step(lane, sign, 2.21)
+    assert fsm.state == "OUT_SIGN_VOTE_STOP"
+    assert sign.direction is None
+
+    fsm.step(lane, sign, 3.22)
+    assert fsm.state == "OUT_TO_FORK"
+    assert fsm.step(lane, sign, 3.3).throttle > 0.0
 
 
 def test_out_fsm_curve_follows_until_sign_then_resumes_after_fork():
@@ -182,14 +214,26 @@ def test_out_fsm_curve_follows_until_sign_then_resumes_after_fork():
     curved_lane = LaneObs(valid=True, curvature=0.8, signed_curvature=0.5)
     cmd = fsm.step(curved_lane, no_sign, 20.0)
     assert fsm.state == "OUT_TO_FORK"
-    assert config.throttle.speed_min <= cmd.throttle <= config.throttle.speed_max
+    assert config.throttle.speed_min <= cmd.throttle <= config.throttle.launch_cap
 
     left = _SignDetector("sign_left")
     fsm.step(lane, left, 20.1)
+    assert fsm.state == "OUT_SIGN_APPROACH"
+    approach_cmd = fsm.step(lane, left, 21.05)
+    assert config.throttle.speed_min <= approach_cmd.throttle <= config.throttle.launch_cap
+
+    stop_cmd = fsm.step(lane, left, 21.11)
+    assert fsm.state == "OUT_SIGN_VOTE_STOP"
+    assert stop_cmd.throttle == pytest.approx(0.0)
+    assert stop_cmd.steering == pytest.approx(0.0)
+    assert left.clear_count == 1
+
+    left.direction = "sign_left"
+    fsm.step(lane, left, 21.2)
     assert fsm.state == "OUT_FORK_SIGN_ADVANCE"
-    advance_cmd = fsm.step(lane, left, 20.15)
+    advance_cmd = fsm.step(lane, left, 21.25)
     assert advance_cmd.steering > 0.0
-    fsm.step(lane, left, 20.4)
+    fsm.step(lane, left, 21.5)
     assert fsm.state == "OUT_FORK_COMMIT"
 
     fork_lane = LaneObs(
@@ -197,19 +241,19 @@ def test_out_fsm_curve_follows_until_sign_then_resumes_after_fork():
         fork_seen=True,
         left_branch=PathCandidate(0.55, 0.1, 100.0),
     )
-    cmd = fsm.step(fork_lane, left, 20.5)
+    cmd = fsm.step(fork_lane, left, 21.6)
     assert cmd.steering > 0.0
-    for now in (20.6, 20.7, 20.8):
+    for now in (21.7, 21.8, 21.9):
         fsm.step(lane, left, now)
     assert fsm.state == "OUT_RESUME"
     assert fsm.consume_lane_reset_request()
 
     # ArUco pause and final red stop are handled above the FSM by the autonomous
     # node, so these observations must not create hidden mission-state stops.
-    fsm.step(lane, no_sign, 20.9, light_state="red", light_seq=2)
+    fsm.step(lane, no_sign, 22.0, light_state="red", light_seq=2)
     assert fsm.state == "OUT_RESUME"
-    fsm.step(lane, no_sign, 21.0, marker_visible=True)
-    fsm.step(lane, no_sign, 21.1, marker_visible=True)
+    fsm.step(lane, no_sign, 22.1, marker_visible=True)
+    fsm.step(lane, no_sign, 22.2, marker_visible=True)
     assert fsm.state == "OUT_RESUME"
 
 
@@ -226,10 +270,16 @@ def test_out_sign_advance_forces_direction_before_x_is_visible(sign_name, expect
     fsm = make_course_fsm(config, LaneController(config))
     lane = LaneObs(valid=True, center_error=0.0, fork_seen=False)
     no_sign = _SignDetector()
+    sign = _SignDetector(sign_name)
 
     fsm.step(lane, no_sign, 1.0, light_state="green", light_seq=1)
-    fsm.step(lane, _SignDetector(sign_name), 1.1)
-    cmd = fsm.step(lane, _SignDetector(sign_name), 1.15)
+    fsm.step(lane, sign, 1.1)
+    assert fsm.state == "OUT_SIGN_APPROACH"
+    fsm.step(lane, sign, 2.11)
+    assert fsm.state == "OUT_SIGN_VOTE_STOP"
+    sign.direction = sign_name
+    fsm.step(lane, sign, 2.2)
+    cmd = fsm.step(lane, sign, 2.25)
 
     assert fsm.state == "OUT_FORK_SIGN_ADVANCE"
     assert cmd.steering * expected_sign > 0.0

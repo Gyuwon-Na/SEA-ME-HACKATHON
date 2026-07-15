@@ -352,19 +352,10 @@ class BestPthDetector:
 
         return self.roi_bounds(frame_shape, self.config.roi.detector_light)
 
-    def inference_roi(self, mission_state: str) -> list[float]:
-        """Uses the tight light crop while waiting and includes signs afterwards."""
+    def inference_roi(self) -> list[float]:
+        """Keeps the live-tuned inference crop fixed for the whole mission."""
 
-        light = self.config.roi.detector_light
-        if mission_state.endswith("WAIT_GREEN"):
-            return list(light)
-        sign = self.config.roi.detector_sign
-        return [
-            min(light[0], sign[0]),
-            min(light[1], sign[1]),
-            max(light[2], sign[2]),
-            max(light[3], sign[3]),
-        ]
+        return list(self.config.roi.detector_light)
 
     @staticmethod
     def roi_bounds(

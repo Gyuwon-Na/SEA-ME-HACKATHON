@@ -21,7 +21,9 @@ class RoiConfig:
     mid_y1: float = 0.75
     far_y0: float = 0.32
     far_y1: float = 0.58
-    detector_light: list[float] = field(default_factory=lambda: [0.20, 0.00, 0.80, 0.55])
+    detector_light: list[float] = field(
+        default_factory=lambda: [0.025, 0.075, 0.415, 0.710]
+    )
     detector_sign: list[float] = field(default_factory=lambda: [0.10, 0.05, 0.90, 0.70])
 
 

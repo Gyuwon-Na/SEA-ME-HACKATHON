@@ -189,7 +189,6 @@ def generate_launch_description():
                 "model_path": model_path,
                 "image_topic": image_topic,
                 "detections_topic": detections_topic,
-                "mission_state_topic": mission_state_topic,
                 "opencv_num_threads": opencv_threads,
                 "detector.device": LaunchConfiguration("device"),
                 "detector.imgsz": imgsz,

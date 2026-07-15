@@ -85,7 +85,6 @@ class BisaDetectorNode(Node):
         self.declare_parameter("model_path", _default_model())
         self.declare_parameter("image_topic", "/camera/image/compressed")
         self.declare_parameter("detections_topic", "/bisa/detections")
-        self.declare_parameter("mission_state_topic", "/bisa/mission_state")
         # CPU is the verified production backend on TOPST. The PowerVR Vulkan
         # path remains opt-in because same-frame tests returned wrong boxes.
         self.declare_parameter("detector.device", "cpu")
@@ -119,7 +118,6 @@ class BisaDetectorNode(Node):
         self.infer_time_sum = 0.0
         self.report_started = time.perf_counter()
         self._status = (False, "waiting for first camera frame")
-        self.mission_state = "OUT_WAIT_GREEN"
 
         image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -139,12 +137,6 @@ class BisaDetectorNode(Node):
             str(self.get_parameter("image_topic").value),
             self.image_callback,
             image_qos,
-        )
-        self.create_subscription(
-            String,
-            str(self.get_parameter("mission_state_topic").value),
-            lambda msg: setattr(self, "mission_state", msg.data),
-            1,
         )
         self.create_timer(1.0, self._republish_status)
         self._publish_status(False, "waiting for first camera frame")
@@ -263,7 +255,7 @@ class BisaDetectorNode(Node):
 
         now_sec = self.get_clock().now().nanoseconds / 1e9
         processed = preprocess_frame(frame, self.config.color_correction)
-        inference_roi = self.detector.inference_roi(self.mission_state)
+        inference_roi = self.detector.inference_roi()
         previous_infer_time = self.detector.last_infer_time
         started = time.perf_counter()
         detections = self.detector.infer(processed, now_sec, inference_roi)

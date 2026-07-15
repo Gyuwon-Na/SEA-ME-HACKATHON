@@ -1,6 +1,6 @@
-description: Ultralytics YOLO26n model trained on /Users/shin-isu/Desktop/Files/Git/kmu.study-1/D-Racer/signs.yaml
+description: Ultralytics YOLO26n model trained on dataset_light/data.yaml
 author: Ultralytics
-date: '2026-07-08T17:28:49.935312'
+date: '2026-07-15T10:51:56.441970'
 version: 8.4.90
 license: AGPL-3.0 License (https://ultralytics.com/license)
 docs: https://docs.ultralytics.com

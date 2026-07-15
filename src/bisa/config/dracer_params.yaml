@@ -6,7 +6,7 @@ roi:
   far_y1: 0.58                               # 원거리 밴드 하단 y비율
   # 신호등 추론 ROI(left, top, right, bottom 비율). 이 영역만 NCNN의 고정
   # 320x320 입력으로 확대하며, Param GUI 슬라이더로 주행 중 조정할 수 있다.
-  detector_light: [0.20, 0.00, 0.80, 0.55]
+  detector_light: [0.025, 0.075, 0.415, 0.710]
   detector_sign: [0.10, 0.05, 0.90, 0.70]   # 표지판 검출 허용 ROI(비율) — 이 밖 검출은 버림
 
 # Lane-only ROI. Camera stays full size for light/sign/aruco detection; only the
@@ -14,8 +14,8 @@ roi:
 # x_offset < 0 => centered horizontally, y_offset < 0 => anchored to frame bottom.
 lane_roi:
   enabled: true    # 차선 파이프라인 전용 ROI 크롭 사용 여부
-  width: 329       # ROI 가로 px (라이브 조정)
-  height: 148      # ROI 세로 px (작게 유지해 연산 절감)
+  width: 640       # ROI 가로 px (라이브 조정)
+  height: 240      # ROI 세로 px (라이브 조정)
   x_offset: -1     # <0 이면 가로 중앙 정렬
   y_offset: -1     # <0 이면 프레임 하단에 붙임(차선이 보이는 영역)
 

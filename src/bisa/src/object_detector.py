@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -224,6 +225,7 @@ class BestPthDetector:
             "source": source,
             "imgsz": int(self.config.detector.imgsz),
             "device": self.device,
+            "conf": min(float(value) for value in self.config.detector.conf.values()),
             "verbose": False,
         }
         # Ultralytics creates ncnn.Net lazily inside the first predict() and
@@ -293,15 +295,24 @@ class BestPthDetector:
         self.last_infer_time = now_sec
         return True
 
-    def infer(self, frame_bgr: np.ndarray, now_sec: float) -> list[Detection]:
-        """Runs model inference and returns confidence/ROI-gated detections."""
+    def infer(
+        self,
+        frame_bgr: np.ndarray,
+        now_sec: float,
+        inference_roi: list[float] | None = None,
+    ) -> list[Detection]:
+        """Runs inference on the light ROI and returns full-frame detections."""
 
         if not self.load_model():
             return []
         if not self.should_run(now_sec):
             return []
 
-        results = self._predict(frame_bgr)
+        x0, y0, x1, y1 = self.roi_bounds(
+            frame_bgr.shape,
+            inference_roi or self.config.roi.detector_light,
+        )
+        results = self._predict(frame_bgr[y0:y1, x0:x1])
         self._configure_ncnn_runtime()
         self.ready = True
         if not results:
@@ -323,17 +334,45 @@ class BestPthDetector:
                 conf = float(box.conf[0].item())
                 if conf < self.config.detector.conf.get(cls_name, 0.55):
                     continue
-                x1, y1, x2, y2 = [float(v) for v in box.xyxy[0].tolist()]
+                bx1, by1, bx2, by2 = [float(v) for v in box.xyxy[0].tolist()]
+                bx1, bx2 = bx1 + x0, bx2 + x0
+                by1, by2 = by1 + y0, by2 + y0
                 det = Detection(
                     cls=cls_name,
                     conf=conf,
-                    bbox=(x1, y1, x2, y2),
-                    cx=(x1 + x2) / 2.0,
-                    cy=(y1 + y2) / 2.0,
+                    bbox=(bx1, by1, bx2, by2),
+                    cx=(bx1 + bx2) / 2.0,
+                    cy=(by1 + by2) / 2.0,
                 )
                 if self.in_expected_roi(det, frame_bgr.shape[1], frame_bgr.shape[0]):
                     detections.append(det)
         return detections
+
+    def light_roi_bounds(self, frame_shape: tuple[int, ...]) -> tuple[int, int, int, int]:
+        """Converts the configured normalized ROI into a non-empty image crop."""
+
+        return self.roi_bounds(frame_shape, self.config.roi.detector_light)
+
+    def inference_roi(self) -> list[float]:
+        """Keeps the live-tuned inference crop fixed for the whole mission."""
+
+        return list(self.config.roi.detector_light)
+
+    @staticmethod
+    def roi_bounds(
+        frame_shape: tuple[int, ...], roi: list[float]
+    ) -> tuple[int, int, int, int]:
+        """Converts one normalized ROI into a non-empty image crop."""
+
+        height, width = frame_shape[:2]
+        if height < 1 or width < 1:
+            raise ValueError("frame must have a positive width and height")
+        left, top, right, bottom = roi
+        x0 = min(max(math.floor(float(left) * width), 0), width - 1)
+        y0 = min(max(math.floor(float(top) * height), 0), height - 1)
+        x1 = min(max(math.ceil(float(right) * width), x0 + 1), width)
+        y1 = min(max(math.ceil(float(bottom) * height), y0 + 1), height)
+        return x0, y0, x1, y1
 
     def _classify_detections(self, result, width: int, height: int) -> list[Detection]:
         """Turns a whole-frame classification result into one mission detection."""

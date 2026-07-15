@@ -55,6 +55,12 @@ RouteMode parse_route_mode(std::string value) {
   return RouteMode::OUT;
 }
 
+constexpr bool should_latch_red(bool has_started, int light) {
+  return has_started && light == 2;
+}
+
+static_assert(should_latch_red(true, 2) && !should_latch_red(false, 2));
+
 enum class MissionState {
   LANE_TEST,
   OUT_WAIT_GREEN,
@@ -120,12 +126,6 @@ struct Detection {
   int class_id{0};
   float confidence{0.0F};
   cv::Rect2f box;
-};
-
-struct StampedFrame {
-  int32_t sec{0};
-  uint32_t nanosec{0};
-  cv::Mat image;
 };
 
 struct Command {
@@ -927,6 +927,8 @@ public:
     image_topic_ = declare_parameter<std::string>("image_topic", "/camera/image/compressed");
     control_topic_ = declare_parameter<std::string>("control_topic", "/control");
     detections_topic_ = declare_parameter<std::string>("detections_topic", "/bisa/detections");
+    mission_state_topic_ = declare_parameter<std::string>(
+      "mission_state_topic", "/bisa/mission_state");
     publish_debug_ = declare_parameter<bool>("publish_debug_image", false);
     debug_hz_ = std::max(0.1, declare_parameter<double>("debug_image_hz", 5.0));
     perception_hz_ = std::max(1.0, declare_parameter<double>("perception_hz", 20.0));
@@ -968,6 +970,7 @@ public:
     green_pub_ = create_publisher<std_msgs::msg::Bool>("/detect_green", 10);
     red_pub_ = create_publisher<std_msgs::msg::Bool>("/detect_red", 10);
     sign_pub_ = create_publisher<std_msgs::msg::String>("/detect_sign", 10);
+    state_pub_ = create_publisher<std_msgs::msg::String>(mission_state_topic_, 1);
     aruco_pub_ = create_publisher<std_msgs::msg::String>("/detect_aruco", 10);
     debug_pub_ = create_publisher<sensor_msgs::msg::CompressedImage>(
       "/bisa/debug/image/compressed", image_qos);
@@ -1381,17 +1384,6 @@ private:
       if (publish_debug_) {
         latest_frame_ = frame;
         latest_lane_debug_ = std::move(lane_debug);
-        frame_history_.push_back(
-          StampedFrame{msg->header.stamp.sec, msg->header.stamp.nanosec, frame});
-        while (frame_history_.size() > 40U) frame_history_.pop_front();
-        if (msg->header.stamp.sec == detection_source_sec_ &&
-          msg->header.stamp.nanosec == detection_source_nanosec_)
-        {
-          detection_frame_ = frame;
-          debug_detections_ = detections_;
-          detection_stamp_ = rclcpp::Time(
-            msg->header.stamp.sec, msg->header.stamp.nanosec, RCL_ROS_TIME);
-        }
       }
     }
     processed_image_sec_ = msg->header.stamp.sec;
@@ -1425,11 +1417,10 @@ private:
     if (detection_count_ == 0U) detection_report_started_ = detection_now;
     ++detection_count_;
     const uint64_t sequence = static_cast<uint64_t>(msg->data[0]);
-    const int32_t source_sec = static_cast<int32_t>(msg->data[1]);
-    const uint32_t source_nanosec = static_cast<uint32_t>(msg->data[2]);
     const int light = static_cast<int>(msg->data[3]);
     const int count = std::max(0, static_cast<int>(msg->data[4]));
     std::vector<Detection> detections;
+    std::array<double, 4> light_roi{0.00, 0.00, 0.80, 0.85};
     bool left = false, right = false;
     for (int i = 0; i < count; ++i) {
       const std::size_t base = 5 + static_cast<std::size_t>(i) * 6;
@@ -1448,20 +1439,35 @@ private:
       left = left || d.class_id == 2; right = right || d.class_id == 3;
       detections.push_back(d);
     }
+    const std::size_t roi_base = 5 + static_cast<std::size_t>(count) * 6;
+    if (roi_base + 3 < msg->data.size()) {
+      std::array<double, 4> candidate{
+        msg->data[roi_base], msg->data[roi_base + 1],
+        msg->data[roi_base + 2], msg->data[roi_base + 3]};
+      if (std::all_of(candidate.begin(), candidate.end(), [](double value) {
+          return std::isfinite(value) && value >= 0.0 && value <= 1.0;
+        }) && candidate[0] < candidate[2] && candidate[1] < candidate[3])
+      {
+        light_roi = candidate;
+      }
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     detection_sequence_ = sequence;
     light_state_ = light;
     light_received_ = now();
     detections_ = detections;
-    detection_source_sec_ = source_sec;
-    detection_source_nanosec_ = source_nanosec;
-    for (auto it = frame_history_.rbegin(); it != frame_history_.rend(); ++it) {
-      if (it->sec == source_sec && it->nanosec == source_nanosec) {
-        detection_frame_ = it->image;
-        debug_detections_ = detections;
-        detection_stamp_ = rclcpp::Time(source_sec, source_nanosec, RCL_ROS_TIME);
-        break;
+    light_roi_ = light_roi;
+    if (should_latch_red(has_started_, light) && !red_stop_latched_.exchange(true)) {
+      controller_.stop();
+      control_msgs::msg::Control stop;
+      stop.header.stamp = now();
+      stop.steering = 0.0F;
+      stop.throttle = 0.0F;
+      {
+        std::lock_guard<std::mutex> output_lock(control_output_mutex_);
+        control_pub_->publish(stop);
       }
+      RCLCPP_WARN(get_logger(), "global red-light stop latched immediately");
     }
     sign_history_.push_back((left ? 1 : 0) | (right ? 2 : 0));
     while (static_cast<int>(sign_history_.size()) > config_.sign_vote_n) sign_history_.pop_front();
@@ -1493,11 +1499,10 @@ private:
   void update_light(double now_sec) {
     const double age = (now() - light_received_).seconds();
     const int fresh = age >= 0.0 && age <= config_.light_stale_sec ? light_state_ : 0;
-    if (fresh == 0) { green_streak_ = red_streak_ = 0; return; }
+    if (fresh == 0) { green_streak_ = 0; return; }
     if (detection_sequence_ == last_light_sequence_) return;
     last_light_sequence_ = detection_sequence_;
     green_streak_ = fresh == 1 ? green_streak_ + 1 : 0;
-    red_streak_ = fresh == 2 ? red_streak_ + 1 : 0;
     (void)now_sec;
   }
 
@@ -1641,6 +1646,7 @@ private:
     Command cmd;
     double speed_max;
     std::optional<std::string> decision;
+    std::string mission_state;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       const double now_sec = now().seconds();
@@ -1663,20 +1669,7 @@ private:
         entered_ += std::max(0.0, now_sec - aruco_pause_started_);
         RCLCPP_INFO(get_logger(), "global ArUco stop cleared; resume mission");
       }
-      // Never latch the vehicle on a single detector frame.  The detector can
-      // briefly classify a sign or reflection as red; use the same confirmed
-      // streak required by the mission light gate before making this permanent
-      // stop decision.
-      if (has_started_ && red_streak_ >= config_.light_confirm_frames &&
-        !red_stop_latched_)
-      {
-        red_stop_latched_ = true;
-        RCLCPP_WARN(
-          get_logger(), "global red-light stop latched after %d confirmed frames",
-          red_streak_);
-      }
-
-      if (red_stop_latched_ || aruco_stop_active_) {
+      if (red_stop_latched_.load() || aruco_stop_active_) {
         controller_.stop();
         cmd = {};
       } else {
@@ -1689,16 +1682,24 @@ private:
       }
       last_command_ = cmd;
       decision = sign_decision();
+      mission_state = state_name(state_);
       speed_max = config_.speed_max;
     }
-    control_msgs::msg::Control output;
-    output.header.stamp = now();
-    output.steering = static_cast<float>(clamp(cmd.steering, -1.0, 1.0));
-    output.throttle = static_cast<float>(clamp(cmd.throttle, 0.0, speed_max));
-    control_pub_->publish(output);
+    {
+      std::lock_guard<std::mutex> output_lock(control_output_mutex_);
+      const bool red_latched = red_stop_latched_.load();
+      control_msgs::msg::Control output;
+      output.header.stamp = now();
+      output.steering = red_latched ? 0.0F :
+        static_cast<float>(clamp(cmd.steering, -1.0, 1.0));
+      output.throttle = red_latched ? 0.0F :
+        static_cast<float>(clamp(cmd.throttle, 0.0, speed_max));
+      control_pub_->publish(output);
+    }
     green_pub_->publish(std_msgs::msg::Bool().set__data(light == 1));
     red_pub_->publish(std_msgs::msg::Bool().set__data(light == 2));
     sign_pub_->publish(std_msgs::msg::String().set__data(decision.value_or("none")));
+    state_pub_->publish(std_msgs::msg::String().set__data(mission_state));
     std::string marker_text = markers.empty() ? "none" : "ids=";
     for (int id : markers) marker_text += std::to_string(id) + ",";
     aruco_pub_->publish(std_msgs::msg::String().set__data(marker_text));
@@ -1923,6 +1924,7 @@ private:
     std::vector<Detection> detections;
     std::vector<int> markers;
     std::vector<std::vector<cv::Point2f>> marker_corners;
+    std::array<double, 4> light_roi;
     std::string state;
     int light{0};
     Config config;
@@ -1934,20 +1936,21 @@ private:
       cmd = last_command_; state = state_name(state_);
       markers = marker_ids_; marker_corners = marker_corners_;
       light = light_state_; config = config_;
-      if (!detection_frame_.empty()) {
-        frame = detection_frame_.clone();
-        detections = debug_detections_;
-        frame_stamp = detection_stamp_;
-      } else {
-        // Never put stale boxes on a newer frame when an exact match is not
-        // available.  The live image remains useful, simply without boxes.
-        frame = latest_frame_.clone();
-        detections.clear();
-        frame_stamp = now();
-      }
+      light_roi = light_roi_;
+      frame = latest_frame_.clone();
+      detections = detections_;
+      frame_stamp = now();
     }
     frame = corrected_debug_frame(frame, config);
     draw_lane_debug(frame, lane_debug, lane, cmd);
+    const cv::Point roi_tl(
+      cvRound(light_roi[0] * frame.cols), cvRound(light_roi[1] * frame.rows));
+    const cv::Point roi_br(
+      cvRound(light_roi[2] * frame.cols), cvRound(light_roi[3] * frame.rows));
+    cv::rectangle(frame, roi_tl, roi_br, cv::Scalar(0, 255, 255), 2);
+    put_outlined_text(frame, "NCNN light ROI",
+      cv::Point(roi_tl.x + 4, std::max(16, roi_tl.y + 18)), 0.5,
+      cv::Scalar(0, 255, 255));
     for (const auto & d : detections) {
       const cv::Scalar color = d.class_id == 0 ? cv::Scalar(0, 0, 255) :
         d.class_id == 1 ? cv::Scalar(0, 255, 0) : cv::Scalar(255, 180, 0);
@@ -2003,34 +2006,33 @@ private:
   Config config_;
   LaneProcessor lane_;
   Controller controller_;
-  std::mutex mutex_, image_mutex_, lane_mutex_;
+  std::mutex mutex_, image_mutex_, lane_mutex_, control_output_mutex_;
   sensor_msgs::msg::CompressedImage::SharedPtr pending_image_;
   LaneObs latest_lane_;
   LaneDebug latest_lane_debug_;
-  cv::Mat latest_frame_, detection_frame_;
-  std::vector<Detection> detections_, debug_detections_;
-  std::deque<StampedFrame> frame_history_;
+  cv::Mat latest_frame_;
+  std::vector<Detection> detections_;
+  std::array<double, 4> light_roi_{0.00, 0.00, 0.80, 0.85};
   std::vector<int> marker_ids_;
   std::vector<std::vector<cv::Point2f>> marker_corners_;
   std::deque<int> sign_history_;
   Command last_command_;
   bool target_marker_{false}, publish_debug_{false};
-  bool has_started_{false}, aruco_stop_active_{false}, red_stop_latched_{false};
+  bool has_started_{false}, aruco_stop_active_{false};
+  std::atomic<bool> red_stop_latched_{false};
   double aruco_pause_started_{0.0};
-  int light_state_{0}, green_streak_{0}, red_streak_{0};
+  int light_state_{0}, green_streak_{0};
   std::atomic<bool> lane_reset_requested_{false};
   bool fork_scene_observed_{false};
   int fork_pair_streak_{0}, fork_clear_streak_{0};
   uint64_t detection_sequence_{0}, last_light_sequence_{0};
-  int32_t detection_source_sec_{0};
-  uint32_t detection_source_nanosec_{0};
   int32_t processed_image_sec_{0};
   uint32_t processed_image_nanosec_{0};
   rclcpp::Time light_received_{0, 0, RCL_ROS_TIME};
-  rclcpp::Time detection_stamp_{0, 0, RCL_ROS_TIME};
   MissionState state_{MissionState::OUT_WAIT_GREEN};
   RouteMode route_mode_{RouteMode::OUT};
   std::string fork_decision_, image_topic_, control_topic_, detections_topic_;
+  std::string mission_state_topic_;
   double entered_{0.0}, debug_hz_{5.0}, perception_hz_{20.0}, control_hz_{20.0};
   double detection_hz_target_{20.0};
   uint64_t perception_count_{0}, detection_count_{0};
@@ -2044,7 +2046,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr detection_sub_;
   rclcpp::Publisher<control_msgs::msg::Control>::SharedPtr control_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr green_pub_, red_pub_;
-  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr sign_pub_, aruco_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr sign_pub_, aruco_pub_, state_pub_;
   rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr debug_pub_, mask_pub_;
   rclcpp::TimerBase::SharedPtr perception_timer_, control_timer_, debug_timer_;
   OnSetParametersCallbackHandle::SharedPtr parameter_callback_handle_;

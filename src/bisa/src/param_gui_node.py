@@ -128,6 +128,10 @@ SPEC = {
     ],
     "Detector conf": [
         ("imgsz (early detect)", "detector.imgsz", "i", 160, 960),
+        ("light ROI left", "roi.detector_light_left", "f", 0.0, 1.0),
+        ("light ROI top", "roi.detector_light_top", "f", 0.0, 1.0),
+        ("light ROI right", "roi.detector_light_right", "f", 0.0, 1.0),
+        ("light ROI bottom", "roi.detector_light_bottom", "f", 0.0, 1.0),
         ("green", "detector.conf.traffic_green", "f", 0.0, 1.0),
         ("red", "detector.conf.traffic_red", "f", 0.0, 1.0),
         ("sign left", "detector.conf.sign_left", "f", 0.0, 1.0),
@@ -145,6 +149,15 @@ SPEC = {
 def get_nested(data, dotted, default=None):
     """Reads a dotted key path out of a nested dict, returning default if absent."""
 
+    light_roi_edges = {
+        "roi.detector_light_left": 0,
+        "roi.detector_light_top": 1,
+        "roi.detector_light_right": 2,
+        "roi.detector_light_bottom": 3,
+    }
+    if dotted in light_roi_edges:
+        roi = data.get("roi", {}).get("detector_light", [])
+        return roi[light_roi_edges[dotted]] if len(roi) == 4 else default
     cur = data
     for part in dotted.split("."):
         if isinstance(cur, dict) and part in cur:
@@ -210,7 +223,7 @@ class ParamGuiNode(Node):
 
         if name.startswith("color_correction."):
             return self.target_node, self.detector_node
-        if name.startswith(("detector.", "traffic_light.")):
+        if name.startswith(("detector.", "traffic_light.", "roi.detector_light_")):
             return (self.detector_node,)
         return (self.target_node,)
 

@@ -55,15 +55,18 @@ RouteMode parse_route_mode(std::string value) {
   return RouteMode::OUT;
 }
 
-constexpr bool should_latch_red(bool has_started, int light, int streak, int required) {
-  return has_started && light == 2 && streak >= required;
+constexpr bool should_latch_red(
+  bool has_started, bool red_stop_armed, int light, int streak, int required)
+{
+  return has_started && red_stop_armed && light == 2 && streak >= required;
 }
 
 constexpr int kRedConfirmFrames = 3;
 static_assert(
-  should_latch_red(true, 2, kRedConfirmFrames, kRedConfirmFrames) &&
-  !should_latch_red(true, 2, kRedConfirmFrames - 1, kRedConfirmFrames) &&
-  !should_latch_red(false, 2, kRedConfirmFrames, kRedConfirmFrames));
+  should_latch_red(true, true, 2, kRedConfirmFrames, kRedConfirmFrames) &&
+  !should_latch_red(true, false, 2, kRedConfirmFrames, kRedConfirmFrames) &&
+  !should_latch_red(true, true, 2, kRedConfirmFrames - 1, kRedConfirmFrames) &&
+  !should_latch_red(false, true, 2, kRedConfirmFrames, kRedConfirmFrames));
 
 enum class MissionState {
   LANE_TEST,
@@ -1383,6 +1386,16 @@ private:
       std::lock_guard<std::mutex> lock(mutex_);
       latest_lane_ = observation;
       target_marker_ = marker;
+      if (!red_stop_armed_) {
+        aruco_arm_streak_ = marker ?
+          std::min(aruco_arm_streak_ + 1, config_.aruco_confirm_frames) : 0;
+        if (aruco_arm_streak_ >= config_.aruco_confirm_frames) {
+          red_stop_armed_ = true;
+          RCLCPP_INFO(
+            get_logger(), "red-light stop armed after target ArUco id=%d",
+            config_.aruco_target_id);
+        }
+      }
       marker_ids_ = std::move(ids);
       marker_corners_ = std::move(corners);
       if (publish_debug_) {
@@ -1461,10 +1474,10 @@ private:
     light_received_ = now();
     detections_ = detections;
     light_roi_ = light_roi;
-    red_streak_ = has_started_ && light == 2 ?
+    red_streak_ = has_started_ && red_stop_armed_ && light == 2 ?
       std::min(red_streak_ + 1, kRedConfirmFrames) : 0;
     if (should_latch_red(
-        has_started_, light, red_streak_, kRedConfirmFrames) &&
+        has_started_, red_stop_armed_, light, red_streak_, kRedConfirmFrames) &&
       !red_stop_latched_.exchange(true))
     {
       controller_.stop();
@@ -1477,7 +1490,8 @@ private:
         control_pub_->publish(stop);
       }
       RCLCPP_WARN(
-        get_logger(), "global red-light stop latched after %d consecutive detections",
+        get_logger(),
+        "global red-light stop latched after ArUco gate and %d consecutive detections",
         red_streak_);
     }
     sign_history_.push_back((left ? 1 : 0) | (right ? 2 : 0));
@@ -2029,10 +2043,10 @@ private:
   std::deque<int> sign_history_;
   Command last_command_;
   bool target_marker_{false}, publish_debug_{false};
-  bool has_started_{false}, aruco_stop_active_{false};
+  bool has_started_{false}, aruco_stop_active_{false}, red_stop_armed_{false};
   std::atomic<bool> red_stop_latched_{false};
   double aruco_pause_started_{0.0};
-  int light_state_{0}, green_streak_{0}, red_streak_{0};
+  int light_state_{0}, green_streak_{0}, red_streak_{0}, aruco_arm_streak_{0};
   std::atomic<bool> lane_reset_requested_{false};
   bool fork_scene_observed_{false};
   int fork_pair_streak_{0}, fork_clear_streak_{0};

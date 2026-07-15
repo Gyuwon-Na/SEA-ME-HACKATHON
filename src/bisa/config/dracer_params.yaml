@@ -95,7 +95,7 @@ detector:
   # + 상태 게이팅 + 연속 투표가 오탐을 걸러주므로 낮춰도 비교적 안전.
   conf:
     traffic_green: 0.40  # green 검출 최소 신뢰도
-    traffic_red: 0.7    # 원거리 red 후보; 색 후처리 통과 시에만 최종 인정
+    traffic_red: 0.5    # ArUco 이후 red 정지 gate로 티셔츠 오탐을 막고 연속 검출 확보
     sign_left: 0.65      # 좌 표지 최소 신뢰도
     sign_right: 0.65     # 우 표지 최소 신뢰도
   sign_vote_k: 9         # 최근 n프레임 중 k회 이상 잡히면 표지 방향 확정

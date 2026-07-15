@@ -28,8 +28,8 @@ def test_light_roi_is_cropped_and_detection_returns_to_full_frame():
 
     detections = detector.infer(np.zeros((480, 640, 3), dtype=np.uint8), 1.0)
 
-    assert sources[0].shape == (305, 250, 3)
-    assert detections[0].bbox == (26.0, 56.0, 46.0, 76.0)
+    assert sources[0].shape == (327, 311, 3)
+    assert detections[0].bbox == (109.0, 34.0, 129.0, 54.0)
 
 
 def test_light_roi_bounds_stay_inside_frame_and_non_empty():
@@ -44,4 +44,4 @@ def test_light_roi_bounds_stay_inside_frame_and_non_empty():
 def test_inference_roi_uses_configured_crop():
     detector = BestPthDetector(AutonomousConfig(), "unused")
 
-    assert detector.inference_roi() == [0.025, 0.075, 0.415, 0.710]
+    assert detector.inference_roi() == [0.155, 0.030, 0.640, 0.710]

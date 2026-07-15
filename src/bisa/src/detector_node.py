@@ -254,8 +254,14 @@ class BisaDetectorNode(Node):
             )
 
         now_sec = self.get_clock().now().nanoseconds / 1e9
-        processed = preprocess_frame(frame, self.config.color_correction)
         inference_roi = self.detector.inference_roi()
+        processed = frame
+        if self.config.color_correction.enabled:
+            x0, y0, x1, y1 = self.detector.roi_bounds(frame.shape, inference_roi)
+            processed = frame.copy()
+            processed[y0:y1, x0:x1] = preprocess_frame(
+                frame[y0:y1, x0:x1], self.config.color_correction
+            )
         previous_infer_time = self.detector.last_infer_time
         started = time.perf_counter()
         detections = self.detector.infer(processed, now_sec, inference_roi)

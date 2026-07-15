@@ -122,12 +122,6 @@ struct Detection {
   cv::Rect2f box;
 };
 
-struct StampedFrame {
-  int32_t sec{0};
-  uint32_t nanosec{0};
-  cv::Mat image;
-};
-
 struct Command {
   double throttle{0.0};
   double steering{0.0};
@@ -1384,18 +1378,6 @@ private:
       if (publish_debug_) {
         latest_frame_ = frame;
         latest_lane_debug_ = std::move(lane_debug);
-        frame_history_.push_back(
-          StampedFrame{msg->header.stamp.sec, msg->header.stamp.nanosec, frame});
-        while (frame_history_.size() > 40U) frame_history_.pop_front();
-        if (msg->header.stamp.sec == detection_source_sec_ &&
-          msg->header.stamp.nanosec == detection_source_nanosec_)
-        {
-          detection_frame_ = frame;
-          debug_detections_ = detections_;
-          debug_light_roi_ = light_roi_;
-          detection_stamp_ = rclcpp::Time(
-            msg->header.stamp.sec, msg->header.stamp.nanosec, RCL_ROS_TIME);
-        }
       }
     }
     processed_image_sec_ = msg->header.stamp.sec;
@@ -1429,12 +1411,10 @@ private:
     if (detection_count_ == 0U) detection_report_started_ = detection_now;
     ++detection_count_;
     const uint64_t sequence = static_cast<uint64_t>(msg->data[0]);
-    const int32_t source_sec = static_cast<int32_t>(msg->data[1]);
-    const uint32_t source_nanosec = static_cast<uint32_t>(msg->data[2]);
     const int light = static_cast<int>(msg->data[3]);
     const int count = std::max(0, static_cast<int>(msg->data[4]));
     std::vector<Detection> detections;
-    std::array<double, 4> light_roi{0.20, 0.00, 0.80, 0.55};
+    std::array<double, 4> light_roi{0.155, 0.030, 0.640, 0.710};
     bool left = false, right = false;
     for (int i = 0; i < count; ++i) {
       const std::size_t base = 5 + static_cast<std::size_t>(i) * 6;
@@ -1471,17 +1451,6 @@ private:
     light_received_ = now();
     detections_ = detections;
     light_roi_ = light_roi;
-    detection_source_sec_ = source_sec;
-    detection_source_nanosec_ = source_nanosec;
-    for (auto it = frame_history_.rbegin(); it != frame_history_.rend(); ++it) {
-      if (it->sec == source_sec && it->nanosec == source_nanosec) {
-        detection_frame_ = it->image;
-        debug_detections_ = detections;
-        debug_light_roi_ = light_roi;
-        detection_stamp_ = rclcpp::Time(source_sec, source_nanosec, RCL_ROS_TIME);
-        break;
-      }
-    }
     sign_history_.push_back((left ? 1 : 0) | (right ? 2 : 0));
     while (static_cast<int>(sign_history_.size()) > config_.sign_vote_n) sign_history_.pop_front();
     const double report_sec = std::chrono::duration<double>(
@@ -1957,18 +1926,10 @@ private:
       cmd = last_command_; state = state_name(state_);
       markers = marker_ids_; marker_corners = marker_corners_;
       light = light_state_; config = config_;
-      light_roi = debug_light_roi_;
-      if (!detection_frame_.empty()) {
-        frame = detection_frame_.clone();
-        detections = debug_detections_;
-        frame_stamp = detection_stamp_;
-      } else {
-        // Never put stale boxes on a newer frame when an exact match is not
-        // available.  The live image remains useful, simply without boxes.
-        frame = latest_frame_.clone();
-        detections.clear();
-        frame_stamp = now();
-      }
+      light_roi = light_roi_;
+      frame = latest_frame_.clone();
+      detections = detections_;
+      frame_stamp = now();
     }
     frame = corrected_debug_frame(frame, config);
     draw_lane_debug(frame, lane_debug, lane, cmd);
@@ -2039,11 +2000,9 @@ private:
   sensor_msgs::msg::CompressedImage::SharedPtr pending_image_;
   LaneObs latest_lane_;
   LaneDebug latest_lane_debug_;
-  cv::Mat latest_frame_, detection_frame_;
-  std::vector<Detection> detections_, debug_detections_;
-  std::array<double, 4> light_roi_{0.20, 0.00, 0.80, 0.55};
-  std::array<double, 4> debug_light_roi_{0.20, 0.00, 0.80, 0.55};
-  std::deque<StampedFrame> frame_history_;
+  cv::Mat latest_frame_;
+  std::vector<Detection> detections_;
+  std::array<double, 4> light_roi_{0.155, 0.030, 0.640, 0.710};
   std::vector<int> marker_ids_;
   std::vector<std::vector<cv::Point2f>> marker_corners_;
   std::deque<int> sign_history_;
@@ -2056,12 +2015,9 @@ private:
   bool fork_scene_observed_{false};
   int fork_pair_streak_{0}, fork_clear_streak_{0};
   uint64_t detection_sequence_{0}, last_light_sequence_{0};
-  int32_t detection_source_sec_{0};
-  uint32_t detection_source_nanosec_{0};
   int32_t processed_image_sec_{0};
   uint32_t processed_image_nanosec_{0};
   rclcpp::Time light_received_{0, 0, RCL_ROS_TIME};
-  rclcpp::Time detection_stamp_{0, 0, RCL_ROS_TIME};
   MissionState state_{MissionState::OUT_WAIT_GREEN};
   RouteMode route_mode_{RouteMode::OUT};
   std::string fork_decision_, image_topic_, control_topic_, detections_topic_;

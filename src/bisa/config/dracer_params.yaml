@@ -95,7 +95,7 @@ detector:
   # + 상태 게이팅 + 연속 투표가 오탐을 걸러주므로 낮춰도 비교적 안전.
   conf:
     traffic_green: 0.40  # green 검출 최소 신뢰도
-    traffic_red: 0.5    # ArUco 이후 red 정지 gate로 티셔츠 오탐을 막고 연속 검출 확보
+    traffic_red: 0.7    # 원거리 red 후보; 색 후처리 통과 시에만 최종 인정
     sign_left: 0.65      # 좌 표지 최소 신뢰도
     sign_right: 0.65     # 우 표지 최소 신뢰도
   sign_vote_k: 9         # 최근 n프레임 중 k회 이상 잡히면 표지 방향 확정
@@ -109,7 +109,7 @@ throttle:
   # 정지 명령(0.0)을 제외한 모든 이동 명령은 [speed_min, speed_max] 안에 있다.
   # 직선 deadband 안에서는 speed_max, 조향/곡률이 커지면 speed_min 쪽으로 감속한다.
   speed_min: 0.20          # 이동 속도밴드 하한(정지 아닌 최저속)
-  speed_max: 0.25          # 직선 목표 최고속
+  speed_max: 0.24          # 직선 목표 최고속
   launch_cap: 0.22         # 호환용(OUT은 초록~표지판까지 speed_max+곡률 스케줄 사용)
   s_curve_cap: 0.22        # IN 진입/랩 골격용 속도 상한
   fork_approach_cap: 0.22  # 표지판 확정 직후 방향별 선제 강제 조향 속도 상한
@@ -129,9 +129,9 @@ throttle:
 steering:
   steer_sign: 1              # 조향 부호(좌우 반대로 나가면 -1)
   lookahead_m: 0.67          # 직선 순수추종 전방주시 거리(m)
-  curve_lookahead_min_m: 0.34 # 최대 곡률에서의 최소 전방주시(짧은 맵 코너용)
+  curve_lookahead_min_m: 0.35 # 최대 곡률에서의 최소 전방주시(짧은 맵 코너용)
   curve_response_power: 0.80  # 1보다 작아 커브 진입부터 반응하되 sqrt보다 완만
-  curve_steer_boost: 0.2     # 커브에서만 곡률 비례 조향 증폭(직선=0% 증폭)
+  curve_steer_boost: 0.25    # 커브에서만 곡률 비례 조향 증폭(직선=0% 증폭)
   fork_curve_scale: 0.25      # 갈림길 ROI가 만든 가짜 곡률/상쇄 영향을 25%로 제한
   fork_forced_error: 0.3    # LEFT(+)/RIGHT(-)에 동일 크기로 적용하는 방향 목표
   wheelbase_m: 0.17          # 실차 전·후차축 거리(자전거 모델, m)

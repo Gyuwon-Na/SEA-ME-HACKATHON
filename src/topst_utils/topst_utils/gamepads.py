@@ -222,9 +222,9 @@ class ShanWanGamepad(Joystick):
             self.gamepad_input.button_x = button_state
         elif button_name == 'A':
             self.gamepad_input.button_a = button_state
-        elif button_name == 'B':            # calibration steering trim up
+        elif button_name == 'B':            # AUTO left nudge / calibration trim up
             self.gamepad_input.button_b = button_state
-        elif button_name == 'Y':            # calibration steering trim down
+        elif button_name == 'Y':            # AUTO right nudge / calibration trim down
             self.gamepad_input.button_y = button_state
         elif button_name == 'SELECT':
             self.gamepad_input.button_select = button_state

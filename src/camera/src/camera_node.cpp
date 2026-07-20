@@ -19,7 +19,7 @@ class CameraNode : public rclcpp::Node {
 public:
   CameraNode() : Node("camera_node") {
     config_file_ = declare_parameter<std::string>(
-      "vehicle_config_file", "/home/topst/D-Racer-Kit/src/config/vehicle_config.yaml");
+      "vehicle_config_file", "/home/topst/HD-Racer-Kit/src/config/vehicle_config.yaml");
     topic_ = declare_parameter<std::string>("publish_topic", "/camera/image/compressed");
     publish_hz_ = declare_parameter<double>("publish_hz", 20.0);
     capture_hz_ = declare_parameter<double>("capture_hz", 20.0);

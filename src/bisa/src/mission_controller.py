@@ -274,26 +274,6 @@ class OutCourseFSM(BaseCourseFSM):
         self.lane_reset_requested = False
         return requested
 
-    def control_directional_fork(
-        self, lane: LaneObs, cap: float, steer_limit: float
-    ) -> ControlCmd:
-        """Steers toward the selected screen side without waiting for the X."""
-
-        if self.fork_decision == "LEFT":
-            target_error = self.config.steering.fork_forced_error
-        else:
-            target_error = -self.config.steering.fork_forced_error
-        virtual_lane = lane.with_center_error(target_error)
-        steer = self.controller.steering_from_lane(
-            virtual_lane,
-            steer_limit=steer_limit,
-            curve_scale=self.config.steering.fork_curve_scale,
-        )
-        throttle = self.controller.throttle_scheduler(
-            cap, steer, lane.curvature
-        )
-        return ControlCmd(throttle, steer)
-
     def step(
         self,
         lane: LaneObs,
@@ -317,21 +297,11 @@ class OutCourseFSM(BaseCourseFSM):
             decision = self.fork_decision_update(detector)
             if decision is not None:
                 self.fork_decision = decision
-                self.transition("OUT_FORK_SIGN_ADVANCE", now)
-            return cmd
-
-        if self.state == "OUT_FORK_SIGN_ADVANCE":
-            cmd = self.control_directional_fork(
-                lane,
-                self.config.throttle.fork_approach_cap,
-                self.config.steering.fork_approach_limit,
-            )
-            if self.elapsed(now) >= self.config.mission.fork_sign_advance_sec:
                 self.transition("OUT_FORK_COMMIT", now)
             return cmd
 
         if self.state == "OUT_FORK_COMMIT":
-            cmd = self.control_directional_fork(
+            cmd = self.controller.lane_follow(
                 lane,
                 self.config.throttle.fork_commit_cap,
                 self.config.steering.fork_limit,

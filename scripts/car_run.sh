@@ -12,7 +12,7 @@
 #   bash scripts/car_run.sh stop                          # graceful stop
 #
 # Optional environment overrides:
-#   ROS_DOMAIN_ID=2 SESSION=dracer WS=~/D-Racer-Kit bash scripts/car_run.sh start
+#   ROS_DOMAIN_ID=2 SESSION=dracer WS=~/HD-Racer-Kit bash scripts/car_run.sh start
 #   CAR_ROS_LOCALHOST_ONLY=0 bash scripts/car_run.sh start  # PC GUI/viz tuning only
 #   LAUNCH_FILE=vehicle.launch.py bash scripts/car_run.sh start
 #

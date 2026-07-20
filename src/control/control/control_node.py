@@ -18,7 +18,7 @@ def get_default_vehicle_config_path():
         candidate = base_path / 'src' / 'config' / 'vehicle_config.yaml'
         if candidate.exists():
             return str(candidate)
-    return '/home/topst/D-Racer/src/config/vehicle_config.yaml'
+    return '/home/topst/HD-Racer-Kit/src/config/vehicle_config.yaml'
 
 
 class ControlNode(Node):

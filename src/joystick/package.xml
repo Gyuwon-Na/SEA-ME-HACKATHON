@@ -10,6 +10,7 @@
   <depend>rclpy</depend>
   <depend>control_msgs</depend>
   <depend>joystick_msgs</depend>
+  <depend>std_msgs</depend>
   <depend>topst_utils</depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>control</exec_depend>

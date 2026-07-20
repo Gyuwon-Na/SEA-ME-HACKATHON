@@ -85,13 +85,11 @@ def test_fork_sections_keep_safe_speed_caps():
     config = AutonomousConfig()
     throttle = config.throttle
 
-    assert throttle.fork_approach_cap == pytest.approx(0.24)
     assert throttle.fork_commit_cap == pytest.approx(0.22)
     assert throttle.post_fork_cap == pytest.approx(throttle.speed_max)
     assert all(
         throttle.speed_min <= cap <= throttle.speed_max
         for cap in (
-            throttle.fork_approach_cap,
             throttle.fork_commit_cap,
             throttle.post_fork_cap,
         )
@@ -168,7 +166,6 @@ class _SignDetector:
 def test_out_fsm_curve_follows_until_sign_then_resumes_after_fork():
     config = AutonomousConfig()
     config.detector.light_confirm_frames = 1
-    config.mission.fork_sign_advance_sec = 0.2
     config.mission.fork_commit_min_sec = 0.1
     config.mission.fork_commit_timeout_sec = 0.3
     controller = LaneController(config)
@@ -186,10 +183,6 @@ def test_out_fsm_curve_follows_until_sign_then_resumes_after_fork():
 
     left = _SignDetector("sign_left")
     fsm.step(lane, left, 20.1)
-    assert fsm.state == "OUT_FORK_SIGN_ADVANCE"
-    advance_cmd = fsm.step(lane, left, 20.15)
-    assert advance_cmd.steering > 0.0
-    fsm.step(lane, left, 20.4)
     assert fsm.state == "OUT_FORK_COMMIT"
 
     fork_lane = LaneObs(
@@ -197,9 +190,9 @@ def test_out_fsm_curve_follows_until_sign_then_resumes_after_fork():
         fork_seen=True,
         left_branch=PathCandidate(0.55, 0.1, 100.0),
     )
-    cmd = fsm.step(fork_lane, left, 20.5)
-    assert cmd.steering > 0.0
-    for now in (20.6, 20.7, 20.8):
+    cmd = fsm.step(fork_lane, left, 20.2)
+    assert config.throttle.speed_min <= cmd.throttle <= config.throttle.fork_commit_cap
+    for now in (20.3, 20.4, 20.5):
         fsm.step(lane, left, now)
     assert fsm.state == "OUT_RESUME"
     assert fsm.consume_lane_reset_request()
@@ -213,12 +206,9 @@ def test_out_fsm_curve_follows_until_sign_then_resumes_after_fork():
     assert fsm.state == "OUT_RESUME"
 
 
-@pytest.mark.parametrize(
-    ("sign_name", "expected_sign"),
-    [("sign_left", 1.0), ("sign_right", -1.0)],
-)
-def test_out_sign_advance_forces_direction_before_x_is_visible(sign_name, expected_sign):
-    """A confirmed sign must steer immediately even with no X branch contour."""
+@pytest.mark.parametrize("sign_name", ["sign_left", "sign_right"])
+def test_out_sign_selects_fork_without_forced_steering(sign_name):
+    """A confirmed sign must select the fork without synthesizing steering."""
 
     config = AutonomousConfig()
     config.detector.light_confirm_frames = 1
@@ -231,9 +221,8 @@ def test_out_sign_advance_forces_direction_before_x_is_visible(sign_name, expect
     fsm.step(lane, _SignDetector(sign_name), 1.1)
     cmd = fsm.step(lane, _SignDetector(sign_name), 1.15)
 
-    assert fsm.state == "OUT_FORK_SIGN_ADVANCE"
-    assert cmd.steering * expected_sign > 0.0
-    assert abs(cmd.steering) > 0.05
+    assert fsm.state == "OUT_FORK_COMMIT"
+    assert cmd.steering == pytest.approx(0.0)
 
 
 def test_lane_perception_reset_clears_all_pre_fork_fit_history():
@@ -421,33 +410,6 @@ def test_curve_shortens_controller_lookahead_for_more_steering():
         steer_limit=config.steering.s_curve_limit,
     )
     assert 0.85 <= abs(full_curve) <= config.steering.s_curve_limit
-
-
-def test_fork_curve_scale_prevents_false_curvature_cancellation():
-    """Fork far-ROI curvature must not cancel a strong near-center error."""
-
-    config = AutonomousConfig()
-    config.steering.rate_limit_per_cmd = 1.0
-    lane = LaneObs(
-        valid=True,
-        center_error=0.60,
-        curvature=1.0,
-        signed_curvature=-0.60,
-    )
-
-    unscaled = LaneController(config).steering_from_lane(
-        lane,
-        steer_limit=1.0,
-        curve_scale=1.0,
-    )
-    fork_scaled = LaneController(config).steering_from_lane(
-        lane,
-        steer_limit=1.0,
-        curve_scale=config.steering.fork_curve_scale,
-    )
-
-    assert unscaled == pytest.approx(0.0, abs=1e-6)
-    assert fork_scaled > 0.0
 
 
 def test_hough_curve_fit_is_second_order():

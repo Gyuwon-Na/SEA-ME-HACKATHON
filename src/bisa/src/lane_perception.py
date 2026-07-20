@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Optional
 
 import cv2
@@ -31,11 +31,6 @@ class LaneObs:
     fork_seen: bool = False
     left_branch: Optional[PathCandidate] = None
     right_branch: Optional[PathCandidate] = None
-
-    def with_center_error(self, center_error: float) -> "LaneObs":
-        """Returns a copy with a different target error for virtual branch control."""
-
-        return replace(self, center_error=center_error, valid=True)
 
 
 def clamp(value: float, low: float, high: float) -> float:

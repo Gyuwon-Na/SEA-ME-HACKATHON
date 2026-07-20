@@ -55,15 +55,27 @@ def default_model_path():
     return str(Path(get_package_share_directory("bisa")) / "checkpoints" / "best_ncnn_model")
 
 
+def default_vehicle_config_path():
+    """Return the shared vehicle config from the active workspace."""
+
+    for base_path in Path(__file__).resolve().parents:
+        candidate = base_path / "src" / "config" / "vehicle_config.yaml"
+        if candidate.exists():
+            return str(candidate)
+    return "/home/topst/HD-Racer-Kit/src/config/vehicle_config.yaml"
+
+
 def generate_launch_description():
     """Launch camera, control, joystick, and the compute node — all on the car."""
 
     route_mode = LaunchConfiguration("route_mode")
     config_file = LaunchConfiguration("config_file")
+    vehicle_config_file = LaunchConfiguration("vehicle_config_file")
     model_path = LaunchConfiguration("model_path")
     image_topic = LaunchConfiguration("image_topic")
     control_topic = LaunchConfiguration("control_topic")
     detections_topic = LaunchConfiguration("detections_topic")
+    nudge_topic = LaunchConfiguration("nudge_topic")
     mission_state_topic = LaunchConfiguration("mission_state_topic")
     enable_camera = LaunchConfiguration("enable_camera")
     enable_joystick = LaunchConfiguration("enable_joystick")
@@ -95,10 +107,14 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("route_mode", default_value="OUT"),
         DeclareLaunchArgument("config_file", default_value=default_config_path()),
+        DeclareLaunchArgument(
+            "vehicle_config_file", default_value=default_vehicle_config_path()
+        ),
         DeclareLaunchArgument("model_path", default_value=default_model_path()),
         DeclareLaunchArgument("image_topic", default_value="/camera/image/compressed"),
         DeclareLaunchArgument("control_topic", default_value="/control"),
         DeclareLaunchArgument("detections_topic", default_value="/bisa/detections"),
+        DeclareLaunchArgument("nudge_topic", default_value="/bisa/drive_nudge"),
         DeclareLaunchArgument("mission_state_topic", default_value="/bisa/mission_state"),
         # Disable only for rosbag replay; production keeps the physical camera.
         DeclareLaunchArgument("enable_camera", default_value="true"),
@@ -139,6 +155,7 @@ def generate_launch_description():
             condition=IfCondition(enable_camera),
             parameters=[{
                 "publish_topic": image_topic,
+                "vehicle_config_file": vehicle_config_file,
                 "capture_hz": camera_hz,
                 "publish_hz": camera_hz,
                 "mjpg_passthrough": True,
@@ -157,6 +174,7 @@ def generate_launch_description():
             condition=IfCondition(enable_actuation),
             parameters=[{
                 "control_topic": control_topic,
+                "vehicle_config_file": vehicle_config_file,
                 "use_joystick_control": False,
                 "command_hz": pipeline_hz,
                 # battery_node is no longer part of the competition runtime;
@@ -176,6 +194,8 @@ def generate_launch_description():
                 "calibration_mode": False,
                 "start_in_manual": False,
                 "debug_log_enable": False,
+                "nudge_topic": nudge_topic,
+                "vehicle_config_file": vehicle_config_file,
             }],
         ),
 
@@ -211,6 +231,7 @@ def generate_launch_description():
                 "image_topic": image_topic,
                 "control_topic": control_topic,
                 "detections_topic": detections_topic,
+                "nudge_topic": nudge_topic,
                 "mission_state_topic": mission_state_topic,
                 "publish_debug_image": publish_debug_image,
                 "debug_image_hz": debug_image_hz,

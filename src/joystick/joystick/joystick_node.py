@@ -12,6 +12,7 @@ import yaml
 
 from control_msgs.msg import Control
 from joystick_msgs.msg import Joystick
+from std_msgs.msg import Int8
 from topst_utils.gamepads import ShanWanGamepad
 
 
@@ -20,7 +21,7 @@ def get_default_vehicle_config_path():
         candidate = base_path / 'src' / 'config' / 'vehicle_config.yaml'
         if candidate.exists():
             return str(candidate)
-    return '/home/topst/D-Racer/src/config/vehicle_config.yaml'
+    return '/home/topst/HD-Racer-Kit/src/config/vehicle_config.yaml'
 
 
 def get_default_data_acquisition_script_path():
@@ -28,7 +29,7 @@ def get_default_data_acquisition_script_path():
         candidate = base_path / 'src' / 'data_acquisition.sh'
         if candidate.exists():
             return str(candidate)
-    return '/home/topst/D-Racer/src/data_acquisition.sh'
+    return '/home/topst/HD-Racer-Kit/src/data_acquisition.sh'
 
 
 class JoystickNode(Node):
@@ -37,6 +38,7 @@ class JoystickNode(Node):
 
         # ROS parameters
         self.declare_parameter('publish_topic', 'joystick')
+        self.declare_parameter('nudge_topic', '/bisa/drive_nudge')
         self.declare_parameter('publish_hz', 50.0)
         self.declare_parameter('throttle_scale', 0.12)
         self.declare_parameter('throttle_deadzone', 0.05)
@@ -59,6 +61,7 @@ class JoystickNode(Node):
         self.declare_parameter('start_in_manual', False)
 
         publish_topic = str(self.get_parameter('publish_topic').value)
+        nudge_topic = str(self.get_parameter('nudge_topic').value)
         publish_hz = float(self.get_parameter('publish_hz').value)
         if publish_hz <= 0.0:
             raise ValueError('publish_hz must be greater than 0')
@@ -97,6 +100,8 @@ class JoystickNode(Node):
         self._prev_r1_pressed = False
         self._prev_y_pressed = False
         self._prev_b_pressed = False
+        self._prev_nudge_y_pressed = False
+        self._prev_nudge_b_pressed = False
         self._prev_x_pressed = False
         self._prev_start_pressed = False
         self._prev_a_pressed = False
@@ -112,6 +117,7 @@ class JoystickNode(Node):
         self.load_saved_calibration()
 
         self.joystick_pub = self.create_publisher(Joystick, publish_topic, 10)
+        self.nudge_pub = self.create_publisher(Int8, nudge_topic, 10)
         self.gamepad = ShanWanGamepad()
         self.latest_input = None
         self.lock = threading.Lock()
@@ -131,11 +137,13 @@ class JoystickNode(Node):
             )
 
         self.get_logger().info(
-            f'Joystick node started: topic={publish_topic}, publish_hz={self.publish_hz}, '
+            f'Joystick node started: topic={publish_topic}, nudge_topic={nudge_topic}, '
+            f'publish_hz={self.publish_hz}, '
             f'throttle_scale={self.throttle_scale}, throttle_deadzone={self.throttle_deadzone}, '
             f'steering_deadzone={self.steering_deadzone}, steering_axis={self.steering_axis}, '
             f'steering_trim={self.steering_trim}, calibration_mode={self.calibration_mode}, '
-            f'calibration_step={self.calibration_step}, vehicle_config_file={self.vehicle_config_file}, '
+            f'calibration_step={self.calibration_step}, '
+            f'vehicle_config_file={self.vehicle_config_file}, '
             f'data_acquisition_script={self.data_acquisition_script}, '
             f'accel_ratio={self.accel_ratio}, accel_ratio_step={self.accel_ratio_step}, '
             f'accel_ratio_min={self.accel_ratio_min}, accel_ratio_max={self.accel_ratio_max}, '
@@ -220,6 +228,35 @@ class JoystickNode(Node):
 
         self._prev_y_pressed = y_pressed
         self._prev_b_pressed = b_pressed
+
+    def update_nudge_from_buttons(self, data):
+        """Publish one autonomous nudge event per B/Y button press."""
+        b_pressed = bool(data.button_b)
+        y_pressed = bool(data.button_y)
+        b_edge = b_pressed and not self._prev_nudge_b_pressed
+        y_edge = y_pressed and not self._prev_nudge_y_pressed
+        self._prev_nudge_b_pressed = b_pressed
+        self._prev_nudge_y_pressed = y_pressed
+
+        # B/Y retain their steering-trim behavior while explicit calibration is
+        # active. In production calibration_mode is false, so B nudges LEFT and
+        # Y nudges RIGHT without changing the latched AUTO/MANUAL mode.
+        if (
+            self.calibration_mode
+            or self.manual_mode
+            or self.e_stop_latched
+            or bool(getattr(data, 'button_x', False))
+        ):
+            return
+        if b_edge and y_edge:
+            self.get_logger().warning('Ignoring simultaneous B/Y nudge buttons')
+            return
+        if b_edge:
+            self.nudge_pub.publish(Int8(data=1))
+            self.get_logger().info('Joystick nudge requested: LEFT (B)')
+        elif y_edge:
+            self.nudge_pub.publish(Int8(data=-1))
+            self.get_logger().info('Joystick nudge requested: RIGHT (Y)')
 
     def update_accel_ratio_from_buttons(self, data):
         l1_pressed = bool(data.button_L1)
@@ -350,6 +387,7 @@ class JoystickNode(Node):
                 data = self.gamepad.read_data()
                 self.update_accel_ratio_from_buttons(data)
                 self.update_steering_trim_from_buttons(data)
+                self.update_nudge_from_buttons(data)
                 self.update_e_stop_from_buttons(data)
                 self.update_mode_from_buttons(data)
                 self.update_recording_from_buttons(data)

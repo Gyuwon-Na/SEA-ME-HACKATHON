@@ -162,7 +162,6 @@ class ThrottleConfig:
     speed_max: float = 0.30
     launch_cap: float = 0.24
     s_curve_cap: float = 0.24
-    fork_approach_cap: float = 0.24
     fork_commit_cap: float = 0.22
     post_fork_cap: float = 0.30
     post_fork_min: float = 0.20
@@ -190,8 +189,6 @@ class SteeringConfig:
     curve_lookahead_min_m: float = 0.38
     curve_response_power: float = 0.65
     curve_steer_boost: float = 0.20
-    fork_curve_scale: float = 0.25
-    fork_forced_error: float = 0.45
     wheelbase_m: float = 0.17
     lateral_scale_m: float = 0.30
     max_steer_deg: float = 30.0
@@ -200,7 +197,6 @@ class SteeringConfig:
     rate_limit_per_cmd: float = 0.12
     straight_limit: float = 0.60
     s_curve_limit: float = 0.95
-    fork_approach_limit: float = 0.75
     fork_limit: float = 0.95
     post_fork_limit: float = 0.90
     lost_decay: float = 0.70
@@ -294,7 +290,6 @@ class MissionConfig:
 
     route_mode: str = "OUT"
     control_hz: float = 10.0
-    fork_sign_advance_sec: float = 1.5
     fork_commit_min_sec: float = 0.8
     fork_commit_timeout_sec: float = 1.8
     debug_log_hz: float = 1.0

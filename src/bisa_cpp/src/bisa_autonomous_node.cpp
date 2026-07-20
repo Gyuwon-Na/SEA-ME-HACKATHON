@@ -27,6 +27,7 @@
 #include <sensor_msgs/msg/compressed_image.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
+#include <std_msgs/msg/int8.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <yaml-cpp/yaml.h>
 
@@ -72,7 +73,6 @@ enum class MissionState {
   LANE_TEST,
   OUT_WAIT_GREEN,
   OUT_TO_FORK,
-  OUT_FORK_SIGN_ADVANCE,
   OUT_FORK_COMMIT,
   OUT_RESUME,
   IN_WAIT_GREEN,
@@ -87,7 +87,6 @@ const char * state_name(MissionState state) {
     case MissionState::LANE_TEST: return "LANE_TEST";
     case MissionState::OUT_WAIT_GREEN: return "OUT_WAIT_GREEN";
     case MissionState::OUT_TO_FORK: return "OUT_TO_FORK";
-    case MissionState::OUT_FORK_SIGN_ADVANCE: return "OUT_FORK_SIGN_ADVANCE";
     case MissionState::OUT_FORK_COMMIT: return "OUT_FORK_COMMIT";
     case MissionState::OUT_RESUME: return "OUT_RESUME";
     case MissionState::IN_WAIT_GREEN: return "IN_WAIT_GREEN";
@@ -170,18 +169,17 @@ struct Config {
   double lane_width_min{0.10}, lane_width_max{0.70}, lane_width_smoothing{0.20};
   double single_lane_switch_margin{0.08}, max_center_jump{0.35};
   double speed_min{0.20}, speed_max{0.30};
-  double launch_cap{0.24}, s_curve_cap{0.24}, fork_approach_cap{0.24};
+  double launch_cap{0.24}, s_curve_cap{0.24};
   double fork_commit_cap{0.22}, post_fork_cap{0.30}, post_fork_min{0.20};
   double ramp_up{0.015}, steer_slowdown{0.22}, curvature_slowdown{0.08};
   double straight_steer_deadband{0.05}, straight_curvature_deadband{0.05};
   int steer_sign{1};
   double lookahead{0.60}, curve_lookahead_min{0.38};
-  double curve_response_power{0.65}, curve_steer_boost{0.20}, fork_curve_scale{0.25};
-  double fork_forced_error{0.45};
+  double curve_response_power{0.65}, curve_steer_boost{0.20};
   double wheelbase{0.17}, lateral_scale{0.30};
   double max_steer_deg{30.0}, pp_gain{1.0}, curve_blend{1.0};
   double steer_rate{0.12}, straight_limit{0.60}, s_curve_limit{0.95};
-  double fork_approach_limit{0.75}, fork_limit{0.95}, post_fork_limit{0.90};
+  double fork_limit{0.95}, post_fork_limit{0.90};
   double lost_decay{0.70};
   bool color_enabled{true};
   double color_clahe_clip{2.0};
@@ -191,8 +189,13 @@ struct Config {
   double contrast{1.0}, saturation{1.0}, gamma{1.0};
   int sign_vote_k{6}, sign_vote_n{10}, light_confirm_frames{8};
   double light_stale_sec{0.75};
-  double fork_sign_advance_sec{1.5};
   double fork_commit_min_sec{0.8}, fork_commit_timeout_sec{1.8};
+  bool nudge_enabled{true};
+  double nudge_duration_sec{0.10};
+  double nudge_left_steering{0.15}, nudge_left_throttle{0.15};
+  double nudge_left_throttle_duration_sec{0.10};
+  double nudge_right_steering{-0.15}, nudge_right_throttle{0.15};
+  double nudge_right_throttle_duration_sec{0.10};
   int aruco_target_id{3}, aruco_confirm_frames{2}, aruco_clear_frames{3};
 };
 
@@ -257,7 +260,6 @@ Config load_config(const std::string & path) {
   const auto throttle = root["throttle"];
   read_value(throttle, "speed_min", c.speed_min); read_value(throttle, "speed_max", c.speed_max);
   read_value(throttle, "launch_cap", c.launch_cap); read_value(throttle, "s_curve_cap", c.s_curve_cap);
-  read_value(throttle, "fork_approach_cap", c.fork_approach_cap);
   read_value(throttle, "fork_commit_cap", c.fork_commit_cap);
   read_value(throttle, "post_fork_cap", c.post_fork_cap); read_value(throttle, "post_fork_min", c.post_fork_min);
   read_value(throttle, "ramp_up_per_cmd", c.ramp_up); read_value(throttle, "steer_slowdown", c.steer_slowdown);
@@ -269,13 +271,10 @@ Config load_config(const std::string & path) {
   read_value(steering, "curve_lookahead_min_m", c.curve_lookahead_min);
   read_value(steering, "curve_response_power", c.curve_response_power);
   read_value(steering, "curve_steer_boost", c.curve_steer_boost);
-  read_value(steering, "fork_curve_scale", c.fork_curve_scale);
-  read_value(steering, "fork_forced_error", c.fork_forced_error);
   read_value(steering, "wheelbase_m", c.wheelbase); read_value(steering, "lateral_scale_m", c.lateral_scale);
   read_value(steering, "max_steer_deg", c.max_steer_deg); read_value(steering, "pp_gain", c.pp_gain);
   read_value(steering, "curve_blend", c.curve_blend); read_value(steering, "rate_limit_per_cmd", c.steer_rate);
   read_value(steering, "straight_limit", c.straight_limit); read_value(steering, "s_curve_limit", c.s_curve_limit);
-  read_value(steering, "fork_approach_limit", c.fork_approach_limit);
   read_value(steering, "fork_limit", c.fork_limit); read_value(steering, "post_fork_limit", c.post_fork_limit);
   read_value(steering, "lost_decay", c.lost_decay);
   const auto color = root["color_correction"];
@@ -288,9 +287,17 @@ Config load_config(const std::string & path) {
   read_value(color, "saturation", c.saturation);
   read_value(color, "gamma", c.gamma);
   const auto mission = root["mission"];
-  read_value(mission, "fork_sign_advance_sec", c.fork_sign_advance_sec);
   read_value(mission, "fork_commit_min_sec", c.fork_commit_min_sec);
   read_value(mission, "fork_commit_timeout_sec", c.fork_commit_timeout_sec);
+  const auto nudge = root["joystick_nudge"];
+  read_value(nudge, "enabled", c.nudge_enabled);
+  read_value(nudge, "duration_sec", c.nudge_duration_sec);
+  read_value(nudge, "left_steering", c.nudge_left_steering);
+  read_value(nudge, "left_throttle", c.nudge_left_throttle);
+  read_value(nudge, "left_throttle_duration_sec", c.nudge_left_throttle_duration_sec);
+  read_value(nudge, "right_steering", c.nudge_right_steering);
+  read_value(nudge, "right_throttle", c.nudge_right_throttle);
+  read_value(nudge, "right_throttle_duration_sec", c.nudge_right_throttle_duration_sec);
   const auto aruco = root["aruco"];
   read_value(aruco, "target_id", c.aruco_target_id);
   read_value(aruco, "confirm_frames", c.aruco_confirm_frames);
@@ -856,24 +863,6 @@ public:
     return {previous_throttle_, previous_steer_};
   }
 
-  Command directional_fork(
-    const LaneObs & lane, const std::string & decision,
-    double cap, double steer_limit)
-  {
-    LaneObs virtual_lane = lane;
-    // Start moving toward the signed side target as soon as the sign vote is
-    // locked.  Do not wait for, or steer at, a contour in the upper arm of the
-    // X: at that point the car has already spent too long driving straight.
-    virtual_lane.valid = true;
-    if (decision == "LEFT") {
-      virtual_lane.center_error = c_.fork_forced_error;
-    } else if (decision == "RIGHT") {
-      virtual_lane.center_error = -c_.fork_forced_error;
-    }
-    const double steer = steering(virtual_lane, steer_limit, c_.fork_curve_scale);
-    return {throttle(cap, steer, lane.curvature), steer};
-  }
-
   void stop() { previous_throttle_ = 0.0; }
 
 private:
@@ -934,6 +923,7 @@ public:
     image_topic_ = declare_parameter<std::string>("image_topic", "/camera/image/compressed");
     control_topic_ = declare_parameter<std::string>("control_topic", "/control");
     detections_topic_ = declare_parameter<std::string>("detections_topic", "/bisa/detections");
+    nudge_topic_ = declare_parameter<std::string>("nudge_topic", "/bisa/drive_nudge");
     mission_state_topic_ = declare_parameter<std::string>(
       "mission_state_topic", "/bisa/mission_state");
     publish_debug_ = declare_parameter<bool>("publish_debug_image", false);
@@ -973,6 +963,12 @@ public:
       detections_topic_, rclcpp::QoS(1),
       std::bind(&BisaAutonomousNode::detection_callback, this, std::placeholders::_1),
       detection_options);
+    rclcpp::SubscriptionOptions nudge_options;
+    nudge_options.callback_group = control_group_;
+    nudge_sub_ = create_subscription<std_msgs::msg::Int8>(
+      nudge_topic_, rclcpp::QoS(10),
+      std::bind(&BisaAutonomousNode::nudge_callback, this, std::placeholders::_1),
+      nudge_options);
     control_pub_ = create_publisher<control_msgs::msg::Control>(control_topic_, 10);
     green_pub_ = create_publisher<std_msgs::msg::Bool>("/detect_green", 10);
     red_pub_ = create_publisher<std_msgs::msg::Bool>("/detect_red", 10);
@@ -1078,10 +1074,6 @@ private:
       "steering.curve_response_power", config_.curve_response_power);
     config_.curve_steer_boost = declare_parameter<double>(
       "steering.curve_steer_boost", config_.curve_steer_boost);
-    config_.fork_curve_scale = declare_parameter<double>(
-      "steering.fork_curve_scale", config_.fork_curve_scale);
-    config_.fork_forced_error = declare_parameter<double>(
-      "steering.fork_forced_error", config_.fork_forced_error);
     config_.wheelbase = declare_parameter<double>("steering.wheelbase_m", config_.wheelbase);
     config_.lateral_scale = declare_parameter<double>("steering.lateral_scale_m", config_.lateral_scale);
     config_.max_steer_deg = declare_parameter<double>("steering.max_steer_deg", config_.max_steer_deg);
@@ -1089,8 +1081,6 @@ private:
     config_.curve_blend = declare_parameter<double>("steering.curve_blend", config_.curve_blend);
     config_.straight_limit = declare_parameter<double>("steering.straight_limit", config_.straight_limit);
     config_.s_curve_limit = declare_parameter<double>("steering.s_curve_limit", config_.s_curve_limit);
-    config_.fork_approach_limit = declare_parameter<double>(
-      "steering.fork_approach_limit", config_.fork_approach_limit);
     config_.fork_limit = declare_parameter<double>("steering.fork_limit", config_.fork_limit);
     config_.post_fork_limit = declare_parameter<double>(
       "steering.post_fork_limit", config_.post_fork_limit);
@@ -1101,8 +1091,6 @@ private:
     config_.speed_max = declare_parameter<double>("throttle.speed_max", config_.speed_max);
     config_.launch_cap = declare_parameter<double>("throttle.launch_cap", config_.launch_cap);
     config_.s_curve_cap = declare_parameter<double>("throttle.s_curve_cap", config_.s_curve_cap);
-    config_.fork_approach_cap = declare_parameter<double>(
-      "throttle.fork_approach_cap", config_.fork_approach_cap);
     config_.fork_commit_cap = declare_parameter<double>(
       "throttle.fork_commit_cap", config_.fork_commit_cap);
     config_.post_fork_cap = declare_parameter<double>(
@@ -1112,12 +1100,26 @@ private:
     config_.straight_curvature_deadband = declare_parameter<double>(
       "throttle.straight_curvature_deadband", config_.straight_curvature_deadband);
 
-    config_.fork_sign_advance_sec = declare_parameter<double>(
-      "mission.fork_sign_advance_sec", config_.fork_sign_advance_sec);
     config_.fork_commit_min_sec = declare_parameter<double>(
       "mission.fork_commit_min_sec", config_.fork_commit_min_sec);
     config_.fork_commit_timeout_sec = declare_parameter<double>(
       "mission.fork_commit_timeout_sec", config_.fork_commit_timeout_sec);
+    config_.nudge_enabled = declare_parameter<bool>(
+      "joystick_nudge.enabled", config_.nudge_enabled);
+    config_.nudge_duration_sec = declare_parameter<double>(
+      "joystick_nudge.duration_sec", config_.nudge_duration_sec);
+    config_.nudge_left_steering = declare_parameter<double>(
+      "joystick_nudge.left_steering", config_.nudge_left_steering);
+    config_.nudge_left_throttle = declare_parameter<double>(
+      "joystick_nudge.left_throttle", config_.nudge_left_throttle);
+    config_.nudge_left_throttle_duration_sec = declare_parameter<double>(
+      "joystick_nudge.left_throttle_duration_sec", config_.nudge_left_throttle_duration_sec);
+    config_.nudge_right_steering = declare_parameter<double>(
+      "joystick_nudge.right_steering", config_.nudge_right_steering);
+    config_.nudge_right_throttle = declare_parameter<double>(
+      "joystick_nudge.right_throttle", config_.nudge_right_throttle);
+    config_.nudge_right_throttle_duration_sec = declare_parameter<double>(
+      "joystick_nudge.right_throttle_duration_sec", config_.nudge_right_throttle_duration_sec);
     config_.aruco_confirm_frames = declare_parameter<int>(
       "aruco.confirm_frames", config_.aruco_confirm_frames);
     config_.aruco_clear_frames = declare_parameter<int>(
@@ -1213,12 +1215,6 @@ private:
         else if (name == "steering.curve_steer_boost") {
           next.curve_steer_boost = parameter.as_double();
         }
-        else if (name == "steering.fork_curve_scale") {
-          next.fork_curve_scale = parameter.as_double();
-        }
-        else if (name == "steering.fork_forced_error") {
-          next.fork_forced_error = parameter.as_double();
-        }
         else if (name == "steering.wheelbase_m") next.wheelbase = parameter.as_double();
         else if (name == "steering.lateral_scale_m") next.lateral_scale = parameter.as_double();
         else if (name == "steering.max_steer_deg") next.max_steer_deg = parameter.as_double();
@@ -1226,9 +1222,6 @@ private:
         else if (name == "steering.curve_blend") next.curve_blend = parameter.as_double();
         else if (name == "steering.straight_limit") next.straight_limit = parameter.as_double();
         else if (name == "steering.s_curve_limit") next.s_curve_limit = parameter.as_double();
-        else if (name == "steering.fork_approach_limit") {
-          next.fork_approach_limit = parameter.as_double();
-        }
         else if (name == "steering.fork_limit") next.fork_limit = parameter.as_double();
         else if (name == "steering.post_fork_limit") next.post_fork_limit = parameter.as_double();
         else if (name == "steering.rate_limit_per_cmd") next.steer_rate = parameter.as_double();
@@ -1237,9 +1230,6 @@ private:
         else if (name == "throttle.speed_max") next.speed_max = parameter.as_double();
         else if (name == "throttle.launch_cap") next.launch_cap = parameter.as_double();
         else if (name == "throttle.s_curve_cap") next.s_curve_cap = parameter.as_double();
-        else if (name == "throttle.fork_approach_cap") {
-          next.fork_approach_cap = parameter.as_double();
-        }
         else if (name == "throttle.fork_commit_cap") {
           next.fork_commit_cap = parameter.as_double();
         }
@@ -1252,14 +1242,33 @@ private:
         else if (name == "throttle.straight_curvature_deadband") {
           next.straight_curvature_deadband = parameter.as_double();
         }
-        else if (name == "mission.fork_sign_advance_sec") {
-          next.fork_sign_advance_sec = parameter.as_double();
-        }
         else if (name == "mission.fork_commit_min_sec") {
           next.fork_commit_min_sec = parameter.as_double();
         }
         else if (name == "mission.fork_commit_timeout_sec") {
           next.fork_commit_timeout_sec = parameter.as_double();
+        }
+        else if (name == "joystick_nudge.enabled") next.nudge_enabled = parameter.as_bool();
+        else if (name == "joystick_nudge.duration_sec") {
+          next.nudge_duration_sec = parameter.as_double();
+        }
+        else if (name == "joystick_nudge.left_steering") {
+          next.nudge_left_steering = parameter.as_double();
+        }
+        else if (name == "joystick_nudge.left_throttle") {
+          next.nudge_left_throttle = parameter.as_double();
+        }
+        else if (name == "joystick_nudge.left_throttle_duration_sec") {
+          next.nudge_left_throttle_duration_sec = parameter.as_double();
+        }
+        else if (name == "joystick_nudge.right_steering") {
+          next.nudge_right_steering = parameter.as_double();
+        }
+        else if (name == "joystick_nudge.right_throttle") {
+          next.nudge_right_throttle = parameter.as_double();
+        }
+        else if (name == "joystick_nudge.right_throttle_duration_sec") {
+          next.nudge_right_throttle_duration_sec = parameter.as_double();
         }
         else if (name == "aruco.confirm_frames") {
           next.aruco_confirm_frames = parameter.as_int();
@@ -1288,7 +1297,6 @@ private:
       next.morph_open >= 1 && next.morph_close >= 1 && next.lookahead > 0.0 && next.wheelbase > 0.0 &&
       next.curve_lookahead_min > 0.0 && next.curve_lookahead_min <= next.lookahead &&
       next.curve_response_power > 0.0 && next.curve_steer_boost >= 0.0 &&
-      next.fork_curve_scale >= 0.0 && next.fork_curve_scale <= 1.0 &&
       next.max_steer_deg > 0.0 && next.gamma > 0.0 &&
       next.hough_top >= 0.0 && next.hough_top < 0.90 &&
       next.hough_curve_top >= next.hough_top && next.hough_curve_top <= 0.90 &&
@@ -1303,17 +1311,25 @@ private:
     };
     const bool speed_valid = next.speed_min >= 0.0 && next.speed_min <= next.speed_max &&
       next.speed_max <= 1.0 && valid_cap(next.launch_cap) && valid_cap(next.s_curve_cap) &&
-      valid_cap(next.fork_approach_cap) && valid_cap(next.fork_commit_cap) &&
+      valid_cap(next.fork_commit_cap) &&
       valid_cap(next.post_fork_cap) && next.straight_steer_deadband >= 0.0 &&
       next.straight_steer_deadband <= 1.0 && next.straight_curvature_deadband >= 0.0 &&
-      next.straight_curvature_deadband <= 1.0 && next.fork_forced_error >= 0.0 &&
-      next.fork_forced_error <= 1.0 &&
-      next.fork_sign_advance_sec >= 0.0 && next.fork_commit_min_sec >= 0.0 &&
+      next.straight_curvature_deadband <= 1.0 && next.fork_commit_min_sec >= 0.0 &&
       next.fork_commit_timeout_sec >= next.fork_commit_min_sec &&
+      next.nudge_duration_sec >= 0.0 && next.nudge_duration_sec <= 5.0 &&
+      next.nudge_left_throttle_duration_sec >= 0.0 &&
+      next.nudge_left_throttle_duration_sec <= 5.0 &&
+      next.nudge_right_throttle_duration_sec >= 0.0 &&
+      next.nudge_right_throttle_duration_sec <= 5.0 &&
+      std::abs(next.nudge_left_steering) <= 1.0 &&
+      std::abs(next.nudge_right_steering) <= 1.0 &&
+      next.nudge_left_throttle >= 0.0 && next.nudge_left_throttle <= 1.0 &&
+      next.nudge_right_throttle >= 0.0 && next.nudge_right_throttle <= 1.0 &&
       next.aruco_confirm_frames >= 1 && next.aruco_clear_frames >= 1;
     if (!lab_valid || !geometry_valid || !speed_valid || std::abs(next.steer_sign) != 1) {
       return rcl_interfaces::msg::SetParametersResult().set__successful(false).set__reason(
-        "invalid LAB bounds, ROI/kernel size, steering geometry/sign, gamma, or speed band");
+        "invalid LAB bounds, ROI/kernel size, steering geometry/sign, gamma, speed band, "
+        "or joystick nudge settings");
     }
 
     if (lane_changed) {
@@ -1363,8 +1379,7 @@ private:
       std::lock_guard<std::mutex> lock(mutex_);
       include_yellow = route_mode_ != RouteMode::OUT || !config_.out_white_only;
       aruco_target_id = config_.aruco_target_id;
-      if (state_ == MissionState::OUT_FORK_SIGN_ADVANCE ||
-        state_ == MissionState::OUT_FORK_COMMIT)
+      if (state_ == MissionState::OUT_FORK_COMMIT)
       {
         fork_direction = fork_decision_ == "LEFT" ? ForkDirection::LEFT :
           fork_decision_ == "RIGHT" ? ForkDirection::RIGHT : ForkDirection::NONE;
@@ -1513,6 +1528,42 @@ private:
     }
   }
 
+  void nudge_callback(const std_msgs::msg::Int8::SharedPtr msg) {
+    const int direction = static_cast<int>(msg->data);
+    if (direction != -1 && direction != 1) {
+      RCLCPP_WARN(get_logger(), "ignoring invalid joystick nudge direction: %d", direction);
+      return;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    const bool left = direction > 0;
+    const double throttle_duration = left ?
+      config_.nudge_left_throttle_duration_sec :
+      config_.nudge_right_throttle_duration_sec;
+    if (!config_.nudge_enabled ||
+      (config_.nudge_duration_sec <= 0.0 && throttle_duration <= 0.0))
+    {
+      return;
+    }
+    if (!has_started_ || red_stop_latched_.load() || aruco_stop_active_) {
+      RCLCPP_INFO(
+        get_logger(), "joystick nudge ignored while mission motion is stopped");
+      return;
+    }
+
+    active_nudge_direction_ = direction;
+    const auto steady_now = std::chrono::steady_clock::now();
+    nudge_steering_until_ = steady_now +
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+      std::chrono::duration<double>(config_.nudge_duration_sec));
+    nudge_throttle_until_ = steady_now +
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+      std::chrono::duration<double>(throttle_duration));
+    RCLCPP_INFO(
+      get_logger(), "joystick nudge active: %s steering=%.3f s throttle=%.3f s",
+      left ? "LEFT" : "RIGHT", config_.nudge_duration_sec, throttle_duration);
+  }
+
   std::optional<std::string> sign_decision() const {
     int left = 0, right = 0;
     for (int bits : sign_history_) { left += bits & 1 ? 1 : 0; right += bits & 2 ? 1 : 0; }
@@ -1534,12 +1585,8 @@ private:
   void transition(MissionState next, double now_sec) {
     if (state_ == next) return;
     RCLCPP_INFO(get_logger(), "mission state: %s -> %s", state_name(state_), state_name(next));
-    if (next == MissionState::OUT_FORK_SIGN_ADVANCE) {
-      fork_scene_observed_ = false;
-      fork_pair_streak_ = 0;
-      fork_clear_streak_ = 0;
-    }
     if (next == MissionState::OUT_FORK_COMMIT) {
+      fork_scene_observed_ = false;
       fork_pair_streak_ = 0;
       fork_clear_streak_ = 0;
     }
@@ -1565,19 +1612,6 @@ private:
           lane, config_.speed_max, config_.straight_limit);
         if (auto decision = sign_decision()) {
           fork_decision_ = *decision;
-          transition(MissionState::OUT_FORK_SIGN_ADVANCE, now_sec);
-        }
-        return cmd;
-      }
-
-      case MissionState::OUT_FORK_SIGN_ADVANCE: {
-        // Apply the same signed directional nudge for LEFT and RIGHT.
-        fork_scene_observed_ =
-          fork_scene_observed_ || lane.branch_scene_ambiguous;
-        auto cmd = controller_.directional_fork(
-          lane, fork_decision_, config_.fork_approach_cap,
-          config_.fork_approach_limit);
-        if (now_sec - entered_ >= config_.fork_sign_advance_sec) {
           lane_reset_requested_.store(true);
           transition(MissionState::OUT_FORK_COMMIT, now_sec);
         }
@@ -1590,17 +1624,21 @@ private:
         constexpr int clear_confirm_ticks = 3;
         fork_scene_observed_ =
           fork_scene_observed_ || lane.branch_scene_ambiguous;
-        // Only the sign-scoped outer-corridor pair may take steering authority.
-        // A generic center pair is never accepted while the island is visible.
+        // The sign only selects the outer corridor; it never synthesizes a
+        // steering target. While the island is visible, reject a generic center
+        // pair until perception returns the sign-scoped corridor. The joystick
+        // B/Y nudge remains the only non-visual directional steering impulse.
         const bool pair_candidate =
           lane.valid && lane.both_lanes && lane.branch_pair_selected;
         fork_pair_streak_ = pair_candidate ?
           std::min(fork_pair_streak_ + 1, pair_confirm_ticks) : 0;
         const bool pair_locked = fork_pair_streak_ >= pair_confirm_ticks;
-        auto cmd = pair_locked ?
-          controller_.follow(lane, config_.fork_commit_cap, config_.fork_limit) :
-          controller_.directional_fork(
-            lane, fork_decision_, config_.fork_commit_cap, config_.fork_limit);
+        LaneObs control_lane = lane;
+        if (lane.branch_scene_ambiguous && !lane.branch_pair_selected) {
+          control_lane.valid = false;
+        }
+        auto cmd = controller_.follow(
+          control_lane, config_.fork_commit_cap, config_.fork_limit);
         const bool island_cleared =
           fork_scene_observed_ && pair_locked && !lane.branch_scene_ambiguous;
         fork_clear_streak_ = island_cleared ?
@@ -1669,6 +1707,7 @@ private:
     int light;
     std::vector<int> markers;
     Command cmd;
+    bool nudge_throttle_applied = false;
     double speed_max;
     std::optional<std::string> decision;
     std::string mission_state;
@@ -1695,6 +1734,7 @@ private:
         RCLCPP_INFO(get_logger(), "global ArUco stop cleared; resume mission");
       }
       if (red_stop_latched_.load() || aruco_stop_active_) {
+        active_nudge_direction_ = 0;
         controller_.stop();
         cmd = {};
       } else {
@@ -1703,6 +1743,26 @@ private:
           state_ != MissionState::IN_WAIT_GREEN)
         {
           has_started_ = true;
+        }
+        if (!config_.nudge_enabled) active_nudge_direction_ = 0;
+        if (active_nudge_direction_ != 0) {
+          const auto steady_now = std::chrono::steady_clock::now();
+          const bool steering_active = steady_now < nudge_steering_until_;
+          const bool throttle_active = steady_now < nudge_throttle_until_;
+          const bool left = active_nudge_direction_ > 0;
+          if (steering_active) {
+            cmd.steering = config_.steer_sign *
+              (left ? config_.nudge_left_steering : config_.nudge_right_steering);
+          }
+          if (throttle_active) {
+            cmd.throttle = left ?
+              config_.nudge_left_throttle : config_.nudge_right_throttle;
+            nudge_throttle_applied = true;
+          }
+          if (!steering_active && !throttle_active) {
+            active_nudge_direction_ = 0;
+            RCLCPP_INFO(get_logger(), "joystick nudge complete; autonomous control resumed");
+          }
         }
       }
       last_command_ = cmd;
@@ -1718,7 +1778,8 @@ private:
       output.steering = red_latched ? 0.0F :
         static_cast<float>(clamp(cmd.steering, -1.0, 1.0));
       output.throttle = red_latched ? 0.0F :
-        static_cast<float>(clamp(cmd.throttle, 0.0, speed_max));
+        static_cast<float>(clamp(
+          cmd.throttle, 0.0, nudge_throttle_applied ? 1.0 : speed_max));
       control_pub_->publish(output);
     }
     green_pub_->publish(std_msgs::msg::Bool().set__data(light == 1));
@@ -2057,7 +2118,9 @@ private:
   MissionState state_{MissionState::OUT_WAIT_GREEN};
   RouteMode route_mode_{RouteMode::OUT};
   std::string fork_decision_, image_topic_, control_topic_, detections_topic_;
-  std::string mission_state_topic_;
+  std::string mission_state_topic_, nudge_topic_;
+  int active_nudge_direction_{0};
+  std::chrono::steady_clock::time_point nudge_steering_until_{}, nudge_throttle_until_{};
   double entered_{0.0}, debug_hz_{5.0}, perception_hz_{20.0}, control_hz_{20.0};
   double detection_hz_target_{20.0};
   uint64_t perception_count_{0}, detection_count_{0};
@@ -2069,6 +2132,7 @@ private:
   rclcpp::CallbackGroup::SharedPtr control_group_, debug_group_;
   rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr image_sub_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr detection_sub_;
+  rclcpp::Subscription<std_msgs::msg::Int8>::SharedPtr nudge_sub_;
   rclcpp::Publisher<control_msgs::msg::Control>::SharedPtr control_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr green_pub_, red_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr sign_pub_, aruco_pub_, state_pub_;
